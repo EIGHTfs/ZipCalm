@@ -13,7 +13,7 @@ export const TASK_PHASE = Object.freeze({
   DELETING: 'deleting',
 });
 
-// 顺序表：进度条/步骤指示器按此顺序渲染
+// 顺序表：进度条与步骤条按此顺序渲染
 export const TASK_PHASE_ORDER = Object.freeze([
   TASK_PHASE.PRECHECK,
   TASK_PHASE.SCANNING,
