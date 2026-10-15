@@ -1,0 +1,10 @@
+# 第三方参考代码：可用 git_clone 随时重新拉取，不入库
+参考项目/
+
+# 运行时产物
+node_modules/
+storage/
+*.log
+*.tmp
+.DS_Store
+@eaDir/
