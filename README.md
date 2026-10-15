@@ -47,7 +47,7 @@
 
 **优先成熟的库，不为「少依赖」而自研轮子。**
 
-- 前端：Vue 3（SFC）+ vue-router + pinia + axios + dayjs + pretty-bytes；构建 Vite + @vitejs/plugin-vue
+- 前端：Vue 3（SFC）+ vue-router + pinia + axios + dayjs + pretty-bytes；图标 **lucide-vue-next**、看板图表 **uplot**；构建 Vite + @vitejs/plugin-vue
 - 后端：Fastify；压缩 archiver（zip）/ node-tar（tar、tar.gz、tar.zst）；监控 systeminformation + pidusage
 - 系统级：`zstd` 命令（tar.zst 的默认实现，可用 WASM 兜底）
 - 不引入：7z / rar（v1 范围外）、数据库（用 JSON/JSONL 落盘）、p-queue（v1 强制串行）、UI 组件库 / Tailwind
