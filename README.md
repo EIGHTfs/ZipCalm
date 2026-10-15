@@ -52,6 +52,19 @@
 - 系统级：`zstd` 命令（tar.zst 的默认实现，可用 WASM 兜底）
 - 不引入：7z / rar（v1 范围外）、数据库（用 JSON/JSONL 落盘）、p-queue（v1 强制串行）、UI 组件库 / Tailwind
 
+**库收口策略（换库改动量最小化）**：第三方库只允许在**唯一入口** import，由 `npm run check:drift` 门禁钉死（已挂到 `build` 前，违规即构建失败）：
+
+| 库 | 唯一入口 |
+|---|---|
+| `lucide-vue-next` | `web/src/components/common/Icon.vue` |
+| `uplot` | `web/src/components/metrics/TrendChart.vue` |
+| `axios` | `web/src/api/client.js` |
+| `dayjs` / `pretty-bytes` | `web/src/utils/format.js` |
+| 压缩库（archiver / node-tar） | 各自的格式包 `server/plugins/formats/<id>/` |
+
+**框架级依赖（Vue / vue-router / pinia / Fastify）不做收口** —— 换框架等于重写，包一层适配只会增加间接层而无收益。
+门禁扫描器为正则实现（剥离注释后匹配 `import` / `export-from` / 动态 `import()` / `require`），已知边界：不支持极端多行 import 与 TS 装饰器；需要更强保证时再评估引入 AST 解析器。
+
 > 本项目**不追求零依赖**。取舍是「部署可靠 + 开发效率优先」：除 `zstd` 外全部依赖均为纯 JS，无原生编译，NAS 上无需构建工具链。
 > 目录与框架约定见 [docs/12-项目目录结构.md](docs/12-项目目录结构.md) 第三节。
 

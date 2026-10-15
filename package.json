@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite --config web/vite.config.js",
-    "build": "vite build --config web/vite.config.js",
-    "preview": "vite preview --config web/vite.config.js"
+    "build": "node scripts/check-drift.js && vite build --config web/vite.config.js",
+    "preview": "vite preview --config web/vite.config.js",
+    "check:drift": "node scripts/check-drift.js"
   },
   "dependencies": {
     "vue": "^3",

@@ -5,22 +5,21 @@
 // 为什么这里列出格式：格式清单的唯一来源是 shared/format-list.js，
 // 侧边栏直接消费它，也是「前端不硬编码枚举」的活证据（删掉 shared 里的格式，这里立刻少一项）。
 //
-// F1.1 变更：图标从「手写内联 SVG path 常量表」改为 **lucide-vue-next** 组件。
-// 原因：项目原则是「优先成熟库，不自研轮子」——手写 path 属于自研图标集，
-// 增删改都要自己维护；lucide 按需 import 且 tree-shakable，打包体积只算用到的几个。
-// 原手写表已按 safe-delete 备份（见交付汇报里的回收点路径），不在此保留死代码。
+// 图标演进：手写内联 SVG（F1）→ 直接 import lucide 组件（F1.1）→ **Icon.vue 收口组件（F1.2）**。
+// 现在本文件**不再 import 任何图标库**，只写业务语义名（files/tasks/metrics/settings/storage/formats）；
+// 「语义名 → 图标库组件」的映射只在 components/common/Icon.vue 一处，换库时调用方零改动。
 
 import { RouterLink } from 'vue-router';
-import { Archive, ChartColumn, FileArchive, Folder, HardDrive, Settings } from 'lucide-vue-next';
 
+import Icon from '../common/Icon.vue';
 import { FORMATS, ROUTES } from '../../constants/index.js';
 
-// 导航项：icon 直接存 lucide 组件（模板里用 <component :is>）
+// 导航项：icon 存**语义名**（不存组件），模板里交给 <Icon name="..." />
 const navItems = [
-  { to: ROUTES.FILES, label: '文件浏览', icon: Folder },
-  { to: ROUTES.TASKS, label: '压缩任务', icon: Archive },
-  { to: ROUTES.METRICS, label: '性能看板', icon: ChartColumn },
-  { to: ROUTES.SETTINGS, label: '设置', icon: Settings },
+  { to: ROUTES.FILES, label: '文件浏览', icon: 'files' },
+  { to: ROUTES.TASKS, label: '压缩任务', icon: 'tasks' },
+  { to: ROUTES.METRICS, label: '性能看板', icon: 'metrics' },
+  { to: ROUTES.SETTINGS, label: '设置', icon: 'settings' },
 ];
 </script>
 
@@ -35,9 +34,9 @@ const navItems = [
           :to="item.to"
           class="nav-item"
         >
+          <!-- 颜色继承 currentColor（由 .nav-item 控制），选中态自动跟随 -->
           <span class="nav-item__icon" aria-hidden="true">
-            <!-- size/stroke 与手写版视觉对齐；颜色继承 currentColor，高亮态自动跟随 -->
-            <component :is="item.icon" :size="16" :stroke-width="1.8" />
+            <Icon :name="item.icon" :size="16" />
           </span>
           <span>{{ item.label }}</span>
         </RouterLink>
@@ -46,7 +45,7 @@ const navItems = [
 
     <section class="sidebar__section">
       <h2 class="sidebar__title">
-        <HardDrive :size="13" :stroke-width="1.8" aria-hidden="true" />
+        <Icon name="storage" :size="13" />
         存储卷
       </h2>
       <ul class="tree">
@@ -57,7 +56,7 @@ const navItems = [
 
     <section class="sidebar__section">
       <h2 class="sidebar__title">
-        <FileArchive :size="13" :stroke-width="1.8" aria-hidden="true" />
+        <Icon name="formats" :size="13" />
         支持格式
       </h2>
       <ul class="tree">
