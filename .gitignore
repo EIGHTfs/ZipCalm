@@ -2,8 +2,10 @@
 参考项目/
 
 # 运行时产物
-node_modules/
+# node_modules 不带斜杠：同时匹配真实目录与软链形态（本机软链到可执行盘）
+node_modules
 storage/
+web/dist/
 *.log
 *.tmp
 .DS_Store

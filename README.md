@@ -43,6 +43,18 @@
 9. **前端借网盘骨架，压缩提到操作第一位**；网页端鼠标优先，触屏只做「长按=右键」最小兼容。
 10. **API 从第一天为 APK 铺路**：/api/v1 版本化、任务 UUID、SSE、双认证、Range、机器可读错误码。
 
+## 技术选型原则
+
+**优先成熟的库，不为「少依赖」而自研轮子。**
+
+- 前端：Vue 3（SFC）+ vue-router + pinia + axios + dayjs + pretty-bytes；构建 Vite + @vitejs/plugin-vue
+- 后端：Fastify；压缩 archiver（zip）/ node-tar（tar、tar.gz、tar.zst）；监控 systeminformation + pidusage
+- 系统级：`zstd` 命令（tar.zst 的默认实现，可用 WASM 兜底）
+- 不引入：7z / rar（v1 范围外）、数据库（用 JSON/JSONL 落盘）、p-queue（v1 强制串行）、UI 组件库 / Tailwind
+
+> 本项目**不追求零依赖**。取舍是「部署可靠 + 开发效率优先」：除 `zstd` 外全部依赖均为纯 JS，无原生编译，NAS 上无需构建工具链。
+> 目录与框架约定见 [docs/12-项目目录结构.md](docs/12-项目目录结构.md) 第三节。
+
 ## 讨论来源
 
 - https://chat.deepseek.com/share/g5al9q561a1ush4qgu
@@ -57,4 +69,22 @@
 - 它们是**别人的代码**，不属于本项目产物，建议将来建仓时写进 `.gitignore`；
 - 文档中的「文件:行号」绑定各仓库当时的 commit（commit 清单见 docs/10 第〇节），上游更新后行号会漂移；
 - 其中一个项目（wfmanager）的路径防护实测存在缺陷，docs/10 已注明**只抄 UI 不抄安全逻辑**。
+
+## 开发环境约束（依赖安装）
+
+本工作区挂载在 NFS 上且带 `noexec`（`/tmp` 同样是 noexec），`node_modules` 里的原生二进制（esbuild 等）在工作区内无法执行；**直接在项目根执行 `npm install` 也会失败**——npm 10 的 reify 阶段会先删掉项目根的 `node_modules` 软链（日志：`npm warn reify Removing non-directory`），再在 noexec 盘建真实目录，随后 esbuild postinstall 报 `EACCES`。
+
+因此依赖装在**本机可执行盘**，项目根只保留一个指向它的软链：
+
+```bash
+bash scripts/setup-dev-deps.sh                                     # 幂等；依赖目录取脚本内默认值（本机可执行盘）
+ZIPCALM_BUILD_DIR=/some/exec/path bash scripts/setup-dev-deps.sh   # 覆盖依赖目录（不写死路径）
+```
+
+- 依赖位置：`${ZIPCALM_BUILD_DIR:-<默认可执行盘路径>}/node_modules`（默认值见 `scripts/setup-dev-deps.sh`）；软链：项目根 `node_modules` → 该目录。
+- `package-lock.json` 落在依赖目录，不入库。
+- 日常在项目根执行：`npm run dev`（开发服务，端口 5180）、`npm run build`（产物 `web/dist`）、`npm run preview`。
+- **不要在项目根直接执行 `npm install` / `npm ci`**：会删掉软链并把依赖重新装到 noexec 盘。
+- 源码始终留在工作区（`shared/`、`web/`、`scripts/`、`package.json`）；依赖目录只是构建缓存，可随时重装。
+- 忽略规则：`.gitignore` 用 `node_modules`（不带斜杠，同时匹配真实目录与软链两种形态）与 `web/dist/`，依赖目录与构建产物都不会入库。
 
