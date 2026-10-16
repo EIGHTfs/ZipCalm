@@ -1,9 +1,10 @@
 <script setup>
 // 任务抽屉（M3）：进行中 + 历史 + 详情/操作
 //
-// 数据来自 `stores/tasks.js`；打开时补拉一次历史（历史来自 task-history.jsonl 的内存缓存）。
-// 操作：取消（运行中）、重试（failed/interrupted → **新建任务** + retryOf）、确认删除（waiting_confirm）。
-// 契约：docs/M0/数据模型.md §3.2（重试=新任务）、API 规范 §4.3（任务端点）
+// 数据来自 `stores/tasks.js`（SSE 单一数据源）；打开时补拉一次历史（历史来自 task-history.jsonl 的内存缓存）。
+// 操作：取消（运行中）、重试（failed/interrupted → **新建任务** + retryOf）、确认删除（waiting_confirm）、
+// **删除活动记录**（仅终态可点；非终态置灰，且要两步确认；只动 tasks.json，历史不动）。
+// 契约：docs/M0/数据模型.md §3.2（重试=新任务）/ §六 规则 8（DELETE 只删活动记录）、API 规范 §3.3。
 
 import { computed, ref, watch } from 'vue';
 
@@ -11,19 +12,33 @@ import { useTasksStore } from '../../stores/tasks.js';
 import { formatBytes, formatDateTime, formatPercent } from '../../utils/format.js';
 import { TASK_PHASE_LABELS, taskStatusLabel, taskStatusTone } from '../../constants/index.js';
 
+const TERMINAL_STATUSES = ['done', 'failed', 'aborted', 'interrupted'];
+
 const tasks = useTasksStore();
 const selectedId = ref(null);
 const detail = ref(null);
 const errorText = ref('');
 const busy = ref(false);
+/** 两步确认：非 null 时该行显示「确认删除 / 取消」 */
+const pendingDeleteId = ref(null);
 
 const unfinished = computed(() => tasks.unfinished);
-const finished = computed(() => tasks.list.filter((task) => ['done', 'aborted', 'failed', 'interrupted'].includes(task.status)));
+const retryable = computed(() => tasks.retryable);
+
+function isTerminal(task) {
+  return Boolean(task && TERMINAL_STATUSES.includes(task.status));
+}
 
 function phaseLabel(task) {
   if (!task) return '';
   if (task.phase === 'waiting_confirm') return '待确认删除';
   return TASK_PHASE_LABELS[task.phase] || task.phase || '';
+}
+
+function taskTitle(task) {
+  if (!task) return '';
+  if (task.sources && task.sources[0]) return task.sources[0].name;
+  return task.archivePath || task.id.slice(0, 8);
 }
 
 async function openDetail(id) {
@@ -46,12 +61,32 @@ async function run(action) {
     if (action === 'retry') {
       const created = await tasks.retry(selectedId.value);
       await openDetail(created.id);
+      return;
     }
     if (action === 'confirm-delete') {
       const count = detail.value && detail.value.delete ? detail.value.delete.targets.length : 0;
       await tasks.confirmDelete(selectedId.value, count);
     }
-    if (action !== 'retry') await openDetail(selectedId.value);
+    await openDetail(selectedId.value);
+  } catch (error) {
+    errorText.value = `[${error.code || 'ERROR'}] ${error.message}`;
+  } finally {
+    busy.value = false;
+  }
+}
+
+/** 删除活动记录（两步确认后的第二步）；删完列表由 store 本地即时更新 */
+async function confirmRemove(id) {
+  if (busy.value) return;
+  busy.value = true;
+  errorText.value = '';
+  try {
+    await tasks.remove(id);
+    pendingDeleteId.value = null;
+    if (selectedId.value === id) {
+      selectedId.value = null;
+      detail.value = null;
+    }
   } catch (error) {
     errorText.value = `[${error.code || 'ERROR'}] ${error.message}`;
   } finally {
@@ -62,10 +97,12 @@ async function run(action) {
 watch(
   () => tasks.drawerOpen,
   (open) => {
-    if (open) {
-      tasks.loadHistory(50).catch(() => {});
-      if (!selectedId.value && tasks.activeTask) openDetail(tasks.activeTask.id);
+    if (!open) {
+      pendingDeleteId.value = null;
+      return;
     }
+    tasks.loadHistory(50).catch(() => {});
+    if (!selectedId.value && tasks.activeTask) openDetail(tasks.activeTask.id);
   },
 );
 </script>
@@ -84,35 +121,86 @@ watch(
       <div class="drawer__body task-drawer__body">
         <div class="task-drawer__list">
           <h4>进行中（{{ unfinished.length }}）</h4>
-          <button
+          <div
             v-for="task in unfinished"
             :key="task.id"
-            type="button"
             class="task-drawer__row"
             :class="{ 'task-drawer__row--active': task.id === selectedId }"
             :data-task-id="task.id"
+            role="button"
+            tabindex="0"
             @click="openDetail(task.id)"
           >
             <span class="badge" :class="`badge--${taskStatusTone(task.status)}`">{{ taskStatusLabel(task.status) }}</span>
-            <span>{{ task.sources && task.sources[0] ? task.sources[0].name : (task.archivePath || task.id.slice(0, 8)) }}</span>
+            <span>{{ taskTitle(task) }}</span>
             <span class="card__desc">{{ formatPercent(task.progress.percent || 0) }}</span>
-          </button>
+            <span class="topbar__spacer"></span>
+            <button type="button" disabled title="任务未结束，请先取消再删除记录">删除</button>
+          </div>
           <p v-if="unfinished.length === 0" class="card__desc">没有进行中的任务。</p>
 
+          <h4>待重试 / 待清理（{{ retryable.length }}）</h4>
+          <div
+            v-for="task in retryable"
+            :key="task.id"
+            class="task-drawer__row"
+            :class="{ 'task-drawer__row--active': task.id === selectedId }"
+            :data-retryable-id="task.id"
+            role="button"
+            tabindex="0"
+            @click="openDetail(task.id)"
+          >
+            <span class="badge" :class="`badge--${taskStatusTone(task.status)}`">{{ taskStatusLabel(task.status) }}</span>
+            <span>{{ taskTitle(task) }}</span>
+            <span class="topbar__spacer"></span>
+            <button
+              v-if="pendingDeleteId !== task.id"
+              type="button"
+              :data-delete="task.id"
+              @click.stop="pendingDeleteId = task.id"
+            >
+              删除
+            </button>
+            <template v-else>
+              <button type="button" :disabled="busy" :data-confirm-delete="task.id" @click.stop="confirmRemove(task.id)">
+                确认删除
+              </button>
+              <button type="button" @click.stop="pendingDeleteId = null">取消</button>
+            </template>
+          </div>
+          <p v-if="retryable.length === 0" class="card__desc">没有待重试或待清理的记录。</p>
+
           <h4>历史（{{ tasks.history.length }}，最多 200）</h4>
-          <button
+          <div
             v-for="item in tasks.history"
             :key="item.id"
-            type="button"
             class="task-drawer__row"
             :class="{ 'task-drawer__row--active': item.id === selectedId }"
             :data-history-id="item.id"
+            role="button"
+            tabindex="0"
             @click="openDetail(item.id)"
           >
             <span class="badge" :class="`badge--${taskStatusTone(item.status)}`">{{ taskStatusLabel(item.status) }}</span>
-            <span>{{ item.sources && item.sources[0] ? item.sources[0].name : item.id.slice(0, 8) }}</span>
+            <span>{{ taskTitle(item) }}</span>
             <span class="card__desc">{{ formatDateTime(item.finishedAt || item.createdAt) }}</span>
-          </button>
+            <span class="topbar__spacer"></span>
+            <span v-if="!tasks.hasActiveRecord(item.id)" class="badge" data-history-only>仅历史</span>
+            <button
+              v-else-if="pendingDeleteId !== item.id"
+              type="button"
+              :data-delete="item.id"
+              @click.stop="pendingDeleteId = item.id"
+            >
+              删除
+            </button>
+            <template v-else>
+              <button type="button" :disabled="busy" :data-confirm-delete="item.id" @click.stop="confirmRemove(item.id)">
+                确认删除
+              </button>
+              <button type="button" @click.stop="pendingDeleteId = null">取消</button>
+            </template>
+          </div>
           <p v-if="tasks.history.length === 0" class="card__desc">暂无历史。</p>
         </div>
 
@@ -161,6 +249,15 @@ watch(
                 @click="run('confirm-delete')"
               >
                 确认删除（{{ detail.delete ? detail.delete.targets.length : 0 }} 项）
+              </button>
+              <button
+                v-if="isTerminal(detail)"
+                type="button"
+                :disabled="busy"
+                data-testid="detail-remove"
+                @click="confirmRemove(detail.id)"
+              >
+                删除记录
               </button>
             </div>
           </template>

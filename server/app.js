@@ -64,6 +64,27 @@ function createFastifyInstance(config) {
   });
 }
 
+/**
+ * 容错 JSON 解析：**空 body 视为无请求体**，而不是 400。
+ * Fastify 默认对"声明了 application/json 但 body 为空"的请求直接回 400
+ * （FST_ERR_CTP_EMPTY_JSON_BODY），这对 `DELETE /tasks/{id}` 这类天然无 body 的请求很不友好 ——
+ * 客户端只要习惯性带上 Content-Type: application/json 就会被拒。
+ */
+function registerTolerantJsonParser(app) {
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (request, body, done) => {
+    if (body === undefined || body === null || body === '') {
+      done(null, undefined);
+      return;
+    }
+    try {
+      done(null, JSON.parse(body));
+    } catch (error) {
+      error.statusCode = 400;
+      done(error, undefined);
+    }
+  });
+}
+
 /** 认证与路径白名单：authStore 先加载；pathGuard 提供 fsContext（后续所有层都依赖它） */
 async function registerSecurityLayer(app, { config, logger }) {
   const authStore = createAuthStore({ config: config.auth, logger, dataDir: config.storage.dataDir });
@@ -88,7 +109,16 @@ async function createTaskLayer({ config, logger }) {
   await store.init();
 
   const events = createTaskEvents({ retention: config.limits.sseRetention, logger });
-  const manager = createTaskManager({ logger, store, events });
+  const manager = createTaskManager({
+    logger,
+    store,
+    events,
+    // 任务活动记录保留策略（failed/interrupted 的上限，来自配置、不写死）
+    retention: {
+      max: config.limits.taskRetentionMax,
+      days: config.limits.taskRetentionDays,
+    },
+  });
   const recovery = await manager.recover();
   logger.info('任务状态已加载', { ...recovery, bootId: manager.bootId });
 
@@ -125,7 +155,7 @@ async function createCompressLayer({ config, logger, projectRoot, manager }) {
  *   否则服务器会一直等这些 hijack 的连接，导致优雅停止超时被 KILL；
  * - onClose：服务器关闭后收尾，把节流中的任务状态落盘（避免丢最后 500ms 的进度）。
  */
-function registerShutdownHooks(app, { sseClients, manager }) {
+function registerShutdownHooks(app, { sseClients, manager, authStore }) {
   app.addHook('preClose', async () => {
     for (const response of sseClients) {
       try {
@@ -139,6 +169,8 @@ function registerShutdownHooks(app, { sseClients, manager }) {
 
   app.addHook('onClose', async () => {
     await manager.flush();
+    // 认证存储同样要收尾：刚签发的 token 若还压在 50ms 节流里，不 flush 就会随进程一起丢（重启后客户端突然 401）
+    if (authStore && typeof authStore.flush === 'function') await authStore.flush();
   });
 }
 
@@ -164,6 +196,7 @@ export async function buildApp(options) {
 
   const app = createFastifyInstance(config);
   await app.register(cookie);
+  registerTolerantJsonParser(app);
 
   // 顺序有讲究：请求日志 → 错误处理 → 认证 → 路径白名单 → 任务/压缩层 → 路由
   registerRequestLogger(app, { logger });
@@ -195,7 +228,7 @@ export async function buildApp(options) {
     manager: taskLayer.manager,
     sseClients,
   });
-  registerShutdownHooks(app, { sseClients, manager: taskLayer.manager });
+  registerShutdownHooks(app, { sseClients, manager: taskLayer.manager, authStore });
 
   const meta = {
     version: APP_VERSION,

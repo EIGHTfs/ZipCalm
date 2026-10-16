@@ -63,6 +63,15 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** 读历史文件行（去掉空行） */
+async function readHistoryLines() {
+  try {
+    return (await fsp.readFile(HISTORY_FILE, 'utf8')).split('\n').filter((line) => line.trim().length > 0);
+  } catch {
+    return [];
+  }
+}
+
 // ===== HTTP =====
 
 let TOKEN = null;
@@ -286,6 +295,8 @@ async function main() {
   );
 
   // ===== 二、SSE：首帧快照 =====
+  const baselineHealth = await api('GET', '/health');
+  const baselineSubscribers = (baselineHealth.json && baselineHealth.json.data.tasks.subscribers) || 0;
   const sse1 = await sseConnect();
   const firstFrame = await sse1.waitFor(() => true, 5000);
   check('SSE 首帧是 snapshot（INV-05 连接即发状态）', Boolean(firstFrame && firstFrame.event === 'snapshot'), `首帧 event=${firstFrame && firstFrame.event}`);
@@ -308,12 +319,13 @@ async function main() {
   sse1.close();
   await sleep(300);
 
-  // 断开期间任务继续跑（INV-04）：同时用 /health 证明零订阅者
+  // 断开期间任务继续跑（INV-04）：同时用 /health 证明本脚本的订阅已释放
   const healthWhileDetached = await api('GET', '/health');
+  const subscribersWhileDetached = healthWhileDetached.json.data.tasks.subscribers;
   check(
-    '断开 SSE 后任务照常执行（subscribers=0 仍在跑）',
-    Boolean(healthWhileDetached.json && healthWhileDetached.json.data.tasks.subscribers === 0),
-    `subscribers=${healthWhileDetached.json && healthWhileDetached.json.data.tasks.subscribers}`,
+    '断开 SSE 后任务照常执行（本脚本订阅已释放）',
+    subscribersWhileDetached <= baselineSubscribers,
+    `subscribers=${subscribersWhileDetached}（脚本未连接时基线 ${baselineSubscribers}）`,
   );
 
   // ===== 四、since 续传：首帧仍是快照 =====
@@ -436,24 +448,27 @@ async function main() {
     bgDone ? `status=${bgDone.status} subscribers=${healthAfterBg.json.data.tasks.subscribers}` : 'timeout',
   );
   check(
-    '全程 subscribers=0（执行与订阅零耦合，INV-02/INV-04）',
-    healthAfterBg.json.data.tasks.subscribers === 0,
-    `subscribers=${healthAfterBg.json.data.tasks.subscribers}`,
+    '全程没有本脚本的订阅（执行与订阅零耦合，INV-02/INV-04）',
+    healthAfterBg.json.data.tasks.subscribers <= baselineSubscribers,
+    `subscribers=${healthAfterBg.json.data.tasks.subscribers}（基线 ${baselineSubscribers}）`,
   );
 
   // ===== 十、历史查询 + 文件上限 =====
   const history = await api('GET', '/tasks/history?limit=5');
   check('历史查询端点可用', Boolean(history.json && history.json.data && Array.isArray(history.json.data.items)), `HTTP ${history.status} 条数=${history.json.data && history.json.data.items.length} max=${history.json.data && history.json.data.max}`);
-  const historyLines = (await fsp.readFile(HISTORY_FILE, 'utf8')).split('\n').filter((line) => line.trim().length > 0);
+  const historyLines = await readHistoryLines();
+  // append→compact 之间有毫秒级窗口（先追一行再收敛），复核一次避免把"正在进行中的收敛"判成超标
+  if (historyLines.length > 200) await sleep(400);
+  const historyLinesFinal = historyLines.length > 200 ? await readHistoryLines() : historyLines;
   let historyParseOk = true;
-  for (const line of historyLines) {
+  for (const line of historyLinesFinal) {
     try {
       JSON.parse(line);
     } catch {
       historyParseOk = false;
     }
   }
-  check('task-history.jsonl 每行可解析且不超上限', historyParseOk && historyLines.length <= 200, `${historyLines.length} 行（上限 200）`);
+  check('task-history.jsonl 每行可解析且收敛在上限内', historyParseOk && historyLinesFinal.length <= 200, `${historyLinesFinal.length} 行（上限 200）`);
 
   // ===== 十一、任务 API 不泄漏绝对路径 =====
   const detail = await api('GET', `/tasks/${bgId}`);

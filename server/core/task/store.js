@@ -17,8 +17,6 @@ import path from 'node:path';
 
 import { readJson, writeJsonAtomic } from '../../lib/atomic-json.js';
 
-const HISTORY_TRIM_THRESHOLD_BYTES = 512 * 1024;
-
 /** 历史条目净化：历史文件可能由旧版本写入（含 absPath 等内部字段），读取/追加时一律剥掉，防止经 API 泄漏 */
 function sanitizeHistoryEntry(entry) {
   if (!entry || typeof entry !== 'object') return entry;
@@ -46,6 +44,8 @@ function buildContext(options) {
     saveTimer: null,
     savePending: null,
     saveInFlight: null,
+    /** 写入串行链（并发写会互相截断 .tmp，见 saveTasksNow 注释） */
+    writeChain: Promise.resolve(),
   };
 }
 
@@ -87,23 +87,34 @@ async function initStore(ctx) {
   return { tasks, historyCount: ctx.historyCache.length };
 }
 
-/** 立即原子落盘（写 <file>.tmp → rename：读到的永远是完整版本） */
+/** 单次写入（原子：写 <file>.tmp → rename） */
+async function writeTasksFile(ctx, tasks) {
+  try {
+    await writeJsonAtomic(ctx.tasksFile, tasks);
+  } catch (error) {
+    ctx.logger.error('tasks.json 写盘失败', { error: error.message });
+  }
+}
+
+/**
+ * 立即原子落盘。
+ * **必须串行**：`writeJsonAtomic` 用的是固定的 `<file>.tmp`，两个写并发会互相截断同一个临时文件，
+ * rename 之后 tasks.json 里就会出现"两份 JSON 粘在一起"的残骸（实测踩过：JSON.parse 报
+ * "Unexpected non-whitespace character after JSON"）。串行化后任一时刻只有一个写在跑，
+ * 也与"单进程单写者"（INV-09）的模型一致。
+ */
 async function saveTasksNow(ctx, tasks) {
   ctx.savePending = null;
   if (ctx.saveTimer) {
     clearTimeout(ctx.saveTimer);
     ctx.saveTimer = null;
   }
-  const write = (async () => {
-    try {
-      await writeJsonAtomic(ctx.tasksFile, tasks);
-    } catch (error) {
-      ctx.logger.error('tasks.json 写盘失败', { error: error.message });
-    }
-  })();
-  ctx.saveInFlight = write;
-  await write;
-  ctx.saveInFlight = null;
+  const previous = ctx.writeChain || Promise.resolve();
+  const chained = previous.then(() => writeTasksFile(ctx, tasks)).catch(() => {});
+  ctx.writeChain = chained;
+  ctx.saveInFlight = chained;
+  await chained;
+  if (ctx.saveInFlight === chained) ctx.saveInFlight = null;
 }
 
 /**
@@ -122,23 +133,25 @@ function scheduleTasksSave(ctx, tasks) {
   if (typeof ctx.saveTimer.unref === 'function') ctx.saveTimer.unref();
 }
 
-/** 收尾：把未决的节流内容立刻写出（优雅关闭时调用） */
+/** 收尾：等写入链跑完，并把未决的节流内容立刻写出（优雅关闭时调用） */
 async function flushStore(ctx) {
-  if (ctx.saveInFlight) await ctx.saveInFlight;
+  if (ctx.writeChain) await ctx.writeChain;
   if (ctx.savePending) await saveTasksNow(ctx, ctx.savePending);
 }
 
-/** 文件膨胀时按内存缓存重写（保留最近 historyMax 条，同样原子写） */
+/**
+ * 历史文件按条数收敛（契约：`task-history.jsonl` 保留最近 `limits.taskHistoryMax` 条）。
+ * 触发条件只看行数（不再设"文件多大才整理"的门槛，否则行数会长期超过上限 —— 实测踩过）；
+ * 超过就按内存缓存重写一次（200 行 ≈ 400KB，代价可控），仍用"临时文件 + rename"保证原子性。
+ */
 async function trimHistoryFile(ctx) {
   try {
-    const stat = await fs.stat(ctx.historyFile);
-    if (stat.size < HISTORY_TRIM_THRESHOLD_BYTES) return;
     const lines = (await fs.readFile(ctx.historyFile, 'utf8')).split('\n').filter((line) => line.trim().length > 0);
-    if (lines.length <= ctx.historyMax * 2) return;
+    if (lines.length <= ctx.historyMax) return;
     const tmpPath = `${ctx.historyFile}.tmp`;
     await fs.writeFile(tmpPath, `${ctx.historyCache.map((item) => JSON.stringify(item)).join('\n')}\n`, 'utf8');
     await fs.rename(tmpPath, ctx.historyFile);
-    ctx.logger.info('task-history.jsonl 已压缩重写', { kept: ctx.historyCache.length, was: lines.length });
+    ctx.logger.info('task-history.jsonl 已按条数收敛', { kept: ctx.historyCache.length, was: lines.length, max: ctx.historyMax });
   } catch (error) {
     ctx.logger.warn('task-history.jsonl 压缩失败（不影响运行）', { error: error.message });
   }

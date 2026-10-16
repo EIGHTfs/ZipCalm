@@ -73,6 +73,19 @@ export function createAuthStore({ config, logger, dataDir }) {
     await writeJsonAtomic(tokenFilePath, payload);
   }
 
+  /**
+   * 立即落盘（关停时调用）。
+   * 为什么需要：签发 token 后走的是 50ms 节流；若进程在这 50ms 内退出，
+   * 刚发出的 token 就没落盘 —— 重启后拿着有效凭据的客户端会突然 401（实测踩过）。
+   */
+  async function flush() {
+    if (persistTimer) {
+      clearTimeout(persistTimer);
+      persistTimer = null;
+    }
+    await persist();
+  }
+
   // ===== Session =====
 
   function createSession(user = username) {
@@ -199,6 +212,7 @@ export function createAuthStore({ config, logger, dataDir }) {
 
   return {
     load,
+    flush,
     sessionTtlMs,
     tokenTtlMs,
     createSession,

@@ -27,7 +27,9 @@
     "defaultPageSize": 200,
     "taskHistoryMax": 200,
     "sseRetention": 1000,
-    "sseHeartbeatMs": 15000
+    "sseHeartbeatMs": 15000,
+    "taskRetentionMax": 100,
+    "taskRetentionDays": 7
   },
   "compress": {
     "defaultFormat": "zip",

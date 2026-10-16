@@ -86,6 +86,14 @@ export const DEFAULT_CONFIG = {
     sseRetention: 1000,
     /** SSE 心跳间隔（防中间设备把长连接当空闲连接掐掉） */
     sseHeartbeatMs: 15000,
+    /**
+     * 任务活动记录保留条数（`failed`/`interrupted` 这两类"为可重试而保留"的终态上限，
+     * 数据模型 §六 规则 6）：超出即清理最旧的，避免 tasks.json 全量重写越来越慢。
+     * 上限走配置、不写死；`done`/`aborted` 本来就即写即移出，不参与该计数。
+     */
+    taskRetentionMax: 100,
+    /** 任务活动记录保留天数（与条数任一先到即清理） */
+    taskRetentionDays: 7,
   },
 
   log: {

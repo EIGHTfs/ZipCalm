@@ -39,6 +39,14 @@ function buildContext(deps) {
     store: deps.store,
     events: deps.events,
     bootId: crypto.randomUUID(),
+    /**
+     * 保留策略参数（来自配置，不写死；数据模型 §六 规则 6）：
+     * `failed`/`interrupted` 保留最近 max 条或 days 天，任一先到即清理。
+     */
+    retention: {
+      max: Number.isInteger(deps.retention && deps.retention.max) ? deps.retention.max : 100,
+      days: Number.isFinite(deps.retention && deps.retention.days) ? deps.retention.days : 7,
+    },
     /** Map<id, record>：record = {info（契约任务）、internal（绝对路径等）、runner、abortController、…} */
     tasks: new Map(),
     /** FIFO 队列（只存 id；按 createdAt 升序，§五） */
@@ -456,6 +464,8 @@ function finalizeTask(ctx, id, status, extra = {}) {
   // 历史追加 + 立即落盘（done/aborted 从 tasks.json 移除）
   void ctx.store.appendHistory(toApiTask(record));
   void persistNow(ctx);
+  // 每完成一个任务后按保留策略清一次（兜底，防 failed/interrupted 无上限增长）
+  void pruneRetention(ctx);
   return toApiTask(record);
 }
 
@@ -579,6 +589,73 @@ function markWaitingConfirm(ctx, id) {
   return toApiTask(record);
 }
 
+// ===== 保留策略（数据模型 §六 规则 6/7/8） =====
+
+/** 保留策略只针对"为可重试而保留的终态"；非终态是活任务，任何情况下都不参与 */
+const RETENTION_STATUSES = ['failed', 'interrupted'];
+
+function retentionCandidates(ctx) {
+  return [...ctx.tasks.values()].filter((record) => RETENTION_STATUSES.includes(record.info.status));
+}
+
+/**
+ * 纯函数：挑出应清理的记录 —— **最近 max 条之外** 或 **早于 days 天**（任一先到即清）。
+ * 按完成时间（缺省用 updatedAt/createdAt）从新到旧排序后判断，便于单测。
+ */
+function selectExpired(records, options) {
+  const cutoff = options.nowTs - options.days * 24 * 60 * 60 * 1000;
+  const finishedAtOf = (record) => record.info.finishedAt || record.info.updatedAt || record.info.createdAt;
+  const sorted = [...records].sort((a, b) => finishedAtOf(b) - finishedAtOf(a));
+  const expired = [];
+  sorted.forEach((record, index) => {
+    if (index >= options.max || finishedAtOf(record) < cutoff) expired.push(record);
+  });
+  return expired;
+}
+
+/** 执行清理（时机：启动 + 每完成一个任务后）；清理后立即原子落盘 */
+async function pruneRetention(ctx) {
+  const candidates = retentionCandidates(ctx);
+  if (candidates.length === 0) return { examined: 0, removed: 0, kept: 0 };
+
+  const expired = selectExpired(candidates, { ...ctx.retention, nowTs: now() });
+  for (const record of expired) ctx.tasks.delete(record.info.id);
+  if (expired.length > 0) {
+    await persistNow(ctx);
+    ctx.logger.info('任务保留策略已清理活动记录（历史不受影响）', {
+      removed: expired.length,
+      kept: candidates.length - expired.length,
+      max: ctx.retention.max,
+      days: ctx.retention.days,
+    });
+  }
+  return { examined: candidates.length, removed: expired.length, kept: candidates.length - expired.length };
+}
+
+/**
+ * `DELETE /tasks/{id}`：只删**活动记录**（tasks.json），**绝不动 task-history.jsonl**（append-only 审计日志）。
+ * 仅终态可删；非终态要先取消。
+ */
+function removeTask(ctx, id) {
+  const record = ctx.tasks.get(id);
+  if (!record) {
+    const history = ctx.store.getHistoryEntry(id);
+    if (!history) throw apiError(ERROR_CODES.TASK_NOT_FOUND, '任务不存在', { taskId: id });
+    // 该任务已进历史、活动记录早已移出：删除请求等价于"已无活动记录"
+    return Promise.resolve({ id, removed: false, fromHistory: true, status: history.status });
+  }
+  if (!TERMINAL_STATUSES.has(record.info.status)) {
+    throw apiError(ERROR_CODES.INVALID_STATE, '任务尚未结束，请先取消再删除记录', { status: record.info.status });
+  }
+
+  ctx.tasks.delete(id);
+  // 让其他已连接客户端重新对齐（没有 deleted 事件类型，用快照最稳）
+  ctx.events.publish('snapshot', snapshotOf(ctx));
+  ctx.logger.info('任务活动记录已删除（历史保留）', { taskId: id, status: record.info.status });
+  // 等落盘完成再返回：调用方拿到 200 时 tasks.json 里必须已经没有这条（可立即核对）
+  return persistNow(ctx).then(() => ({ id, removed: true, fromHistory: false, status: record.info.status }));
+}
+
 // ===== 启动恢复（§六.4 / INV-10） =====
 
 /** 把一条落盘记录还原成内存 record（含源的绝对路径） */
@@ -629,7 +706,9 @@ async function recoverTasks(ctx) {
     ctx.tasks.set(record.info.id, record);
   }
   await persistNow(ctx);
-  return { loaded: persisted.length, recovered };
+  // 启动时按保留策略清一次（非终态刚被迁为 interrupted，属于候选；活任务不受影响）
+  const pruned = await pruneRetention(ctx);
+  return { loaded: persisted.length, recovered, pruned };
 }
 
 /**
@@ -651,6 +730,9 @@ export function createTaskManager(deps) {
     finalize: (id, status, extra) => finalizeTask(ctx, id, status, extra),
     cancel: (id) => cancelTask(ctx, id),
     retry: (id) => retryTask(ctx, id),
+    remove: (id) => removeTask(ctx, id),
+    prune: () => pruneRetention(ctx),
+    retention: () => ({ ...ctx.retention }),
     waitConfirm: (id) => waitConfirm(ctx, id),
     resolveConfirm: (id, payload) => resolveConfirm(ctx, id, payload),
     markWaitingConfirm: (id) => markWaitingConfirm(ctx, id),

@@ -39,10 +39,20 @@ export const useTasksStore = defineStore('tasks', () => {
   let failures = 0;
 
   const list = computed(() => [...tasks.value.values()].sort((a, b) => b.createdAt - a.createdAt));
-  const unfinished = computed(() => list.value.filter((task) => !['done', 'aborted'].includes(task.status)));
+  /** 活任务：只有这些才算"进行中"（终态一律不算） */
+  const NON_TERMINAL = ['queued', 'running', 'cancelling'];
+  /** 终态但**仍有活动记录**：failed/interrupted 为"可重试"保留在 tasks.json 里，因此可删、可重试 */
+  const RETRYABLE = ['failed', 'interrupted'];
+  const unfinished = computed(() => list.value.filter((task) => NON_TERMINAL.includes(task.status)));
+  const retryable = computed(() => list.value.filter((task) => RETRYABLE.includes(task.status)));
   const activeTask = computed(() => list.value.find((task) => task.status === 'running' || task.status === 'cancelling')
     || list.value.find((task) => task.status === 'queued')
     || null);
+  /** 该 id 是否还有活动记录（决定历史行要不要给「删除」按钮：done/aborted 早已移出 tasks.json） */
+  function hasActiveRecord(id) {
+    const task = tasks.value.get(id);
+    return Boolean(task && (NON_TERMINAL.includes(task.status) || RETRYABLE.includes(task.status)));
+  }
   const queuedCount = computed(() => list.value.filter((task) => task.status === 'queued').length);
   const runningCount = computed(() => list.value.filter((task) => task.status === 'running').length);
 
@@ -219,6 +229,16 @@ export const useTasksStore = defineStore('tasks', () => {
     return data.task;
   }
 
+  /** 删除活动记录（仅终态；后端会拒绝非终态）。删除后本地立即移除，再拉一次历史保持一致 */
+  async function remove(id) {
+    const result = await api.del(`/tasks/${id}`);
+    const next = new Map(tasks.value);
+    next.delete(id);
+    tasks.value = next;
+    await loadHistory(50).catch(() => {});
+    return result;
+  }
+
   return {
     tasks,
     history,
@@ -231,6 +251,8 @@ export const useTasksStore = defineStore('tasks', () => {
     lastEventStatus,
     list,
     unfinished,
+    retryable,
+    hasActiveRecord,
     activeTask,
     queuedCount,
     runningCount,
@@ -242,5 +264,6 @@ export const useTasksStore = defineStore('tasks', () => {
     cancel,
     retry,
     confirmDelete,
+    remove,
   };
 });

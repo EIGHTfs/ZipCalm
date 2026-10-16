@@ -265,6 +265,12 @@ async function handleTaskConfirmDelete(app, request, reply) {
   reply.ok({ task: manager.get(id) });
 }
 
+/** DELETE /tasks/{id} —— 删除**终态**任务的活动记录（只动 tasks.json，绝不动历史） */
+async function handleTaskDelete(app, request, reply) {
+  // 删除后由 manager 广播一次快照，其他客户端自行对齐
+  reply.ok(await app.tasks.manager.remove(request.params.id));
+}
+
 export default async function taskRoutes(app) {
   const auth = { preHandler: [app.requireAuth] };
   const bind = (handler) => (request, reply) => handler(app, request, reply);
@@ -276,6 +282,8 @@ export default async function taskRoutes(app) {
   app.get('/tasks', auth, bind(handleTaskList));
   app.get('/tasks/:id', auth, bind(handleTaskGet));
   app.get('/compress/tasks/:id', auth, bind(handleTaskGet)); // 契约别名
+
+  app.delete('/tasks/:id', auth, bind(handleTaskDelete));
 
   app.post('/tasks/:id/cancel', auth, bind(handleTaskCancel));
   app.post('/compress/tasks/:id/cancel', auth, bind(handleTaskCancel));

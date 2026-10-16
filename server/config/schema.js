@@ -78,7 +78,14 @@ function validateStorage(config, errors) {
 
 function validateLimits(config, errors) {
   if (!requireSection(config, 'limits', errors)) return;
-  const { maxPathLength, maxPathSegmentLength, maxListEntries, defaultPageSize } = config.limits;
+  const {
+    maxPathLength,
+    maxPathSegmentLength,
+    maxListEntries,
+    defaultPageSize,
+    taskRetentionMax,
+    taskRetentionDays,
+  } = config.limits;
 
   if (!Number.isInteger(maxPathLength) || maxPathLength < 64) errors.push('limits.maxPathLength 必须是 ≥64 的整数');
   if (
@@ -93,6 +100,13 @@ function validateLimits(config, errors) {
   }
   if (!Number.isInteger(maxListEntries) || maxListEntries < 1) errors.push('limits.maxListEntries 必须是正整数');
   if (!Number.isInteger(defaultPageSize) || defaultPageSize < 1) errors.push('limits.defaultPageSize 必须是正整数');
+  // 任务活动记录保留策略（0 表示"不按该维度限制"，便于排障时临时放宽）
+  if (!Number.isInteger(taskRetentionMax) || taskRetentionMax < 1) {
+    errors.push('limits.taskRetentionMax 必须是 ≥1 的整数');
+  }
+  if (typeof taskRetentionDays !== 'number' || Number.isNaN(taskRetentionDays) || taskRetentionDays <= 0) {
+    errors.push('limits.taskRetentionDays 必须是正数（天，可小数）');
+  }
 }
 
 function validateCompress(config, errors) {

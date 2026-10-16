@@ -110,6 +110,27 @@ else
   printf 'SKIP | 任务详情泄漏检查（列表为空，无样本）\n'
 fi
 
+echo
+echo "── 五、任务记录删除语义（DELETE /tasks/{id}）──"
+TASKS_BEFORE="$(jq 'length' "${PROJECT_ROOT}/storage/tasks.json" 2>/dev/null || echo 0)"
+HIST_BEFORE="$(wc -l < "${PROJECT_ROOT}/storage/task-history.jsonl" 2>/dev/null || echo 0)"
+DEL_ID="$(curl -s -b "${COOKIE_JAR}" "${API}/tasks" | jq -r '[.data.items[]|select(.status=="failed" or .status=="interrupted")][0].id // empty' 2>/dev/null)"
+if [ -n "${DEL_ID}" ]; then
+  DEL_CODE="$(curl -s -b "${COOKIE_JAR}" -X DELETE -o /tmp/zc-del.json -w '%{http_code}' "${API}/tasks/${DEL_ID}")"
+  check "DELETE 终态任务 → 200" "200" "HTTP=${DEL_CODE}"
+  TASKS_AFTER="$(jq 'length' "${PROJECT_ROOT}/storage/tasks.json" 2>/dev/null || echo 0)"
+  HIST_AFTER="$(wc -l < "${PROJECT_ROOT}/storage/task-history.jsonl" 2>/dev/null || echo 0)"
+  check "活动记录恰好减少 1 条" "1" "$((TASKS_BEFORE - TASKS_AFTER))"
+  check "历史行数不变（不连带删历史）" "0" "$((HIST_AFTER - HIST_BEFORE))"
+  # 注意：同一任务可多次进入终态（如 interrupted → 又 failed），历史里该 id 可能有多行 —— 要判「≥1」而不是「=1」
+  HIST_HIT="$(grep -c "${DEL_ID}" "${PROJECT_ROOT}/storage/task-history.jsonl" 2>/dev/null || echo 0)"
+  check "被删记录仍留在历史里（计数 ≥1）" "1" "$([ "${HIST_HIT}" -ge 1 ] && echo 1 || echo 0)"
+else
+  printf 'SKIP | DELETE 语义（当前无 failed/interrupted 任务可删）\n'
+fi
+check "DELETE 不存在 → 404 TASK_NOT_FOUND" "404" \
+  "HTTP=$(curl -s -b "${COOKIE_JAR}" -X DELETE -o /dev/null -w '%{http_code}' "${API}/tasks/00000000-0000-0000-0000-000000000000")"
+
 bash "${SCRIPT_DIR}/start.sh" stop >/dev/null 2>&1
 
 echo
