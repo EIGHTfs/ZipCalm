@@ -13,6 +13,10 @@ import fastifyStatic from '@fastify/static';
 
 import { createAuthStore } from './core/auth/store.js';
 import { verifyPassword } from './core/auth/password.js';
+import { createDeleteService } from './core/compress/deleter.js';
+import { createOrchestrator } from './core/compress/orchestrator.js';
+import { createRegistry } from './core/compress/registry.js';
+import { createTaskManager } from './core/task/manager.js';
 import { registerAuth } from './http/middleware/auth.js';
 import { registerErrorHandling } from './http/middleware/error.js';
 import { registerRequestLogger } from './http/middleware/logger.js';
@@ -73,6 +77,37 @@ export async function buildApp(options) {
 
   registerAuth(app, { store: authStore, config: config.auth });
   registerPathGuard(app, { config, logger });
+
+  // ===== M2：格式注册表 + 任务队列 + 删除服务 + 编排器 =====
+  // 装配顺序有讲究：pathGuard 先（提供 fsContext），m2 后（编排器要用 rootAbs），
+  // 路由最后注册（路由插件初始化时会读 app.m2）。
+  const registry = createRegistry({ logger });
+  await registry.discover();
+
+  const taskManager = createTaskManager({ logger });
+  const deleteService = createDeleteService({
+    config,
+    logger,
+    logDir: config.storage.logDir,
+    trashDir: config.storage.trashDir,
+    projectRoot,
+  });
+  const orchestrator = createOrchestrator({
+    config,
+    logger,
+    registry,
+    manager: taskManager,
+    deleteService,
+    rootAbs: config.storage.root,
+  });
+
+  app.decorate('m2', {
+    registry,
+    manager: taskManager,
+    orchestrator,
+    deleteService,
+    config,
+  });
 
   const meta = {
     version: APP_VERSION,

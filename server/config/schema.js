@@ -75,6 +75,26 @@ export function validateConfig(config) {
     if (!Number.isInteger(defaultPageSize) || defaultPageSize < 1) errors.push('limits.defaultPageSize 必须是正整数');
   }
 
+  // ===== compress / delete（M2 新增）=====
+  if (requireObject('compress')) {
+    const { defaultFormat, defaultMode, defaultLevel, preflightFactor } = config.compress;
+    if (typeof defaultFormat !== 'string' || defaultFormat.length === 0) errors.push('compress.defaultFormat 必须是非空字符串');
+    if (!['single', 'bundle'].includes(defaultMode)) errors.push('compress.defaultMode 只能是 single 或 bundle');
+    if (!Number.isInteger(defaultLevel) || defaultLevel < 0 || defaultLevel > 19) errors.push('compress.defaultLevel 必须是 0~19 的整数');
+    // INV-07：2 倍是底线，配置不允许把它调小
+    if (!Number.isInteger(preflightFactor) || preflightFactor < 2) {
+      errors.push('compress.preflightFactor 必须是 ≥2 的整数（INV-07：剩余空间 ≥ 待压 × 2）');
+    }
+  }
+
+  if (requireObject('delete')) {
+    const { mode } = config.delete;
+    // 契约：未知值只告警并回落 log-only（由删除服务执行回落），这里不拦
+    if (!['log-only', 'trash'].includes(mode)) {
+      warnings.push(`delete.mode 只能是 log-only 或 trash，当前 "${String(mode)}" 将回落为 log-only`);
+    }
+  }
+
   // ===== log =====
   if (requireObject('log')) {
     if (!LOG_LEVELS.includes(config.log.level)) {

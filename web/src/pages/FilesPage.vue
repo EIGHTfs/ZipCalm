@@ -1,21 +1,21 @@
 <script setup>
-// 文件浏览页（M1：真实联调 GET /api/v1/fs/list）
+// 文件浏览页（M1 列表 + M2 压缩/解压入口）
 //
-// 状态来源：**只有 API**（docs/09 约定 1）。当前路径放在 URL query（#/files?path=/文档），
-// 这样刷新/分享/回退都能恢复，符合"状态可从 API/URL 拉回"的约定。
+// 数据来源：**只有 API**（docs/09 约定 1）。路径放 URL query（#/files?path=/文档），刷新/分享可恢复。
 //
-// 交互（docs/08 第八节，鼠标优先）：
-// - 点目录行进入；面包屑可跳任意上级；「上级」按钮在根目录置灰；
-// - 列头可点排序（名称/大小/修改时间），排序参数交给服务端（服务端是唯一真相）。
-//
-// 错误态：展示后端契约错误码 + message（如 PATH_NOT_FOUND / PERMISSION_DENIED），
-// 401 由 client.js 的统一钩子处理（跳登录页），页面不重复处理。
+// M2 新增：
+// - 多选（复选框列）→ 工具栏入口：压缩（≥1 项）、解压（恰好选 1 个 .zip）；
+// - 压缩抽屉（格式/模式/保留原文件）+ 解压对话框（目标目录 / 解压后删除压缩包）；
+// - 任务进度面板（M2 用轮询，M3 换 SSE）；任务结束自动刷新目录（新产物/新解压目录立即可见）。
 
 import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
 import { api } from '../api/client.js';
 import Icon from '../components/common/Icon.vue';
+import CompressDrawer from '../components/compress/CompressDrawer.vue';
+import ExtractDialog from '../components/compress/ExtractDialog.vue';
+import TaskProgress from '../components/task/TaskProgress.vue';
 import { ROUTES } from '../constants/index.js';
 import { formatBytes, formatDateTime } from '../utils/format.js';
 import { breadcrumbsOf, parentPath } from '../utils/path.js';
@@ -30,7 +30,12 @@ const listing = ref({ path: '/', parent: null, total: 0, truncated: false });
 const errorInfo = ref(null);
 const sortKey = ref('name');
 const order = ref('asc');
-const lastLoadedAt = ref(null);
+
+// M2：多选与操作面板
+const selected = ref(new Map()); // path -> entry
+const showCompress = ref(false);
+const showExtract = ref(false);
+const activeTaskId = ref(null);
 
 const currentPath = computed(() => {
   const value = route.query.path;
@@ -38,6 +43,15 @@ const currentPath = computed(() => {
 });
 const crumbs = computed(() => breadcrumbsOf(currentPath.value));
 const upLevel = computed(() => parentPath(currentPath.value));
+
+const selectedEntries = computed(() => [...selected.value.values()]);
+const canCompress = computed(() => selectedEntries.value.length > 0);
+const extractTarget = computed(() => {
+  const items = selectedEntries.value;
+  if (items.length !== 1) return null;
+  const entry = items[0];
+  return entry.type === 'file' && /\.zip$/i.test(entry.name) ? entry : null;
+});
 
 async function load() {
   status.value = 'loading';
@@ -55,10 +69,8 @@ async function load() {
       total: data && Number.isInteger(data.total) ? data.total : entries.value.length,
       truncated: Boolean(data && data.truncated),
     };
-    lastLoadedAt.value = Date.now();
     status.value = 'ready';
   } catch (error) {
-    // 契约错误码优先；网络类错误由 client.js 归一到 SERVICE_UNAVAILABLE
     errorInfo.value = {
       code: (error && error.code) || 'INTERNAL_ERROR',
       message: (error && error.message) || '加载目录失败',
@@ -68,8 +80,15 @@ async function load() {
   }
 }
 
-// 路径变化即重新拉取（immediate：首屏也走同一路径，避免"两套初始化逻辑"）
-watch(currentPath, load, { immediate: true });
+// 路径变化即重新拉取；换目录时清空选择（避免"跨目录选中"造成误操作）
+watch(
+  currentPath,
+  () => {
+    selected.value = new Map();
+    load();
+  },
+  { immediate: true },
+);
 
 function goto(path) {
   const target = typeof path === 'string' && path.length > 0 ? path : '/';
@@ -81,9 +100,8 @@ function openEntry(entry) {
 }
 
 function changeSort(key) {
-  if (sortKey.value === key) {
-    order.value = order.value === 'asc' ? 'desc' : 'asc';
-  } else {
+  if (sortKey.value === key) order.value = order.value === 'asc' ? 'desc' : 'asc';
+  else {
     sortKey.value = key;
     order.value = 'asc';
   }
@@ -93,6 +111,28 @@ function changeSort(key) {
 function sortIndicator(key) {
   if (sortKey.value !== key) return '';
   return order.value === 'asc' ? '↑' : '↓';
+}
+
+function toggleSelect(entry) {
+  const next = new Map(selected.value);
+  if (next.has(entry.path)) next.delete(entry.path);
+  else next.set(entry.path, entry);
+  selected.value = next;
+}
+
+function isSelected(entry) {
+  return selected.value.has(entry.path);
+}
+
+function onSubmitted(taskId) {
+  showCompress.value = false;
+  showExtract.value = false;
+  activeTaskId.value = taskId;
+}
+
+/** 任务终态：刷新目录（新产物/新解压目录要立刻可见） */
+function onTaskFinished() {
+  load();
 }
 
 function typeLabel(entry) {
@@ -109,14 +149,7 @@ function rowIcon(entry) {
 <template>
   <section class="card file-browser" data-testid="files-page">
     <div class="file-browser__toolbar">
-      <button
-        type="button"
-        data-testid="go-up"
-        :disabled="!upLevel"
-        @click="goto(upLevel)"
-      >
-        ← 上级
-      </button>
+      <button type="button" data-testid="go-up" :disabled="!upLevel" @click="goto(upLevel)">← 上级</button>
 
       <nav class="file-browser__crumbs" aria-label="面包屑" data-testid="files-breadcrumb">
         <template v-for="(crumb, index) in crumbs" :key="crumb.path">
@@ -133,9 +166,11 @@ function rowIcon(entry) {
       </nav>
 
       <div class="topbar__spacer"></div>
-      <button type="button" data-testid="reload" :disabled="status === 'loading'" @click="load">
-        刷新
-      </button>
+
+      <span v-if="selectedEntries.length > 0" class="badge" data-testid="selection-count">已选 {{ selectedEntries.length }} 项</span>
+      <button type="button" :disabled="!canCompress" data-testid="open-compress" @click="showCompress = true">压缩</button>
+      <button type="button" :disabled="!extractTarget" data-testid="open-extract" @click="showExtract = true">解压</button>
+      <button type="button" data-testid="reload" :disabled="status === 'loading'" @click="load">刷新</button>
     </div>
 
     <p v-if="status === 'loading'" class="file-browser__hint" data-testid="files-loading">正在加载目录…</p>
@@ -159,21 +194,16 @@ function rowIcon(entry) {
     <table v-else class="file-table" data-testid="files-table">
       <thead>
         <tr>
+          <th scope="col" class="file-table__col-check"></th>
           <th scope="col">
-            <button type="button" class="file-table__sort" @click="changeSort('name')">
-              名称 {{ sortIndicator('name') }}
-            </button>
+            <button type="button" class="file-table__sort" @click="changeSort('name')">名称 {{ sortIndicator('name') }}</button>
           </th>
           <th scope="col" class="file-table__col-type">类型</th>
           <th scope="col">
-            <button type="button" class="file-table__sort" @click="changeSort('size')">
-              大小 {{ sortIndicator('size') }}
-            </button>
+            <button type="button" class="file-table__sort" @click="changeSort('size')">大小 {{ sortIndicator('size') }}</button>
           </th>
           <th scope="col">
-            <button type="button" class="file-table__sort" @click="changeSort('mtime')">
-              修改时间 {{ sortIndicator('mtime') }}
-            </button>
+            <button type="button" class="file-table__sort" @click="changeSort('mtime')">修改时间 {{ sortIndicator('mtime') }}</button>
           </th>
         </tr>
       </thead>
@@ -187,6 +217,15 @@ function rowIcon(entry) {
           :data-type="entry.type"
           @click="openEntry(entry)"
         >
+          <td class="file-table__col-check" @click.stop>
+            <input
+              type="checkbox"
+              :checked="isSelected(entry)"
+              :aria-label="`选择 ${entry.name}`"
+              :data-select="entry.name"
+              @change="toggleSelect(entry)"
+            />
+          </td>
           <td>
             <span class="file-table__name">
               <Icon :name="rowIcon(entry)" :size="15" />
@@ -204,4 +243,20 @@ function rowIcon(entry) {
       共 {{ listing.total }} 项<template v-if="listing.truncated">（已截断，仅显示前 {{ entries.length }} 项）</template>
     </p>
   </section>
+
+  <TaskProgress :task-id="activeTaskId" @finished="onTaskFinished" @dismiss="activeTaskId = null" />
+
+  <CompressDrawer
+    :open="showCompress"
+    :sources="selectedEntries"
+    @close="showCompress = false"
+    @submitted="onSubmitted"
+  />
+
+  <ExtractDialog
+    :open="showExtract"
+    :archive-path="extractTarget ? extractTarget.path : ''"
+    @close="showExtract = false"
+    @submitted="onSubmitted"
+  />
 </template>

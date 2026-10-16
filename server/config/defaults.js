@@ -37,6 +37,31 @@ export const DEFAULT_CONFIG = {
     logDir: './storage/logs',
   },
 
+  compress: {
+    /** 默认压缩格式（M2 只有 zip） */
+    defaultFormat: 'zip',
+    /** 默认压缩模式：single（每个源各一个包）/ bundle（合成一个包） */
+    defaultMode: 'single',
+    /** 默认保留原文件（删除必须显式请求 + 二次确认，docs/06 §一） */
+    defaultKeepOriginal: true,
+    /** zip 默认压缩级别 */
+    defaultLevel: 6,
+    /** 并行开关（占位：v1 强制串行，docs/05 §二） */
+    parallelEnabled: false,
+    /** INV-07：剩余空间必须 ≥ 待压总量 × preflightFactor（不允许 < 2） */
+    preflightFactor: 2,
+  },
+
+  delete: {
+    /**
+     * 删除执行模式（docs/M0 数据模型 §八）：
+     * - log-only（默认）：只写删除日志、**不真删** —— 开发期核对"校验通过 → 触发删除"的时机；
+     * - trash：真删并进 storage/trash/<batchId>/（可恢复），正式部署用；
+     * 未知值 → 告警并回落 log-only（安全默认：绝不因配置写错而真删数据）。
+     */
+    mode: 'log-only',
+  },
+
   limits: {
     /** 路径字符串长度上限（整条路径，超长直接判非法路径） */
     maxPathLength: 4096,
@@ -49,6 +74,8 @@ export const DEFAULT_CONFIG = {
     maxPathSegmentLength: 255,
     /** 单次列目录返回的最大条目数（超出截断并置 truncated=true） */
     maxListEntries: 5000,
+    /** 单次压缩任务最多源条目数 */
+    maxSourcesPerTask: 200,
     /** 前端默认分页大小 */
     defaultPageSize: 200,
   },

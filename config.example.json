@@ -23,7 +23,19 @@
     "maxPathLength": 4096,
     "maxPathSegmentLength": 255,
     "maxListEntries": 5000,
+    "maxSourcesPerTask": 200,
     "defaultPageSize": 200
+  },
+  "compress": {
+    "defaultFormat": "zip",
+    "defaultMode": "single",
+    "defaultKeepOriginal": true,
+    "defaultLevel": 6,
+    "parallelEnabled": false,
+    "preflightFactor": 2
+  },
+  "delete": {
+    "mode": "log-only"
   },
   "log": {
     "level": "info"
