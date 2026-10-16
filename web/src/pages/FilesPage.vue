@@ -42,8 +42,8 @@ const tasks = useTasksStore();
 const activeTaskId = computed(() => submittedTaskId.value || (tasks.activeTask ? tasks.activeTask.id : null));
 
 const currentPath = computed(() => {
-  const value = route.query.path;
-  return typeof value === 'string' && value.length > 0 ? value : '/';
+  const pathParam = route.query.path;
+  return typeof pathParam === 'string' && pathParam.length > 0 ? pathParam : '/';
 });
 const crumbs = computed(() => breadcrumbsOf(currentPath.value));
 const upLevel = computed(() => parentPath(currentPath.value));
@@ -58,56 +58,67 @@ const archiveExts = ref([]);
 
 async function loadArchiveExts() {
   try {
-    const data = await api.get('/formats');
-    const exts = [];
-    for (const item of (data && data.formats) || []) {
-      for (const candidate of [item.ext, ...(item.extAliases || [])]) {
-        if (typeof candidate === 'string' && candidate.startsWith('.')) exts.push(candidate.toLowerCase());
+    const formatsResponse = await api.get('/formats');
+    const collectedExts = [];
+    for (const formatInfo of (formatsResponse && formatsResponse.formats) || []) {
+      for (const extCandidate of [formatInfo.ext, ...(formatInfo.extAliases || [])]) {
+        if (typeof extCandidate === 'string' && extCandidate.startsWith('.')) {
+          collectedExts.push(extCandidate.toLowerCase());
+        }
       }
     }
-    archiveExts.value = [...new Set(exts)].sort((a, b) => b.length - a.length);
+    archiveExts.value = [...new Set(collectedExts)].sort((a, b) => b.length - a.length);
   } catch {
     // 拉不到就退化为"仅按服务端预检判定"：不阻塞页面，解压入口保守置灰
     archiveExts.value = [];
   }
 }
 
-function looksLikeArchive(name) {
-  const lower = String(name || '').toLowerCase();
-  return archiveExts.value.some((ext) => lower.endsWith(ext));
+function looksLikeArchive(fileName) {
+  const lowerName = String(fileName || '').toLowerCase();
+  return archiveExts.value.some((ext) => lowerName.endsWith(ext));
 }
 
 const extractTarget = computed(() => {
-  const items = selectedEntries.value;
-  if (items.length !== 1) return null;
-  const entry = items[0];
-  return entry.type === 'file' && looksLikeArchive(entry.name) ? entry : null;
+  const pickedEntries = selectedEntries.value;
+  if (pickedEntries.length !== 1) return null;
+  const onlyEntry = pickedEntries[0];
+  return onlyEntry.type === 'file' && looksLikeArchive(onlyEntry.name) ? onlyEntry : null;
 });
+
+/** 把 /fs/list 的信封数据落到页面状态（缺字段给安全默认，不让 undefined 流到界面） */
+function applyListingPayload(listingPayload) {
+  entries.value = Array.isArray(listingPayload && listingPayload.entries) ? listingPayload.entries : [];
+  listing.value = {
+    path: (listingPayload && listingPayload.path) || currentPath.value,
+    parent: listingPayload && typeof listingPayload.parent === 'string' ? listingPayload.parent : null,
+    total: listingPayload && Number.isInteger(listingPayload.total) ? listingPayload.total : entries.value.length,
+    truncated: Boolean(listingPayload && listingPayload.truncated),
+  };
+}
+
+/** 加载失败：把契约错误码与文案收进 errorInfo，并清空列表（避免展示上一目录的残留） */
+function applyListingError(error) {
+  errorInfo.value = {
+    code: (error && error.code) || 'INTERNAL_ERROR',
+    message: (error && error.message) || '加载目录失败',
+  };
+  entries.value = [];
+  status.value = 'error';
+}
 
 async function load() {
   status.value = 'loading';
   errorInfo.value = null;
   try {
-    const data = await api.get('/fs/list', {
+    applyListingPayload(await api.get('/fs/list', {
       path: currentPath.value,
       sort: sortKey.value,
       order: order.value,
-    });
-    entries.value = Array.isArray(data && data.entries) ? data.entries : [];
-    listing.value = {
-      path: (data && data.path) || currentPath.value,
-      parent: data && typeof data.parent === 'string' ? data.parent : null,
-      total: data && Number.isInteger(data.total) ? data.total : entries.value.length,
-      truncated: Boolean(data && data.truncated),
-    };
+    }));
     status.value = 'ready';
   } catch (error) {
-    errorInfo.value = {
-      code: (error && error.code) || 'INTERNAL_ERROR',
-      message: (error && error.message) || '加载目录失败',
-    };
-    entries.value = [];
-    status.value = 'error';
+    applyListingError(error);
   }
 }
 

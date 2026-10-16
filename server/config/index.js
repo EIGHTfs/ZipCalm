@@ -39,16 +39,16 @@ function applyEnv(config, env) {
     const raw = env[envKey];
     if (raw === undefined || raw === '') continue;
     const [section, field] = configPath;
-    let value = raw;
+    let resolvedValue = raw;
     if (field === 'port') {
       const parsed = Number.parseInt(raw, 10);
       if (!Number.isInteger(parsed)) {
         warnings.push(`环境变量 ${envKey} 不是整数，已忽略`);
         continue;
       }
-      value = parsed;
+      resolvedValue = parsed;
     }
-    config[section][field] = value;
+    config[section][field] = resolvedValue;
     applied.push(`${envKey} → ${configPath.join('.')}`);
   }
   return { applied, warnings };

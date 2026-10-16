@@ -19,16 +19,13 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
+import { loadRuntimeConfig } from './helpers/test-config.mjs';
+import { createReporter } from './helpers/test-report.mjs';
+
 const execFileAsync = promisify(execFile);
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const runtimeConfig = await (async () => {
-  try {
-    return JSON.parse(await fsp.readFile(path.join(PROJECT_ROOT, 'storage', 'config.json'), 'utf8'));
-  } catch {
-    return {};
-  }
-})();
+const runtimeConfig = await loadRuntimeConfig(PROJECT_ROOT);
 
 const PORT = process.env.ZIPCALM_PORT || (runtimeConfig.server && runtimeConfig.server.port) || 3010;
 const BASE = process.env.ZIPCALM_BASE || `http://127.0.0.1:${PORT}/api/v1`;
@@ -42,20 +39,11 @@ const LOGIN = { username: process.env.ZIPCALM_TEST_USER || 'admin', password: pr
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 let TOKEN = null;
-let passCount = 0;
-let failCount = 0;
-const failures = [];
-
-function check(name, ok, detail = '') {
-  if (ok) {
-    passCount += 1;
-    console.log(`PASS | ${name}${detail ? ` | ${detail}` : ''}`);
-  } else {
-    failCount += 1;
-    failures.push(name);
-    console.log(`FAIL | ${name}${detail ? ` | ${detail}` : ''}`);
-  }
-}
+// 断言与汇总走共用报告器（多套脚本同一份实现；输出格式与 test-all.sh 的提取正则一致）
+/** HTTP 调用超时（毫秒）：服务僵死/半开连接时脚本不能永久挂住 */
+const HTTP_TIMEOUT_MS = 15000;
+const reporter = createReporter();
+const { check } = reporter;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -69,6 +57,8 @@ async function api(method, urlPath, body) {
       ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
     },
     body: hasBody ? JSON.stringify(body) : undefined,
+    // 超时兜底：服务僵死/半开连接时不能让脚本永久挂住
+    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
   });
   const text = await response.text();
   try {
@@ -436,11 +426,8 @@ async function main() {
     console.log('\n    已还原 tasks.json / config.json 并重启服务');
   }
 
-  console.log(`\n── 汇总 ──\nPASS ${passCount} / FAIL ${failCount}`);
-  if (failures.length > 0) {
-    console.log(`失败项：${failures.join('；')}`);
-    process.exitCode = 1;
-  }
+  const runSummary = reporter.summary();
+  if (runSummary.fail > 0) process.exitCode = 1;
 }
 
 main().catch((error) => {

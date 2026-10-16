@@ -23,9 +23,9 @@ export async function parseArchive(archivePath, compression, onEntry) {
   const parser = tar.list({
     onentry: (entry) => {
       try {
-        const result = onEntry(entry);
-        if (result && typeof result.then === 'function') {
-          pending.push(result.catch((error) => errors.push(error)));
+        const handlerResult = onEntry(entry);
+        if (handlerResult && typeof handlerResult.then === 'function') {
+          pending.push(handlerResult.catch((error) => errors.push(error)));
         }
       } catch (error) {
         errors.push(error);

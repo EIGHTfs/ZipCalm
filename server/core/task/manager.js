@@ -92,20 +92,30 @@ function emptyDeleteState() {
   };
 }
 
+/** 取字节数：优先 sizeBytes，兼容旧的 size 字段；都没有则 null（表示"尚未扫描"） */
+function pickSizeBytes(raw) {
+  if (Number.isFinite(raw.sizeBytes)) return raw.sizeBytes;
+  if (Number.isFinite(raw.size)) return raw.size;
+  return null;
+}
+
+/** 取条目数：优先 entryCount，兼容 fileCount；单个文件恒为 1，目录未扫描则 null */
+function pickEntryCount(raw) {
+  if (Number.isInteger(raw.entryCount)) return raw.entryCount;
+  if (Number.isInteger(raw.fileCount)) return raw.fileCount;
+  return raw.kind === 'file' ? 1 : null;
+}
+
 /** 源条目 → 契约字段（sizeBytes/entryCount 是"扫描后回填"字段，§2.2）
  *  注意：`absPath` 是**进程内部字段**（运行时与落盘需要，API 视图由 publicTask 剥离）。
  */
 function toSource(raw) {
-  const size = Number.isFinite(raw.sizeBytes) ? raw.sizeBytes : (Number.isFinite(raw.size) ? raw.size : null);
-  const count = Number.isInteger(raw.entryCount)
-    ? raw.entryCount
-    : (Number.isInteger(raw.fileCount) ? raw.fileCount : (raw.kind === 'file' ? 1 : null));
   return {
     path: raw.path || raw.userPath || '/',
     name: raw.name || '/',
     kind: raw.kind || 'file',
-    sizeBytes: size,
-    entryCount: count,
+    sizeBytes: pickSizeBytes(raw),
+    entryCount: pickEntryCount(raw),
     absPath: raw.absPath || null,
   };
 }
@@ -205,10 +215,25 @@ function publishTask(ctx, record, options = {}) {
 
 // ===== 创建 / 读取 =====
 
-/** 创建任务；**返回前必须已落盘**（契约 §六.1「创建即落盘」，返回后才写会让"创建即落盘"形同虚设） */
-async function createTask(ctx, input) {
-  const id = crypto.randomUUID();
-  const info = {
+/** 压缩级别缺省值（未指定时用格式默认档；这里只兜底，真实校验在格式包） */
+const DEFAULT_COMPRESS_LEVEL = 6;
+
+/** 归一化 options：缺省值集中一处，避免创建路径里塞满三元表达式 */
+function normalizeOptions(raw) {
+  const options = raw || {};
+  return {
+    level: Number.isInteger(options.level) ? options.level : DEFAULT_COMPRESS_LEVEL,
+    keepOriginal: options.keepOriginal !== false,
+    deleteConfirmed: Boolean(options.deleteConfirmed),
+    deleteArchiveAfterExtract: Boolean(options.deleteArchiveAfterExtract),
+    outputDir: options.outputDir || null,
+    parallel: false,
+  };
+}
+
+/** 组装任务 info（纯数据、无副作用；落盘与广播由调用方负责） */
+function buildTaskInfo(ctx, input, id) {
+  return {
     id,
     kind: input.kind,
     status: 'queued',
@@ -216,14 +241,7 @@ async function createTask(ctx, input) {
     mode: input.mode || null,
     format: input.format || null,
     sources: (input.sources || []).map(toSource),
-    options: {
-      level: Number.isInteger(input.options && input.options.level) ? input.options.level : 6,
-      keepOriginal: input.options ? input.options.keepOriginal !== false : true,
-      deleteConfirmed: Boolean(input.options && input.options.deleteConfirmed),
-      deleteArchiveAfterExtract: Boolean(input.options && input.options.deleteArchiveAfterExtract),
-      outputDir: (input.options && input.options.outputDir) || null,
-      parallel: false,
-    },
+    options: normalizeOptions(input.options),
     // 解压任务对外可见的两个路径字段（都是 API 用户路径）
     archivePath: input.archivePath || null,
     targetDir: input.targetDir || null,
@@ -238,18 +256,27 @@ async function createTask(ctx, input) {
     retryOf: input.retryOf || null,
     bootId: ctx.bootId,
   };
+}
 
-  const record = {
+/** 组装运行时 record：绝对路径等进程内部字段放这里（**绝不进 API 响应**，但要落盘） */
+function buildTaskRecord(info, input) {
+  return {
     info,
-    // 绝对路径等进程内部字段：**绝不进 API 响应**，但要落盘（重启后重试/诊断需要）
     internal: { ...(input.internal || {}) },
     runner: null,
     abortController: new AbortController(),
     confirmResolver: null,
     confirmPromise: null,
   };
+}
+
+/** 创建任务；**返回前必须已落盘**（契约 §六.1「创建即落盘」，返回后才写会让"创建即落盘"形同虚设） */
+async function createTask(ctx, input) {
+  const id = crypto.randomUUID();
+  const record = buildTaskRecord(buildTaskInfo(ctx, input, id), input);
+
   ctx.tasks.set(id, record);
-  ctx.logger.info('task created', { taskId: id, kind: info.kind, retryOf: info.retryOf });
+  ctx.logger.info('task created', { taskId: id, kind: record.info.kind, retryOf: record.info.retryOf });
   // 创建即落盘（§六.1，**等写完再返回**）+ 立即广播（已连接的客户端立刻看到新任务）
   await persistNow(ctx);
   publishTask(ctx, record, { immediate: true });

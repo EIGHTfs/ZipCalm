@@ -35,8 +35,8 @@ watch(
     if (!open) return;
     errorText.value = '';
     try {
-      const data = await api.get('/formats');
-      formats.value = (data && data.formats) || [];
+      const formatsResponse = await api.get('/formats');
+      formats.value = (formatsResponse && formatsResponse.formats) || [];
       const firstAvailable = formats.value.find((item) => item.available);
       if (firstAvailable) formatId.value = firstAvailable.id;
     } catch (error) {
@@ -50,13 +50,13 @@ async function submit() {
   submitting.value = true;
   errorText.value = '';
   try {
-    const data = await api.post('/compress/tasks', {
+    const created = await api.post('/compress/tasks', {
       sources: props.sources.map((source) => source.path),
       mode: mode.value,
       format: formatId.value,
       options: { keepOriginal: keepOriginal.value },
     });
-    emit('submitted', data.task.id);
+    emit('submitted', created.task.id);
   } catch (error) {
     errorText.value = `[${error.code || 'ERROR'}] ${error.message}`;
   } finally {

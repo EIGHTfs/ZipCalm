@@ -11,6 +11,9 @@
 // 2. **kill -9 后重启**：非终态 → interrupted + error.code=INTERRUPTED + `.part` 保留 + 可重试成功；
 // 3. **SSE 首帧即快照 + seq/since 续传**：无 since 连接首帧是 snapshot；断开后用 since 重连首帧仍是 snapshot。
 //
+// 另一条回归锁（十.1）：**启动加载即收敛历史文件** —— 文件被写成"上限+1 行"（模拟 append 后、收敛前被 kill，
+// 而旧实现只裁内存不重写文件）时，重启后必须 ≤ 上限，且保留最新条目。
+//
 // 注意：本脚本会 `kill -9` 本服务并重启（这是恢复语义的验收方式），请勿在有业务任务时手动运行。
 
 import { execFile } from 'node:child_process';
@@ -21,16 +24,13 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
+import { loadRuntimeConfig } from './helpers/test-config.mjs';
+import { createReporter } from './helpers/test-report.mjs';
+
 const execFileAsync = promisify(execFile);
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const runtimeConfig = await (async () => {
-  try {
-    return JSON.parse(await fsp.readFile(path.join(PROJECT_ROOT, 'storage', 'config.json'), 'utf8'));
-  } catch {
-    return {};
-  }
-})();
+const runtimeConfig = await loadRuntimeConfig(PROJECT_ROOT);
 
 const PORT = process.env.ZIPCALM_PORT || (runtimeConfig.server && runtimeConfig.server.port) || 3010;
 const BASE = process.env.ZIPCALM_BASE || `http://127.0.0.1:${PORT}/api/v1`;
@@ -44,20 +44,11 @@ const LOGIN = { username: process.env.ZIPCALM_TEST_USER || 'admin', password: pr
 const API_BIG = '/m3-test/big';
 const BIG_DIR = path.join(ROOT, 'm3-test', 'big');
 
-let passCount = 0;
-let failCount = 0;
-const failures = [];
-
-function check(name, ok, detail = '') {
-  if (ok) {
-    passCount += 1;
-    console.log(`PASS | ${name}${detail ? ` | ${detail}` : ''}`);
-  } else {
-    failCount += 1;
-    failures.push(name);
-    console.log(`FAIL | ${name}${detail ? ` | ${detail}` : ''}`);
-  }
-}
+// 断言与汇总走共用报告器（多套脚本同一份实现；输出格式与 test-all.sh 的提取正则一致）
+/** HTTP 调用超时（毫秒）：服务僵死/半开连接时脚本不能永久挂住 */
+const HTTP_TIMEOUT_MS = 15000;
+const reporter = createReporter();
+const { check } = reporter;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -81,6 +72,8 @@ async function api(method, urlPath, body) {
     method,
     headers: { 'Content-Type': 'application/json', ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}) },
     body: body === undefined ? undefined : JSON.stringify(body),
+    // 超时兜底：服务僵死/半开连接时不能让脚本永久挂住
+    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
   });
   const text = await response.text();
   try {
@@ -214,11 +207,11 @@ async function cleanupTestArtifacts() {
     } catch {
       continue;
     }
-    for (const item of dirents) {
-      if (!item.isFile()) continue;
-      const isProduct = /^big( \(\d+\))?\.zip(\.part.*)?$/.test(item.name);
+    for (const dirent of dirents) {
+      if (!dirent.isFile()) continue;
+      const isProduct = /^big( \(\d+\))?\.zip(\.part.*)?$/.test(dirent.name);
       if (!isProduct) continue;
-      await fsp.rm(path.join(dir, item.name), { force: true });
+      await fsp.rm(path.join(dir, dirent.name), { force: true });
       removed += 1;
     }
   }
@@ -231,6 +224,35 @@ function readPid() {
   } catch {
     return null;
   }
+}
+
+/** 造一条合法的历史探针行（优先复用现有行的结构，保证能通过服务端净化与解析） */
+function buildProbeHistoryLine(seedLines, index) {
+  const template = seedLines.length > 0 ? seedLines[index % seedLines.length] : null;
+  if (template) {
+    try {
+      const parsed = JSON.parse(template);
+      return JSON.stringify({ ...parsed, id: `zc-history-probe-${index}` });
+    } catch {
+      /* 坏行：退化为下面的最小合法对象 */
+    }
+  }
+  return JSON.stringify({
+    id: `zc-history-probe-${index}`,
+    kind: 'compress',
+    status: 'failed',
+    finishedAt: new Date().toISOString(),
+  });
+}
+
+/** 轮询历史文件直到行数收敛到上限内；超时仍超标就返回超标行数（由调用方判 FAIL） */
+async function readHistoryLinesConverged(maxLines, attempts = 10) {
+  let lines = await readHistoryLines();
+  for (let attempt = 0; lines.length > maxLines && attempt < attempts; attempt += 1) {
+    await sleep(300);
+    lines = await readHistoryLines();
+  }
+  return lines;
 }
 
 async function startService() {
@@ -456,19 +478,66 @@ async function main() {
   // ===== 十、历史查询 + 文件上限 =====
   const history = await api('GET', '/tasks/history?limit=5');
   check('历史查询端点可用', Boolean(history.json && history.json.data && Array.isArray(history.json.data.items)), `HTTP ${history.status} 条数=${history.json.data && history.json.data.items.length} max=${history.json.data && history.json.data.max}`);
-  const historyLines = await readHistoryLines();
-  // append→compact 之间有毫秒级窗口（先追一行再收敛），复核一次避免把"正在进行中的收敛"判成超标
-  if (historyLines.length > 200) await sleep(400);
-  const historyLinesFinal = historyLines.length > 200 ? await readHistoryLines() : historyLines;
+  const historyLines = await readHistoryLinesConverged(200);
   let historyParseOk = true;
-  for (const line of historyLinesFinal) {
+  for (const line of historyLines) {
     try {
       JSON.parse(line);
     } catch {
       historyParseOk = false;
     }
   }
-  check('task-history.jsonl 每行可解析且收敛在上限内', historyParseOk && historyLinesFinal.length <= 200, `${historyLinesFinal.length} 行（上限 200）`);
+  check(
+    'task-history.jsonl 每行可解析且收敛在上限内',
+    historyParseOk && historyLines.length <= 200,
+    `${historyLines.length} 行（上限 200）`,
+  );
+
+  // ===== 十.1 启动即收敛（回归锁死）=====
+  // 为什么单独锁这条：`appendHistoryEntry` 是"先追加、后收敛"两步，进程若在这两步之间被 kill -9，
+  // 文件就停在上限 +1 行。旧实现只在内存里 slice 而不重写文件 → 文件要等"下一次 append"才顺带收敛，
+  // 空闲实例会**永久停在 201 行**（验收方独立跑就是在这里抓到 31/1 的）。所以这里直接构造"上限+1 行"
+  // 的落盘状态，再杀进程重启，断言启动过程本身就把文件收敛掉。
+  const historyMax = (runtimeConfig.limits && runtimeConfig.limits.taskHistoryMax) || 200;
+  const historyBackup = await fsp.readFile(HISTORY_FILE, 'utf8').catch(() => '');
+  const backupLines = historyBackup.split('\n').filter((line) => line.trim().length > 0);
+  const overflowLines = [];
+  for (let index = 0; index <= historyMax; index += 1) {
+    overflowLines.push(buildProbeHistoryLine(backupLines, index));
+  }
+  await fsp.writeFile(HISTORY_FILE, `${overflowLines.join('\n')}\n`, 'utf8');
+  const overflowCount = (await readHistoryLines()).length;
+  check(
+    '构造「上限+1 行」的历史文件（模拟 append 后、收敛前被 kill）',
+    overflowCount === historyMax + 1,
+    `${overflowCount} 行（上限 ${historyMax}）`,
+  );
+
+  const trimPid = readPid();
+  if (trimPid) process.kill(trimPid, 'SIGKILL');
+  await sleep(800);
+  const restartedForTrim = await startService();
+  const trimmedLines = await readHistoryLinesConverged(historyMax, 6);
+  check(
+    '重启后文件收敛到上限内（启动加载即收敛，不依赖后续 append）',
+    restartedForTrim && trimmedLines.length <= historyMax,
+    `${trimmedLines.length} 行（上限 ${historyMax}）`,
+  );
+  check(
+    '收敛保留的是最新条目（末尾探针仍在）',
+    trimmedLines.some((line) => line.includes(`zc-history-probe-${historyMax}`)),
+    `含 zc-history-probe-${historyMax}`,
+  );
+  // 还原真实历史文件，并**再重启一次**让服务缓存与文件重新一致：
+  // 只还原文件而不重启的话，内存缓存里仍是探针行，后续 append 触发收敛时会把它写回文件
+  // —— "文件与缓存不一致"正是本 bug 的同类问题，测试自己不能留这个尾巴。
+  if (historyBackup) await fsp.writeFile(HISTORY_FILE, historyBackup, 'utf8');
+  const restorePid = readPid();
+  if (restorePid) process.kill(restorePid, 'SIGKILL');
+  await sleep(600);
+  const restartedForRestore = await startService();
+  const restoredLines = await readHistoryLines();
+  check('还原真实历史文件后重启：缓存与文件一致且未触发无谓重写', restartedForRestore && restoredLines.length <= historyMax, `${restoredLines.length} 行（上限 ${historyMax}）`);
 
   // ===== 十一、任务 API 不泄漏绝对路径 =====
   const detail = await api('GET', `/tasks/${bgId}`);
@@ -476,11 +545,8 @@ async function main() {
   const list = await api('GET', '/tasks?limit=20');
   assertNoAbsolutePath('任务列表', list.json);
 
-  console.log(`\n── 汇总 ──\nPASS ${passCount} / FAIL ${failCount}`);
-  if (failures.length > 0) {
-    console.log(`失败项：${failures.join('；')}`);
-    process.exitCode = 1;
-  }
+  const runSummary = reporter.summary();
+  if (runSummary.fail > 0) process.exitCode = 1;
 }
 
 main().catch((error) => {

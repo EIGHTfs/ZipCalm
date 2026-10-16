@@ -96,25 +96,27 @@ async function stageDelete(record, input, deps) {
   manager.setPhase(info.id, 'deleting');
   info.delete.status = 'deleting';
 
-  const result = await deleteService.deleteTargets({
+  const deleteOutcome = await deleteService.deleteTargets({
     taskId: info.id,
     kind: info.kind,
     reason: input.reason,
     targets: input.targets,
   });
 
-  info.delete.mode = result.mode;
-  info.delete.batchId = result.batchId;
-  info.delete.logFile = result.logFile;
-  info.delete.deleted = result.deleted;
-  info.delete.skipped = result.skipped;
-  info.delete.failed = result.failed;
+  info.delete.mode = deleteOutcome.mode;
+  info.delete.batchId = deleteOutcome.batchId;
+  info.delete.logFile = deleteOutcome.logFile;
+  info.delete.deleted = deleteOutcome.deleted;
+  info.delete.skipped = deleteOutcome.skipped;
+  info.delete.failed = deleteOutcome.failed;
   info.delete.deletedAt = Date.now();
-  info.delete.status = result.failed.length > 0
+  info.delete.status = deleteOutcome.failed.length > 0
     ? 'failed'
-    : (result.mode === 'log-only' ? 'logged' : 'deleted');
-  info.delete.error = result.failed.length > 0 ? { code: result.failed[0].code, message: '删除失败' } : null;
-  return result;
+    : (deleteOutcome.mode === 'log-only' ? 'logged' : 'deleted');
+  info.delete.error = deleteOutcome.failed.length > 0
+    ? { code: deleteOutcome.failed[0].code, message: '删除失败' }
+    : null;
+  return deleteOutcome;
 }
 
 // ===== 阶段二：压缩 =====

@@ -67,7 +67,9 @@ resolve_port() {
             process.stdout.write(String(parsed.server.port));
             process.exit(0);
           }
-        } catch {}
+        } catch {
+          // 配置不可读/不是合法 JSON：不报错，回落到下面的默认端口
+        }
       }
       process.stdout.write("3010");
     ' 2>/dev/null || true

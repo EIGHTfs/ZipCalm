@@ -22,19 +22,16 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 
+import { loadRuntimeConfig } from './helpers/test-config.mjs';
+import { createReporter } from './helpers/test-report.mjs';
+
 const execFileAsync = promisify(execFile);
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // ===== 配置：端口与存储根都从运行期配置读（不写死）=====
 
-const runtimeConfig = await (async () => {
-  try {
-    return JSON.parse(await fsp.readFile(path.join(PROJECT_ROOT, 'storage', 'config.json'), 'utf8'));
-  } catch {
-    return {};
-  }
-})();
+const runtimeConfig = await loadRuntimeConfig(PROJECT_ROOT);
 
 const PORT = process.env.ZIPCALM_PORT || (runtimeConfig.server && runtimeConfig.server.port) || 3010;
 const BASE = process.env.ZIPCALM_BASE || `http://127.0.0.1:${PORT}/api/v1`;
@@ -43,27 +40,11 @@ const API_WORK = '/m2-test'; // 存储根内的测试工作目录（API 视角�
 const WORK = path.join(ROOT, 'm2-test');
 const LOGIN = { username: process.env.ZIPCALM_TEST_USER || 'admin', password: process.env.ZIPCALM_TEST_PASSWORD || 'zipcalm' };
 
-let passCount = 0;
-let failCount = 0;
-let skipCount = 0;
-const failures = [];
-
-function check(name, ok, detail = '') {
-  if (ok) {
-    passCount += 1;
-    console.log(`PASS | ${name}${detail ? ` | ${detail}` : ''}`);
-  } else {
-    failCount += 1;
-    failures.push(name);
-    console.log(`FAIL | ${name}${detail ? ` | ${detail}` : ''}`);
-  }
-}
-
-/** 环境缺工具时跳过（不算失败，但必须显式说明原因，避免"静默通过"） */
-function skip(name, reason) {
-  skipCount += 1;
-  console.log(`SKIP | ${name} | ${reason}`);
-}
+// 断言/跳过/汇总走共用报告器（多套脚本同一份实现；输出格式与 test-all.sh 的提取正则一致）
+/** HTTP 调用超时（毫秒）：服务僵死/半开连接时脚本不能永久挂住 */
+const HTTP_TIMEOUT_MS = 15000;
+const reporter = createReporter();
+const { check, skip } = reporter;
 
 // ===== HTTP =====
 
@@ -77,6 +58,8 @@ async function api(method, urlPath, body) {
       ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
+    // 超时兜底：服务僵死/半开连接时不能让脚本永久挂住（测试脚本也要有超时纪律）
+    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
   });
   const text = await response.text();
   let json = null;
@@ -201,10 +184,10 @@ async function writeRawZip(destPath, entries) {
   for (const entry of entries) {
     const nameBuf = Buffer.from(entry.name, 'utf8');
     const isSymlink = entry.type === 'symlink';
-    const data = Buffer.from(isSymlink ? entry.target : (entry.content ?? 'x'), 'utf8');
+    const payloadBytes = Buffer.from(isSymlink ? entry.target : (entry.content ?? 'x'), 'utf8');
     const method = isSymlink ? 0 : 8; // symlink 用 store，普通文件用 deflate
-    const compressed = method === 8 ? zlib.deflateRawSync(data) : data;
-    const crc = zlib.crc32(data) >>> 0;
+    const compressed = method === 8 ? zlib.deflateRawSync(payloadBytes) : payloadBytes;
+    const crc = zlib.crc32(payloadBytes) >>> 0;
     const externalAttr = isSymlink ? ((0o120777 << 16) >>> 0) : ((0o100644 << 16) >>> 0);
 
     const local = Buffer.alloc(30);
@@ -216,7 +199,7 @@ async function writeRawZip(destPath, entries) {
     local.writeUInt16LE(day, 12);
     local.writeUInt32LE(crc, 14);
     local.writeUInt32LE(compressed.length, 18);
-    local.writeUInt32LE(data.length, 22);
+    local.writeUInt32LE(payloadBytes.length, 22);
     local.writeUInt16LE(nameBuf.length, 26);
     local.writeUInt16LE(0, 28);
     chunks.push(local, nameBuf, compressed);
@@ -231,7 +214,7 @@ async function writeRawZip(destPath, entries) {
     central.writeUInt16LE(day, 14);
     central.writeUInt32LE(crc, 16);
     central.writeUInt32LE(compressed.length, 20);
-    central.writeUInt32LE(data.length, 24);
+    central.writeUInt32LE(payloadBytes.length, 24);
     central.writeUInt16LE(nameBuf.length, 28);
     central.writeUInt16LE(0, 30);
     central.writeUInt16LE(0, 32);
@@ -466,11 +449,8 @@ async function main() {
     check('取消接口可用（已完成则返回 TASK_NOT_CANCELLABLE）', cancelOk, `HTTP ${cancelResult.status} code=${cancelledCode || 'ok'}`);
   }
 
-  console.log(`\n── 汇总 ──\nPASS ${passCount} / FAIL ${failCount} / SKIP ${skipCount}`);
-  if (failures.length > 0) {
-    console.log(`失败项：${failures.join('；')}`);
-    process.exitCode = 1;
-  }
+  const runSummary = reporter.summary({ withSkip: true });
+  if (runSummary.fail > 0) process.exitCode = 1;
 }
 
 main().catch((error) => {

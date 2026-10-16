@@ -58,8 +58,8 @@ async function pluginEstimate(spec, inputBytes, options = {}) {
   const names = Array.isArray(options.sample && options.sample.names) ? options.sample.names : [];
   const ratioOf = {
     none: 1.0,
-    gzip: names.length > 0 && names.every((item) => ALREADY_COMPRESSED.test(item)) ? 0.98 : 0.6,
-    zstd: names.length > 0 && names.every((item) => ALREADY_COMPRESSED.test(item)) ? 0.95 : 0.5,
+    gzip: names.length > 0 && names.every((entryName) => ALREADY_COMPRESSED.test(entryName)) ? 0.98 : 0.6,
+    zstd: names.length > 0 && names.every((entryName) => ALREADY_COMPRESSED.test(entryName)) ? 0.95 : 0.5,
   }[spec.compression];
   const headerOverhead = 512 * Math.max(1, names.length || 1);
   return {
@@ -139,9 +139,9 @@ async function collectEntryMeta(spec, archivePath) {
 
 /** 预先建好所有目标目录：第二遍必须**同步**接管条目流，不能在里面 await mkdir */
 async function prepareTargetDirs(plan) {
-  for (const item of plan) {
-    if (item.isDir) await fsp.mkdir(item.targetPath, { recursive: true });
-    else await fsp.mkdir(path.dirname(item.targetPath), { recursive: true });
+  for (const plannedEntry of plan) {
+    if (plannedEntry.isDir) await fsp.mkdir(plannedEntry.targetPath, { recursive: true });
+    else await fsp.mkdir(path.dirname(plannedEntry.targetPath), { recursive: true });
   }
 }
 
@@ -154,20 +154,20 @@ async function pluginExtract(spec, ctx) {
   const overwrite = Boolean(ctx.options && ctx.options.overwrite);
 
   const meta = await collectEntryMeta(spec, ctx.archivePath);
-  const planned = planTargets(meta.map((item, index) => ({ ...item, index })), targetDir, overwrite);
+  const planned = planTargets(meta.map((entryMeta, index) => ({ ...entryMeta, index })), targetDir, overwrite);
   await prepareTargetDirs(planned.plan);
 
   // 第二遍：按顺序把每个条目的数据写到判定好的目标路径
   let cursor = 0;
   await parseArchive(ctx.archivePath, spec.compression, (entry) => {
-    const item = planned.plan[cursor];
+    const plannedEntry = planned.plan[cursor];
     cursor += 1;
-    if (!item || item.isDir) {
+    if (!plannedEntry || plannedEntry.isDir) {
       entry.resume();
       return null;
     }
     // 同步 attach：pipeline 立即开始消费该条目
-    return pipeline(entry, fs.createWriteStream(item.targetPath));
+    return pipeline(entry, fs.createWriteStream(plannedEntry.targetPath));
   });
 
   return {

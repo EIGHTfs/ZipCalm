@@ -3,7 +3,7 @@
 // 为什么集中在 client.js（docs/12 §三 web/src/api/ 是唯一网络出口）：
 // 契约里所有响应都是 `{ ok, data, error }`（docs/M0/API规范.md §一），
 // 所有失败都带机器可读的 code（§八）。把「解包 + 分支 + 鉴权 + 失效处理」收在一个地方，
-// 页面只写 `const data = await api.get('/fs/list', { path: '/' })`，不重复处理信封。
+// 页面只写 `const listing = await api.get('/fs/list', { path: '/' })`，不重复处理信封。
 //
 // 双认证（§二）：
 // - Session：`withCredentials: true`，浏览器自动带 Cookie，前端不碰它；
@@ -34,6 +34,8 @@ const AUTH_ERROR_CODES = [
 
 // HTTP 状态 → 错误码的兜底映射：只用于「响应不是契约信封」的情况
 // （例如反向代理返回 HTML 错误页、网关 502）。值全部取自 shared/，不新增私有码。
+/** 507 Insufficient Storage（WebDAV 扩展位；本项目用它表达"磁盘空间不足"） */
+const HTTP_INSUFFICIENT_STORAGE = 507;
 const HTTP_STATUS_FALLBACK = {
   400: ERROR_CODES.BAD_REQUEST,
   401: ERROR_CODES.AUTH_REQUIRED,
@@ -46,7 +48,7 @@ const HTTP_STATUS_FALLBACK = {
   500: ERROR_CODES.INTERNAL_ERROR,
   501: ERROR_CODES.NOT_IMPLEMENTED,
   503: ERROR_CODES.SERVICE_UNAVAILABLE,
-  507: ERROR_CODES.DISK_FULL,
+  [HTTP_INSUFFICIENT_STORAGE]: ERROR_CODES.DISK_FULL,
 };
 
 // ===== 错误对象 =====

@@ -49,7 +49,7 @@ export function createRegistry(options = {}) {
   const byExt = new Map();
   /** 扩展名按长度降序（最长优先匹配） */
   let extKeysDesc = [];
-  /** Map<id, {value:boolean, at:number}> */
+  /** Map<id, {available:boolean, at:number}> —— 可用性探测结果（60 秒内复用，避免每次列格式都探测） */
   const availabilityCache = new Map();
   const loadFailures = [];
   /** 插件目录上次扫描时的 mtime：用于「加/删一个目录即注册」的运行时重扫 */
@@ -136,7 +136,8 @@ export function createRegistry(options = {}) {
     } catch {
       lastScanMtimeMs = 0;
     }
-    logger.info('format registry loaded', { formats: [...byId.keys()], failures: loadFailures.length });
+    const loadedFormatIds = [...byId.keys()];
+    logger.info('format registry loaded', { formats: loadedFormatIds, failures: loadFailures.length });
     return { loaded: byId.size, failed: loadFailures.length };
   }
 
@@ -145,24 +146,24 @@ export function createRegistry(options = {}) {
     const plugin = byId.get(id);
     if (!plugin) return false;
     const cached = availabilityCache.get(id);
-    if (cached && Date.now() - cached.at < AVAILABILITY_TTL_MS) return cached.value;
+    if (cached && Date.now() - cached.at < AVAILABILITY_TTL_MS) return cached.available;
 
-    let value = false;
+    let probeResult = false;
     try {
-      value = Boolean(await plugin.available());
+      probeResult = Boolean(await plugin.available());
     } catch (error) {
       logger.warn('format availability probe failed', { id, error: error.message });
-      value = false;
+      probeResult = false;
     }
-    availabilityCache.set(id, { value, at: Date.now() });
-    return value;
+    availabilityCache.set(id, { available: probeResult, at: Date.now() });
+    return probeResult;
   }
 
   /** 供 API /formats 使用 */
   async function list() {
     // 每次列格式前先看看插件目录有没有增删（放一个目录进去就能出现，不需要改注册代码、也不需要重启）
     await refreshIfChanged();
-    const items = [];
+    const formatItems = [];
     for (const plugin of byId.values()) {
       const available = await isAvailable(plugin.id);
       let unavailableReason = null;
@@ -173,7 +174,7 @@ export function createRegistry(options = {}) {
           unavailableReason = null;
         }
       }
-      items.push({
+      formatItems.push({
         id: plugin.id,
         name: plugin.name,
         ext: plugin.ext,
@@ -185,7 +186,7 @@ export function createRegistry(options = {}) {
         defaultLevel: plugin.defaultLevel ?? null,
       });
     }
-    return items;
+    return formatItems;
   }
 
   function get(id) {

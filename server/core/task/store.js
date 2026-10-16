@@ -59,24 +59,37 @@ async function loadTasks(ctx) {
   return Array.isArray(data) ? data : [];
 }
 
-/** 读取历史文件（逐行解析 + 净化；坏行跳过） */
+/**
+ * 读取历史文件（逐行解析 + 净化；坏行跳过）。
+ *
+ * **关键：启动加载时就收敛文件本身**，不只裁内存。
+ * 为什么必须这样：`appendHistoryEntry` 是"先 appendFile、后 trimHistoryFile"两步，
+ * 进程若在这两步之间被 kill（crash 套件就是用 kill -9 复现的），文件就会停在上限 +1 行；
+ * 而旧实现只在内存里 slice(-max)，文件要等"下一次 append"才顺带收敛 ——
+ * 若启动后一直空闲，文件会**永久停在 201 行**（实测：验收独立跑就抓到了这条）。
+ */
 async function loadHistoryFromFile(ctx) {
+  let rawLines;
   try {
-    const text = await fs.readFile(ctx.historyFile, 'utf8');
-    return text
-      .split('\n')
-      .filter((line) => line.trim().length > 0)
-      .slice(-ctx.historyMax)
-      .map((line) => {
-        try {
-          return sanitizeHistoryEntry(JSON.parse(line));
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean);
+    rawLines = (await fs.readFile(ctx.historyFile, 'utf8')).split('\n').filter((line) => line.trim().length > 0);
   } catch {
-    return [];
+    return []; // 文件不存在/不可读：按空历史启动（不拖垮启动）
+  }
+
+  const entries = rawLines.slice(-ctx.historyMax).map(parseHistoryLine).filter(Boolean);
+
+  if (rawLines.length > ctx.historyMax) {
+    await rewriteHistoryFile(ctx, entries, { was: rawLines.length, trigger: '启动加载' });
+  }
+  return entries;
+}
+
+/** 单行 → 净化后的历史条目；坏行返回 null（调用方过滤掉） */
+function parseHistoryLine(line) {
+  try {
+    return sanitizeHistoryEntry(JSON.parse(line));
+  } catch {
+    return null;
   }
 }
 
@@ -140,18 +153,39 @@ async function flushStore(ctx) {
 }
 
 /**
+ * 用给定条目**原子重写**历史文件（写 .tmp → rename）。
+ * 空数组写成空文件（合法：0 行历史）；失败只告警，不影响运行。
+ * @param {object} ctx store 上下文
+ * @param {Array} entries 要保留的条目（旧 → 新）
+ * @param {{was?: number, trigger?: string}} [meta] 仅用于日志（哪次触发的、原来多少行）
+ */
+async function rewriteHistoryFile(ctx, entries, meta = {}) {
+  try {
+    const tmpPath = `${ctx.historyFile}.tmp`;
+    const body = entries.length > 0 ? `${entries.map((item) => JSON.stringify(item)).join('\n')}\n` : '';
+    await fs.writeFile(tmpPath, body, 'utf8');
+    await fs.rename(tmpPath, ctx.historyFile);
+    ctx.logger.info('task-history.jsonl 已按条数收敛', {
+      kept: entries.length,
+      was: Number.isInteger(meta.was) ? meta.was : null,
+      max: ctx.historyMax,
+      trigger: meta.trigger || '追加后',
+    });
+  } catch (error) {
+    ctx.logger.warn('task-history.jsonl 压缩失败（不影响运行）', { error: error.message });
+  }
+}
+
+/**
  * 历史文件按条数收敛（契约：`task-history.jsonl` 保留最近 `limits.taskHistoryMax` 条）。
  * 触发条件只看行数（不再设"文件多大才整理"的门槛，否则行数会长期超过上限 —— 实测踩过）；
- * 超过就按内存缓存重写一次（200 行 ≈ 400KB，代价可控），仍用"临时文件 + rename"保证原子性。
+ * 超过就按内存缓存重写一次（200 行 ≈ 400KB，代价可控），原子性由 rewriteHistoryFile 保证。
  */
 async function trimHistoryFile(ctx) {
   try {
     const lines = (await fs.readFile(ctx.historyFile, 'utf8')).split('\n').filter((line) => line.trim().length > 0);
     if (lines.length <= ctx.historyMax) return;
-    const tmpPath = `${ctx.historyFile}.tmp`;
-    await fs.writeFile(tmpPath, `${ctx.historyCache.map((item) => JSON.stringify(item)).join('\n')}\n`, 'utf8');
-    await fs.rename(tmpPath, ctx.historyFile);
-    ctx.logger.info('task-history.jsonl 已按条数收敛', { kept: ctx.historyCache.length, was: lines.length, max: ctx.historyMax });
+    await rewriteHistoryFile(ctx, ctx.historyCache, { was: lines.length, trigger: '追加后' });
   } catch (error) {
     ctx.logger.warn('task-history.jsonl 压缩失败（不影响运行）', { error: error.message });
   }

@@ -38,7 +38,7 @@ export function commonAncestor(dirs) {
  * 包内名字会带上必要的中间目录（避免冲突），这是本格式已知的命名边界。
  */
 export async function collectEntries(ctx) {
-  const items = [];
+  const fileEntries = [];
   const sourceParents = [];
   const sourceStats = new Map();
   let skippedSymlinks = 0;
@@ -46,23 +46,23 @@ export async function collectEntries(ctx) {
   for (const source of ctx.sources) {
     const sourceName = source.name || path.basename(source.absPath);
     sourceParents.push(path.dirname(source.absPath));
-    const result = await collectSource(source, sourceName, skippedSymlinks);
-    skippedSymlinks = result.skippedSymlinks;
-    items.push(...result.items);
-    sourceStats.set(sourceName, { count: result.items.length, bytes: result.bytes });
+    const collected = await collectSource(source, sourceName, skippedSymlinks);
+    skippedSymlinks = collected.skippedSymlinks;
+    fileEntries.push(...collected.entries);
+    sourceStats.set(sourceName, { count: collected.entries.length, bytes: collected.bytes });
   }
 
   const base = commonAncestor(sourceParents);
-  for (const item of items) {
-    item.name = path.relative(base, item.absPath).split(path.sep).join('/');
+  for (const fileEntry of fileEntries) {
+    fileEntry.name = path.relative(base, fileEntry.absPath).split(path.sep).join('/');
   }
 
   return {
-    items,
+    items: fileEntries,
     base,
     sourceStats,
-    totalBytes: items.reduce((sum, item) => sum + item.size, 0),
-    totalFiles: items.length,
+    totalBytes: fileEntries.reduce((sum, fileEntry) => sum + fileEntry.size, 0),
+    totalFiles: fileEntries.length,
     skippedSymlinks,
   };
 }
@@ -70,15 +70,15 @@ export async function collectEntries(ctx) {
 /** 单个源 → 条目列表（文件直接用；目录递归；符号链接跳过并计数） */
 async function collectSource(source, sourceName, skipped) {
   let skippedSymlinks = skipped;
-  const items = [];
+  const entries = [];
 
   if (source.kind === 'file') {
-    const stat = await fsp.lstat(source.absPath).catch(() => null);
-    if (!stat || !stat.isFile()) {
+    const fileStat = await fsp.lstat(source.absPath).catch(() => null);
+    if (!fileStat || !fileStat.isFile()) {
       throw apiError(ERROR_CODES.PATH_NOT_FOUND, '源文件在扫描后已不可用', { source: sourceName });
     }
-    items.push({ absPath: source.absPath, size: stat.size, sourceName });
-    return { items, bytes: stat.size, skippedSymlinks };
+    entries.push({ absPath: source.absPath, size: fileStat.size, sourceName });
+    return { entries, bytes: fileStat.size, skippedSymlinks };
   }
 
   let bytes = 0;
@@ -93,14 +93,14 @@ async function collectSource(source, sourceName, skipped) {
       if (dirent.isDirectory()) {
         await walk(childAbs, `${prefix}/${dirent.name}`);
       } else if (dirent.isFile()) {
-        const stat = await fsp.lstat(childAbs);
-        items.push({ absPath: childAbs, size: stat.size, sourceName });
-        bytes += stat.size;
+        const fileStat = await fsp.lstat(childAbs);
+        entries.push({ absPath: childAbs, size: fileStat.size, sourceName });
+        bytes += fileStat.size;
       }
     }
   };
   await walk(source.absPath, sourceName);
-  return { items, bytes, skippedSymlinks };
+  return { entries, bytes, skippedSymlinks };
 }
 
 /**
@@ -120,9 +120,9 @@ export async function writeTarStream(ctx, collected, stats) {
   const done = pipelineWith([pack, compressor || new PassThrough(), output], stats.signal);
 
   try {
-    for (const item of items) {
+    for (const fileEntry of items) {
       if (stats.signal && stats.signal.aborted) throw apiError(ERROR_CODES.ABORTED, '任务已取消');
-      pack.add(item.name);
+      pack.add(fileEntry.name);
     }
     pack.end();
     reportBySource(sourceStats, { report, totalBytes, totalFiles });
@@ -135,7 +135,8 @@ export async function writeTarStream(ctx, collected, stats) {
     throw error;
   }
 
-  const bytesOut = fs.existsSync(ctx.tempPath) ? (await fsp.stat(ctx.tempPath)).size : 0;
+  // 产物大小：stat 失败（理论上不会）就当 0，不用 existsSync 先探一次（同步 I/O）
+  const bytesOut = await fsp.stat(ctx.tempPath).then((stat) => stat.size).catch(() => 0);
   return {
     outputPath: ctx.tempPath,
     entries: totalFiles,
@@ -150,17 +151,17 @@ export async function writeTarStream(ctx, collected, stats) {
 function reportBySource(sourceStats, { report, totalBytes, totalFiles }) {
   let processedBytes = 0;
   let processedFiles = 0;
-  for (const [sourceName, stat] of sourceStats) {
-    processedBytes += stat.bytes;
-    processedFiles += stat.count;
+  for (const [sourceName, sourceStat] of sourceStats) {
+    processedBytes += sourceStat.bytes;
+    processedFiles += sourceStat.count;
     report({ processedBytes, totalBytes, processedFiles, totalFiles, currentFile: sourceName });
   }
 }
 
-/** 失败/取消时清掉半成品（清理失败不掩盖原始错误） */
+/** 失败/取消时清掉半成品（rm --force：不存在的路径不算错；清理失败不掩盖原始错误） */
 async function discardTemp(tempPath) {
   try {
-    if (fs.existsSync(tempPath)) await fsp.unlink(tempPath);
+    await fsp.rm(tempPath, { force: true });
   } catch {
     /* 见上 */
   }

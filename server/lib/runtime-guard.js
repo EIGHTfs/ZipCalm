@@ -43,7 +43,7 @@ export function checkNodeVersion(min = MIN_NODE, version = process.versions.node
 
 /** 版本不满足就抛错（启动流程捕获后打印并退出） */
 export function assertNodeVersion(min = MIN_NODE, version = process.versions.node) {
-  const result = checkNodeVersion(min, version);
-  if (!result.ok) throw new Error(result.message);
-  return result;
+  const versionCheck = checkNodeVersion(min, version);
+  if (!versionCheck.ok) throw new Error(versionCheck.message);
+  return versionCheck;
 }

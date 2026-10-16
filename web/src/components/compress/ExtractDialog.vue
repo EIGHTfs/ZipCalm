@@ -29,9 +29,9 @@ watch(
     errorText.value = '';
     if (!open) return;
     try {
-      const data = await api.post('/extract/preflight', { path: props.archivePath });
-      preflightInfo.value = data;
-      if (data && data.targetDir) targetDir.value = data.targetDir;
+      const preflight = await api.post('/extract/preflight', { path: props.archivePath });
+      preflightInfo.value = preflight;
+      if (preflight && preflight.targetDir) targetDir.value = preflight.targetDir;
     } catch (error) {
       errorText.value = `[${error.code || 'ERROR'}] ${error.message}`;
     }
@@ -43,12 +43,12 @@ async function submit() {
   submitting.value = true;
   errorText.value = '';
   try {
-    const data = await api.post('/extract/tasks', {
+    const created = await api.post('/extract/tasks', {
       path: props.archivePath,
       targetDir: targetDir.value || undefined,
       options: { deleteArchiveAfterExtract: deleteArchive.value },
     });
-    emit('submitted', data.task.id);
+    emit('submitted', created.task.id);
   } catch (error) {
     errorText.value = `[${error.code || 'ERROR'}] ${error.message}`;
   } finally {

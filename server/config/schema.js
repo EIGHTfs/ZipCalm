@@ -44,15 +44,19 @@ function validateServer(config, errors) {
   if (!Number.isInteger(port) || port < 1 || port > 65535) errors.push('server.port 必须是 1~65535 的整数');
 }
 
-function validateAuth(config, errors, warnings) {
-  if (!requireSection(config, 'auth', errors)) return;
-  const { username, password, passwordHash, sessionTtlMs, tokenTtlMs, cookieName, loginRateLimit } = config.auth;
-
+/** 账号与口令相关校验（用户名 / passwordHash 或 password / 哈希格式） */
+function validateAuthCredentials(auth, errors, warnings) {
+  const { username, password, passwordHash } = auth;
   if (typeof username !== 'string' || username.length === 0) errors.push('auth.username 必须是非空字符串');
   if (!password && !passwordHash) errors.push('auth 必须配置 passwordHash（推荐）或 password 其中之一');
   if (passwordHash && !/^scrypt\$/.test(String(passwordHash))) {
     warnings.push('auth.passwordHash 不是本项目的 scrypt$ 格式，可能无法通过校验（请用 scripts/hash-password.js 生成）');
   }
+}
+
+/** 会话/令牌与登录限流相关校验 */
+function validateAuthTokens(auth, errors) {
+  const { sessionTtlMs, tokenTtlMs, cookieName, loginRateLimit } = auth;
   if (!Number.isInteger(sessionTtlMs) || sessionTtlMs <= 0) errors.push('auth.sessionTtlMs 必须是正整数');
   if (!Number.isInteger(tokenTtlMs) || tokenTtlMs <= 0) errors.push('auth.tokenTtlMs 必须是正整数');
   if (typeof cookieName !== 'string' || !/^[A-Za-z0-9_-]+$/.test(cookieName)) {
@@ -61,6 +65,12 @@ function validateAuth(config, errors, warnings) {
   if (!isPlainObject(loginRateLimit) || !Number.isInteger(loginRateLimit.max) || !Number.isInteger(loginRateLimit.windowMs)) {
     errors.push('auth.loginRateLimit 需要 { max, windowMs } 两个整数');
   }
+}
+
+function validateAuth(config, errors, warnings) {
+  if (!requireSection(config, 'auth', errors)) return;
+  validateAuthCredentials(config.auth, errors, warnings);
+  validateAuthTokens(config.auth, errors);
 }
 
 function validateStorage(config, errors) {
@@ -76,17 +86,9 @@ function validateStorage(config, errors) {
   }
 }
 
-function validateLimits(config, errors) {
-  if (!requireSection(config, 'limits', errors)) return;
-  const {
-    maxPathLength,
-    maxPathSegmentLength,
-    maxListEntries,
-    defaultPageSize,
-    taskRetentionMax,
-    taskRetentionDays,
-  } = config.limits;
-
+/** 路径长度相关（含两者之间的相对关系） */
+function validatePathLimits(limits, errors) {
+  const { maxPathLength, maxPathSegmentLength } = limits;
   if (!Number.isInteger(maxPathLength) || maxPathLength < 64) errors.push('limits.maxPathLength 必须是 ≥64 的整数');
   if (
     !Number.isInteger(maxPathSegmentLength)
@@ -98,15 +100,32 @@ function validateLimits(config, errors) {
   if (Number.isInteger(maxPathSegmentLength) && Number.isInteger(maxPathLength) && maxPathSegmentLength > maxPathLength) {
     errors.push('limits.maxPathSegmentLength 不能大于 limits.maxPathLength');
   }
+}
+
+/** 列表与分页相关 */
+function validateListLimits(limits, errors) {
+  const { maxListEntries, defaultPageSize } = limits;
   if (!Number.isInteger(maxListEntries) || maxListEntries < 1) errors.push('limits.maxListEntries 必须是正整数');
   if (!Number.isInteger(defaultPageSize) || defaultPageSize < 1) errors.push('limits.defaultPageSize 必须是正整数');
-  // 任务活动记录保留策略（0 表示"不按该维度限制"，便于排障时临时放宽）
+}
+
+/** 任务活动记录保留策略 */
+function validateTaskRetentionLimits(limits, errors) {
+  const { taskRetentionMax, taskRetentionDays } = limits;
   if (!Number.isInteger(taskRetentionMax) || taskRetentionMax < 1) {
     errors.push('limits.taskRetentionMax 必须是 ≥1 的整数');
   }
   if (typeof taskRetentionDays !== 'number' || Number.isNaN(taskRetentionDays) || taskRetentionDays <= 0) {
     errors.push('limits.taskRetentionDays 必须是正数（天，可小数）');
   }
+}
+
+function validateLimits(config, errors) {
+  if (!requireSection(config, 'limits', errors)) return;
+  const limits = config.limits;
+  validatePathLimits(limits, errors);
+  validateListLimits(limits, errors);
+  validateTaskRetentionLimits(limits, errors);
 }
 
 function validateCompress(config, errors) {

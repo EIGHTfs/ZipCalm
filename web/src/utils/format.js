@@ -75,12 +75,12 @@ export function formatDuration(ms) {
  * 时间格式化（Unix 毫秒 → 本地时间字符串）。
  * @param {number|null|undefined} ms
  * @param {string} [template]
- * @returns {string} 例如 '2026-10-16 02:30'
+ * @returns {string} 本地时间字符串（默认模板 YYYY-MM-DD HH:mm）
  */
 export function formatDateTime(ms, template = 'YYYY-MM-DD HH:mm') {
   if (!Number.isFinite(ms)) return PLACEHOLDER;
-  const value = dayjs(ms);
-  return value.isValid() ? value.format(template) : PLACEHOLDER;
+  const moment = dayjs(ms);
+  return moment.isValid() ? moment.format(template) : PLACEHOLDER;
 }
 
 /**
@@ -98,11 +98,11 @@ export function formatDateTimeFull(ms) {
  */
 export function formatRelativeTime(ms) {
   if (!Number.isFinite(ms)) return PLACEHOLDER;
-  const value = dayjs(ms);
-  if (!value.isValid()) return PLACEHOLDER;
+  const moment = dayjs(ms);
+  if (!moment.isValid()) return PLACEHOLDER;
   // 未来时间不给「xx 后」，直接显示绝对时间，避免时钟漂移显示成笑话
-  if (value.valueOf() > Date.now()) return formatDateTime(ms);
-  return value.fromNow();
+  if (moment.valueOf() > Date.now()) return formatDateTime(ms);
+  return moment.fromNow();
 }
 
 /**

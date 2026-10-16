@@ -11,6 +11,9 @@ export const FORMAT_IDS = Object.freeze({
   TARZST: 'tarzst',
 });
 
+/** zstd 支持的压缩级别上限（zstd 规范值；与格式包 levelRange 保持一致） */
+const ZSTD_MAX_LEVEL = 19;
+
 export const FORMATS = Object.freeze([
   {
     id: FORMAT_IDS.ZIP,
@@ -46,7 +49,7 @@ export const FORMATS = Object.freeze([
     extAliases: ['.tzst'],
     mime: 'application/zstd',
     defaultLevel: 3,
-    levelRange: [1, 19],
+    levelRange: [1, ZSTD_MAX_LEVEL],
   },
 ]);
 

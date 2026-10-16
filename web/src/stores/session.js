@@ -75,10 +75,10 @@ export const useSessionStore = defineStore('session', {
     async login(username, password) {
       // skipAuthHandler：登录失败的 401 由本页自己展示（错误码 + 文案），
       // 不应触发全局"凭据失效"钩子，否则顶栏会被误标成「登录已过期」。
-      const data = await api.post('/auth/login', { username, password }, { skipAuthHandler: true });
-      if (data && data.token) setToken(data.token);
-      this.setAuthenticated((data && data.user) || { name: username }, 'session');
-      return data;
+      const loginResult = await api.post('/auth/login', { username, password }, { skipAuthHandler: true });
+      if (loginResult && loginResult.token) setToken(loginResult.token);
+      this.setAuthenticated((loginResult && loginResult.user) || { name: username }, 'session');
+      return loginResult;
     },
 
     /** 登出（POST /auth/logout）；本地状态无论如何都清干净 */
@@ -100,8 +100,8 @@ export const useSessionStore = defineStore('session', {
     async ensureLoaded() {
       this.checking = true;
       try {
-        const data = await api.get('/auth/me', undefined, { skipAuthHandler: true });
-        this.setAuthenticated((data && data.user) || null, data && data.authType);
+        const meResult = await api.get('/auth/me', undefined, { skipAuthHandler: true });
+        this.setAuthenticated((meResult && meResult.user) || null, meResult && meResult.authType);
         return true;
       } catch (error) {
         if (error && error.isAuthError) {

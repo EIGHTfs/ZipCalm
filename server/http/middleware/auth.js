@@ -92,21 +92,18 @@ export function registerAuth(app, { store, config }) {
 
   // ===== Cookie 助手（统一 HttpOnly / SameSite=Lax，契约 §二）=====
 
-  app.decorate('setSessionCookie', function setCookie(reply, sid, ttlMs) {
-    setSessionCookie(reply, config, sid, ttlMs);
-  });
-  app.decorate('clearSessionCookie', function clearCookie(reply) {
-    reply.clearCookie(config.cookieName, { path: '/' });
-  });
+  app.decorate('setSessionCookie', (reply, sid, ttlMs) => setSessionCookie(reply, config, sid, ttlMs));
+  app.decorate('clearSessionCookie', (reply) => reply.clearCookie(config.cookieName, { path: '/' }));
+}
 
-  function setSessionCookie(reply, cfg, sid, ttlMs) {
-    reply.setCookie(cfg.cookieName, sid, {
-      path: '/',
-      httpOnly: true,
-      sameSite: 'lax',
-      // 生产环境走 HTTPS 时应置 true；本机/局域网 HTTP 场景保持 false，否则浏览器不回传
-      secure: false,
-      maxAge: Math.floor(ttlMs / 1000),
-    });
-  }
+/** 写会话 Cookie（统一属性；放模块级，避免在注册函数里再嵌一层函数） */
+function setSessionCookie(reply, cfg, sid, ttlMs) {
+  reply.setCookie(cfg.cookieName, sid, {
+    path: '/',
+    httpOnly: true,
+    sameSite: 'lax',
+    // 生产环境走 HTTPS 时应置 true；本机/局域网 HTTP 场景保持 false，否则浏览器不回传
+    secure: false,
+    maxAge: Math.floor(ttlMs / 1000),
+  });
 }

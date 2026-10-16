@@ -41,16 +41,10 @@ export async function hashPassword(password) {
   ].join('$');
 }
 
-/**
- * 校验密码（timing-safe 比较）。
- * @param {string} password 明文
- * @param {string} stored 存储的哈希（scrypt$ 格式）
- * @returns {Promise<boolean>}
- */
-export async function verifyPassword(password, stored) {
-  if (typeof password !== 'string' || typeof stored !== 'string') return false;
+/** 解析 scrypt$ 哈希串 → 派生参数；格式不对返回 null（不抛错，调用方按"校验失败"处理） */
+function parseScryptHash(stored) {
   const parts = stored.split('$');
-  if (parts.length !== 6 || parts[0] !== 'scrypt') return false;
+  if (parts.length !== 6 || parts[0] !== 'scrypt') return null;
 
   const [, nRaw, rRaw, pRaw, saltB64, hashB64] = parts;
   const params = {
@@ -59,13 +53,24 @@ export async function verifyPassword(password, stored) {
     p: Number.parseInt(pRaw, 10),
     keylen: Buffer.from(hashB64, 'base64').length,
   };
-  if (!Number.isInteger(params.N) || !Number.isInteger(params.r) || !Number.isInteger(params.p) || params.keylen <= 0) {
-    return false;
-  }
+  const valid = Number.isInteger(params.N) && Number.isInteger(params.r) && Number.isInteger(params.p) && params.keylen > 0;
+  return valid ? { params, saltB64, hashB64 } : null;
+}
+
+/**
+ * 校验密码（timing-safe 比较）。
+ * @param {string} password 明文
+ * @param {string} stored 存储的哈希（scrypt$ 格式）
+ * @returns {Promise<boolean>}
+ */
+export async function verifyPassword(password, stored) {
+  if (typeof password !== 'string' || typeof stored !== 'string') return false;
+  const parsed = parseScryptHash(stored);
+  if (!parsed) return false;
 
   try {
-    const derived = await scryptAsync(password, Buffer.from(saltB64, 'base64'), params);
-    const expected = Buffer.from(hashB64, 'base64');
+    const derived = await scryptAsync(password, Buffer.from(parsed.saltB64, 'base64'), parsed.params);
+    const expected = Buffer.from(parsed.hashB64, 'base64');
     if (expected.length !== derived.length) return false;
     return crypto.timingSafeEqual(derived, expected);
   } catch {

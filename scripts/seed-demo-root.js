@@ -15,6 +15,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+/** 假二进制文件的填充字节（'Z'：肉眼可辨，且不是 0/0xFF 这类容易被误判的填充） */
+const DEMO_FILL_BYTE = 0x5a;
 const ROOT = path.resolve(
   process.argv[2] || process.env.ZIPCALM_STORAGE_ROOT || path.join(PROJECT_ROOT, 'storage', 'fs-root'),
 );
@@ -62,7 +64,7 @@ async function symlinkIfAbsent(relPath, target) {
 /** 生成确定长度的假二进制内容（用于验证列表里的大小显示） */
 function fakeBytes(size, seedText) {
   const header = Buffer.from(`ZipCalm demo file: ${seedText}\n`);
-  const body = Buffer.alloc(Math.max(0, size - header.length), 0x5a);
+  const body = Buffer.alloc(Math.max(0, size - header.length), DEMO_FILL_BYTE);
   return Buffer.concat([header, body]);
 }
 

@@ -26,7 +26,7 @@ function toBool(value) {
 export default async function fsRoutes(app) {
   app.get('/fs/list', { preHandler: [app.requireAuth, app.guardPath({ source: 'query' })] }, async (request, reply) => {
     const query = request.query || {};
-    const result = await listDirectory(app.fsContext, {
+    const listing = await listDirectory(app.fsContext, {
       // 用中间件已校验过的 userPath 再走一遍 core（core 内部仍会完整校验）
       path: request.userPath,
       sort: query.sort,
@@ -35,7 +35,7 @@ export default async function fsRoutes(app) {
       limit: toInt(query.limit),
       offset: toInt(query.offset),
     });
-    reply.ok(result);
+    reply.ok(listing);
   });
 
   app.get('/fs/stat', { preHandler: [app.requireAuth, app.guardPath({ source: 'query' })] }, async (request, reply) => {

@@ -52,7 +52,7 @@ async function openDetail(id) {
   }
 }
 
-async function run(action) {
+async function runTaskAction(action) {
   if (!selectedId.value || busy.value) return;
   busy.value = true;
   errorText.value = '';
@@ -228,7 +228,7 @@ watch(
                 type="button"
                 :disabled="busy"
                 data-testid="detail-cancel"
-                @click="run('cancel')"
+                @click="runTaskAction('cancel')"
               >
                 取消任务
               </button>
@@ -237,7 +237,7 @@ watch(
                 type="button"
                 :disabled="busy"
                 data-testid="detail-retry"
-                @click="run('retry')"
+                @click="runTaskAction('retry')"
               >
                 重试（新建任务）
               </button>
@@ -246,7 +246,7 @@ watch(
                 type="button"
                 :disabled="busy"
                 data-testid="detail-confirm-delete"
-                @click="run('confirm-delete')"
+                @click="runTaskAction('confirm-delete')"
               >
                 确认删除（{{ detail.delete ? detail.delete.targets.length : 0 }} 项）
               </button>

@@ -149,7 +149,7 @@ async function handleTaskEvents(app, request, reply) {
     try {
       res.end();
     } catch {
-      /* ignore */
+      /* 连接可能已被对端关闭：忽略即可，不影响订阅者清理 */
     }
     return;
   }
@@ -230,17 +230,38 @@ async function handleTaskRetry(app, request, reply) {
   reply.ok({ task: manager.get(task.id) }, 201);
 }
 
-/** POST /tasks/{id}/confirm-delete —— 二次确认删除（压缩删原文件 / 解压删压缩包共用） */
-async function handleTaskConfirmDelete(app, request, reply) {
-  const { manager } = app.tasks;
-  const id = request.params.id;
-
+/** 取任务并确认它确实处于"待二次确认"状态（三个前置条件是同一类错误，集中判定） */
+function requireConfirmableTask(manager, id) {
   const task = manager.get(id);
   if (!task) throw apiError(ERROR_CODES.TASK_NOT_FOUND, '任务不存在', { taskId: id });
   if (!task.delete) throw apiError(ERROR_CODES.INVALID_STATE, '该任务没有待删除目标', { taskId: id });
   if (task.phase !== 'waiting_confirm') {
     throw apiError(ERROR_CODES.INVALID_STATE, '当前不是待确认状态', { phase: task.phase });
   }
+  return task;
+}
+
+/** 数量/字节比对（INV-03：弹窗数字与实际不一致就拒绝删除）；返回归一化后的期望值 */
+function parseExpectedCounts(body, task) {
+  const expectedFiles = Number.isInteger(body.expectedFiles) ? body.expectedFiles : null;
+  const expectedBytes = Number.isFinite(body.expectedBytes) ? body.expectedBytes : null;
+  const actualFiles = task.delete.targets.length;
+  const actualBytes = task.delete.targets.reduce((sum, target) => sum + (Number(target.sizeBytes) || 0), 0);
+
+  if (expectedFiles !== null && expectedFiles !== actualFiles) {
+    throw apiError(ERROR_CODES.VALIDATION_FAILED, '待删除数量与弹窗不一致，已拒绝删除', { expectedFiles, actualFiles });
+  }
+  if (expectedBytes !== null && Math.abs(expectedBytes - actualBytes) > 1) {
+    throw apiError(ERROR_CODES.VALIDATION_FAILED, '待删除字节数与弹窗不一致，已拒绝删除', { expectedBytes, actualBytes });
+  }
+  return { expectedFiles, expectedBytes };
+}
+
+/** POST /tasks/{id}/confirm-delete —— 二次确认删除（压缩删原文件 / 解压删压缩包共用） */
+async function handleTaskConfirmDelete(app, request, reply) {
+  const { manager } = app.tasks;
+  const id = request.params.id;
+  const task = requireConfirmableTask(manager, id);
 
   const body = request.body || {};
   if (body.confirm === false) {
@@ -249,18 +270,7 @@ async function handleTaskConfirmDelete(app, request, reply) {
     return;
   }
 
-  // 数量/字节比对（INV-03：弹窗数字与实际不一致就拒绝删除）
-  const expectedFiles = Number.isInteger(body.expectedFiles) ? body.expectedFiles : null;
-  const expectedBytes = Number.isFinite(body.expectedBytes) ? body.expectedBytes : null;
-  const actualFiles = task.delete.targets.length;
-  const actualBytes = task.delete.targets.reduce((sum, target) => sum + (Number(target.sizeBytes) || 0), 0);
-  if (expectedFiles !== null && expectedFiles !== actualFiles) {
-    throw apiError(ERROR_CODES.VALIDATION_FAILED, '待删除数量与弹窗不一致，已拒绝删除', { expectedFiles, actualFiles });
-  }
-  if (expectedBytes !== null && Math.abs(expectedBytes - actualBytes) > 1) {
-    throw apiError(ERROR_CODES.VALIDATION_FAILED, '待删除字节数与弹窗不一致，已拒绝删除', { expectedBytes, actualBytes });
-  }
-
+  const { expectedFiles, expectedBytes } = parseExpectedCounts(body, task);
   manager.resolveConfirm(id, { confirmed: true, expectedFiles, expectedBytes });
   reply.ok({ task: manager.get(id) });
 }

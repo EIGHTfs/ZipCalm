@@ -144,18 +144,18 @@ function toSharedEntries(directory) {
 
 /** 递归收集待归档条目（不跟随符号链接，避免把链接指向的外部内容打进去） */
 async function collectEntries(ctx) {
-  const items = [];
+  const fileItems = [];
   let skippedSymlinks = 0;
 
   for (const source of ctx.sources) {
     const sourceName = source.name || path.basename(source.absPath);
 
     if (source.kind === 'file') {
-      const stat = await fsp.lstat(source.absPath).catch(() => null);
-      if (!stat || !stat.isFile()) {
+      const fileStat = await fsp.lstat(source.absPath).catch(() => null);
+      if (!fileStat || !fileStat.isFile()) {
         throw apiError(ERROR_CODES.PATH_NOT_FOUND, '源文件在扫描后已不可用', { source: sourceName });
       }
-      items.push({ absPath: source.absPath, entryName: sourceName, size: stat.size });
+      fileItems.push({ absPath: source.absPath, entryName: sourceName, size: fileStat.size });
       continue;
     }
 
@@ -172,15 +172,15 @@ async function collectEntries(ctx) {
         if (dirent.isDirectory()) {
           await walk(childAbs, childEntry);
         } else if (dirent.isFile()) {
-          const stat = await fsp.lstat(childAbs);
-          items.push({ absPath: childAbs, entryName: childEntry, size: stat.size });
+          const fileStat = await fsp.lstat(childAbs);
+          fileItems.push({ absPath: childAbs, entryName: childEntry, size: fileStat.size });
         }
       }
     };
     await walk(source.absPath, sourceName);
   }
 
-  return { items, skippedSymlinks };
+  return { fileItems, skippedSymlinks };
 }
 
 // ===== create（压缩）=====
@@ -199,9 +199,9 @@ async function assertCreatable(ctx) {
 }
 
 /** 汇总待压总量，并建"条目名 → 大小"索引（进度需要按条目累加字节） */
-function summarizeEntries(items) {
-  const totalBytes = items.reduce((sum, item) => sum + item.size, 0);
-  return { totalBytes, sizeByEntry: new Map(items.map((item) => [item.entryName, item.size])) };
+function summarizeEntries(fileItems) {
+  const totalBytes = fileItems.reduce((sum, fileItem) => sum + fileItem.size, 0);
+  return { totalBytes, sizeByEntry: new Map(fileItems.map((fileItem) => [fileItem.entryName, fileItem.size])) };
 }
 
 /** 决定压缩级别（未指定就用格式默认值） */
@@ -264,7 +264,7 @@ function attachCreateFailureHandlers({ archive, output, tempPath, finish, reject
 }
 
 /** 条目进度：archiver 每写完一个条目发 'entry'（事件驱动，不是定时采样） */
-function attachEntryProgress(archive, { items, report, counters, sizeByEntry, totalBytes }) {
+function attachEntryProgress(archive, { fileItems, report, counters, sizeByEntry, totalBytes }) {
   archive.on('entry', (entry) => {
     const name = entry && entry.name ? entry.name : '';
     counters.processedBytes += sizeByEntry.get(name) || 0;
@@ -273,18 +273,18 @@ function attachEntryProgress(archive, { items, report, counters, sizeByEntry, to
       processedBytes: counters.processedBytes,
       totalBytes,
       processedFiles: counters.processedFiles,
-      totalFiles: items.length,
+      totalFiles: fileItems.length,
       currentFile: name,
     });
   });
 }
 
 /** 把待压条目塞进归档；空集合也要上报一次（避免进度停在 0 让人以为卡住） */
-function appendEntriesToArchive(archive, items, report) {
-  for (const item of items) {
-    archive.file(item.absPath, { name: item.entryName });
+function appendEntriesToArchive(archive, fileItems, report) {
+  for (const fileItem of fileItems) {
+    archive.file(fileItem.absPath, { name: fileItem.entryName });
   }
-  if (items.length === 0) {
+  if (fileItems.length === 0) {
     report({ processedBytes: 0, totalBytes: 0, processedFiles: 0, totalFiles: 0, currentFile: null });
   }
 }
@@ -294,7 +294,7 @@ function appendEntriesToArchive(archive, items, report) {
  * 完成条件是**输出流 close**（finalize 返回 ≠ 文件已写完，契约第 5 条），
  * 所以这里同时跟踪 outputClosed 与 archiveFinished 两个标志，二者齐备才算成功。
  */
-function runCreateStream(ctx, items, summary, stats) {
+function runCreateStream(ctx, fileItems, summary, stats) {
   const { totalBytes, sizeByEntry } = summary;
   const report = createThrottledReporter(ctx.onProgress || (() => {}), { intervalMs: 100 });
   const counters = { processedBytes: 0, processedFiles: 0 };
@@ -309,7 +309,7 @@ function runCreateStream(ctx, items, summary, stats) {
       finish(() =>
         resolve({
           outputPath: ctx.tempPath,
-          entries: items.length,
+          entries: fileItems.length,
           bytesIn: counters.processedBytes,
           bytesOut: archive.pointer(),
           durationMs: Date.now() - stats.startedAt,
@@ -326,14 +326,14 @@ function runCreateStream(ctx, items, summary, stats) {
       stats.signal.addEventListener('abort', () => abortCreate(archive, ctx.tempPath, finish, reject), { once: true });
     }
 
-    attachEntryProgress(archive, { items, report, counters, sizeByEntry, totalBytes });
+    attachEntryProgress(archive, { fileItems, report, counters, sizeByEntry, totalBytes });
     attachCreateFailureHandlers({ archive, output, tempPath: ctx.tempPath, finish, reject });
     output.on('close', () => {
       state.outputClosed = true;
       resolveIfComplete();
     });
 
-    appendEntriesToArchive(archive, items, report);
+    appendEntriesToArchive(archive, fileItems, report);
     archive.finalize().then(
       () => {
         state.archiveFinished = true;
@@ -350,10 +350,10 @@ function runCreateStream(ctx, items, summary, stats) {
 async function create(ctx) {
   await assertCreatable(ctx);
 
-  const { items, skippedSymlinks } = await collectEntries(ctx);
-  const summary = summarizeEntries(items);
+  const { fileItems, skippedSymlinks } = await collectEntries(ctx);
+  const summary = summarizeEntries(fileItems);
 
-  return runCreateStream(ctx, items, summary, {
+  return runCreateStream(ctx, fileItems, summary, {
     startedAt: Date.now(),
     skippedSymlinks,
     level: resolveLevel(ctx.options),

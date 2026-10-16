@@ -28,10 +28,12 @@ USER_NAME="${ZC_TEST_USER:-admin}"
 PASSWORD="${ZC_TEST_PASSWORD:-zipcalm}"
 API="http://127.0.0.1:${PORT}/api/v1"
 COOKIE_JAR="$(mktemp)"
+# 临时响应体统一放本次运行的私有目录：不再散落硬编码的 /tmp 文件名（互不打架，退出即清理）
+TMP_DIR="$(mktemp -d)"
 PASS=0
 FAIL=0
 
-cleanup() { rm -f "${COOKIE_JAR}"; }
+cleanup() { rm -f "${COOKIE_JAR}"; rm -rf "${TMP_DIR}"; }
 trap cleanup EXIT
 
 check() { # check <描述> <期望> <实际>
@@ -47,11 +49,11 @@ check() { # check <描述> <期望> <实际>
 # 各探测共用的取值：HTTP 码 + 契约错误码 + 响应体是否泄漏存储根
 probe() { # probe <path> → "HTTP=xxx CODE=yyy LEAK=n"
   local resp code
-  resp="$(curl -s -b "${COOKIE_JAR}" -o /tmp/zc-probe-body.json -w '%{http_code}' \
+  resp="$(curl -s -b "${COOKIE_JAR}" -o "${TMP_DIR}/probe-body.json" -w '%{http_code}' \
     --get --data-urlencode "path=$1" "${API}/fs/list")"
-  code="$(jq -r '.error.code // "OK"' /tmp/zc-probe-body.json 2>/dev/null)"
+  code="$(jq -r '.error.code // "OK"' "${TMP_DIR}/probe-body.json" 2>/dev/null)"
   printf 'HTTP=%s CODE=%s LEAK=%s' "${resp}" "${code}" \
-    "$(grep -c 'fs-root\|/volume' /tmp/zc-probe-body.json 2>/dev/null || echo 0)"
+    "$(grep -c 'fs-root\|/volume' "${TMP_DIR}/probe-body.json" 2>/dev/null || echo 0)"
 }
 
 echo "验收方补充探测 —— ${PROJECT_ROOT}（port=${PORT}）"
@@ -89,10 +91,10 @@ check "单段 255 字节 → 不误杀（非 400）" "HTTP=4" "$(probe "/${SEG25
 
 echo
 echo "── 三、凭据 ──"
-FORGED="$(curl -s -o /tmp/zc-forged.json -w 'HTTP=%{http_code}' -H 'Authorization: Bearer forged-token' \
-  "${API}/fs/list?path=/")$(jq -r ' .error.code' /tmp/zc-forged.json 2>/dev/null | sed 's/^/ CODE=/')"
+FORGED="$(curl -s -o "${TMP_DIR}/forged.json" -w 'HTTP=%{http_code}' -H 'Authorization: Bearer forged-token' \
+  "${API}/fs/list?path=/")$(jq -r ' .error.code' "${TMP_DIR}/forged.json" 2>/dev/null | sed 's/^/ CODE=/')"
 check "伪造 Bearer → 401 AUTH_INVALID" "AUTH_INVALID" "${FORGED}"
-ANON="$(curl -s -o /tmp/zc-anon.json -w 'HTTP=%{http_code}' "${API}/fs/list?path=/")$(jq -r ' .error.code' /tmp/zc-anon.json 2>/dev/null | sed 's/^/ CODE=/')"
+ANON="$(curl -s -o "${TMP_DIR}/anon.json" -w 'HTTP=%{http_code}' "${API}/fs/list?path=/")$(jq -r ' .error.code' "${TMP_DIR}/anon.json" 2>/dev/null | sed 's/^/ CODE=/')"
 check "未认证 → 401 AUTH_REQUIRED" "AUTH_REQUIRED" "${ANON}"
 
 echo
@@ -116,7 +118,7 @@ TASKS_BEFORE="$(jq 'length' "${PROJECT_ROOT}/storage/tasks.json" 2>/dev/null || 
 HIST_BEFORE="$(wc -l < "${PROJECT_ROOT}/storage/task-history.jsonl" 2>/dev/null || echo 0)"
 DEL_ID="$(curl -s -b "${COOKIE_JAR}" "${API}/tasks" | jq -r '[.data.items[]|select(.status=="failed" or .status=="interrupted")][0].id // empty' 2>/dev/null)"
 if [ -n "${DEL_ID}" ]; then
-  DEL_CODE="$(curl -s -b "${COOKIE_JAR}" -X DELETE -o /tmp/zc-del.json -w '%{http_code}' "${API}/tasks/${DEL_ID}")"
+  DEL_CODE="$(curl -s -b "${COOKIE_JAR}" -X DELETE -o "${TMP_DIR}/del.json" -w '%{http_code}' "${API}/tasks/${DEL_ID}")"
   check "DELETE 终态任务 → 200" "200" "HTTP=${DEL_CODE}"
   TASKS_AFTER="$(jq 'length' "${PROJECT_ROOT}/storage/tasks.json" 2>/dev/null || echo 0)"
   HIST_AFTER="$(wc -l < "${PROJECT_ROOT}/storage/task-history.jsonl" 2>/dev/null || echo 0)"

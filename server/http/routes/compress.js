@@ -27,8 +27,8 @@ async function handleListFormats(app, request, reply) {
 /** POST /compress/preflight —— 压缩预检（不建任务） */
 async function handleCompressPreflight(app, request, reply) {
   const parsed = await parseCompressRequest(app, request.body || {});
-  const result = await compressPreflightFor(app, parsed);
-  reply.ok(result);
+  const preflight = await compressPreflightFor(app, parsed);
+  reply.ok(preflight);
 }
 
 /** POST /compress/tasks —— 创建压缩任务（预检不通过则不建） */
@@ -73,10 +73,10 @@ async function handleCompressTaskCreate(app, request, reply) {
 /** POST /extract/preflight —— 解压预检（归档可读可解析 / 目标可写 / 空间） */
 async function handleExtractPreflight(app, request, reply) {
   const parsed = await parseExtractRequest(app, request.body || {});
-  const result = await extractPreflightFor(app, parsed);
+  const preflight = await extractPreflightFor(app, parsed);
   // 把"这个归档被识别成哪个格式"显式告诉前端：复合扩展名（x.tar.gz）的识别完全在服务端做，
   // 对话框据此展示，用户可一眼确认没被更短的 .gz 抢走
-  reply.ok({ ...result, format: parsed.plugin.id, formatName: parsed.plugin.name });
+  reply.ok({ ...preflight, format: parsed.plugin.id, formatName: parsed.plugin.name });
 }
 
 /** POST /extract/tasks —— 创建解压任务 */

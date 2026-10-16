@@ -5,6 +5,11 @@
 //
 // 覆盖优先级（低 → 高）：本文件默认值 → <dataDir>/config.json → 环境变量。
 
+/** POSIX 单段文件名长度上限（NAME_MAX 的常见值）：给 maxPathSegmentLength 当默认值用 */
+const POSIX_NAME_MAX = 255;
+/** 单次列目录返回的默认最大条目数（超出截断并置 truncated=true） */
+const DEFAULT_MAX_LIST_ENTRIES = 5000;
+
 export const DEFAULT_CONFIG = {
   server: {
     /** 监听地址：0.0.0.0 表示所有网卡（NAS 场景方便局域网访问） */
@@ -71,9 +76,9 @@ export const DEFAULT_CONFIG = {
      * 这里是**可配置**的：默认取 POSIX 常见值 255，部署到特殊文件系统时可调。
      * 超过即在进入磁盘调用前返回 INVALID_PATH(400)，不让底层 ENAMETOOLONG 冒成 500。
      */
-    maxPathSegmentLength: 255,
+    maxPathSegmentLength: POSIX_NAME_MAX,
     /** 单次列目录返回的最大条目数（超出截断并置 truncated=true） */
-    maxListEntries: 5000,
+    maxListEntries: DEFAULT_MAX_LIST_ENTRIES,
     /** 单次压缩任务最多源条目数 */
     maxSourcesPerTask: 200,
     /** 前端默认分页大小 */

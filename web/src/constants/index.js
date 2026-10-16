@@ -68,7 +68,8 @@ export {
 export const APP_NAME = 'ZipCalm';
 export const APP_NAME_ZH = '压压惊';
 export const APP_TAGLINE = '浏览 · 压缩 · 看板';
-export const APP_VERSION = '0.1.0';
+// 版本号与 server 共用 shared/app-version.js 一处定义（改一处两侧同步）
+export { APP_VERSION } from '@shared/app-version.js';
 
 // hash 路由表（docs/09 §七：URL 不为 APK 服务，Web 用 hash，状态从 API 拉）
 export const ROUTES = Object.freeze({

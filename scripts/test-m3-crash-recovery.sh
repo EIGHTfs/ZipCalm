@@ -36,6 +36,8 @@ SIZE_MB="${ZC_TEST_SIZE_MB:-50}"
 
 API="http://127.0.0.1:${PORT}/api/v1"
 COOKIE_JAR="$(mktemp)" || exit 1
+# 临时响应体放本次运行的私有目录（不散落硬编码 /tmp 文件名）
+TMP_DIR="$(mktemp -d)"
 PROJECT_NAME="$(basename "${PROJECT_ROOT}")"
 PID_FILE="${PROJECT_ROOT}/${PROJECT_NAME}.pid"
 FIXTURE_API="/${FIXTURE_NAME}"
@@ -90,10 +92,10 @@ check "SSE 首帧是 snapshot（INV-05）" "event: snapshot" "${FIRST_FRAME}"
 # ── ② 起任务 → kill -9 → 重启 → 查恢复 ──────────────────────────────────
 curl -s -b "${COOKIE_JAR}" -X POST "${API}/compress/tasks" -H 'Content-Type: application/json' \
   -d "{\"sources\":[\"${FIXTURE_API}/verify-big.bin\"],\"format\":\"zip\",\"mode\":\"bundle\",\"outputDir\":\"${FIXTURE_API}\"}" \
-  -o /tmp/zc-verify-task.json -w '' 2>/dev/null
-TASK_ID="$(jq -r '.data.task.id // empty' /tmp/zc-verify-task.json 2>/dev/null)"
+  -o "${TMP_DIR}/verify-task.json" -w '' 2>/dev/null
+TASK_ID="$(jq -r '.data.task.id // empty' "${TMP_DIR}/verify-task.json" 2>/dev/null)"
 if [ -z "${TASK_ID}" ]; then
-  check "创建压缩任务（拿到 taskId）" "." "$(head -c 200 /tmp/zc-verify-task.json)"
+  check "创建压缩任务（拿到 taskId）" "." "$(head -c 200 "${TMP_DIR}/verify-task.json")"
 else
   check "创建压缩任务（拿到 taskId）" "${TASK_ID}" "${TASK_ID}"
 fi

@@ -34,19 +34,34 @@ export function createAuthStore({ config, logger, dataDir }) {
 
   // ===== 持久化（只存哈希 + 过期时间）=====
 
+  /** 一条落盘 token 是否还能用（字段合法 + 未过期）；不合法/过期一律丢弃 */
+  function isUsableToken(tokenEntry, nowTs) {
+    if (!tokenEntry || typeof tokenEntry.hash !== 'string' || typeof tokenEntry.expiresAt !== 'number') return false;
+    return tokenEntry.expiresAt > nowTs;
+  }
+
+  /** 把落盘记录灌进内存索引（过期与不合法条目直接跳过） */
+  function restoreTokens(entries, nowTs) {
+    for (const tokenEntry of entries) {
+      if (!isUsableToken(tokenEntry, nowTs)) continue;
+      tokens.set(tokenEntry.hash, {
+        user: tokenEntry.user || username,
+        expiresAt: tokenEntry.expiresAt,
+        issuedAt: tokenEntry.issuedAt || nowTs,
+      });
+    }
+  }
+
   async function load() {
-    const result = await readJson(tokenFilePath, { tokens: [] });
-    if (!result.ok) {
-      if (result.reason !== 'not-found') logger.warn('auth token store unreadable, starting empty', { reason: result.reason });
+    const storedTokens = await readJson(tokenFilePath, { tokens: [] });
+    if (!storedTokens.ok) {
+      if (storedTokens.reason !== 'not-found') {
+        logger.warn('auth token store unreadable, starting empty', { reason: storedTokens.reason });
+      }
       return;
     }
-    const list = Array.isArray(result.data && result.data.tokens) ? result.data.tokens : [];
-    const now = Date.now();
-    for (const item of list) {
-      if (!item || typeof item.hash !== 'string' || typeof item.expiresAt !== 'number') continue;
-      if (item.expiresAt <= now) continue; // 过期的直接丢弃
-      tokens.set(item.hash, { user: item.user || username, expiresAt: item.expiresAt, issuedAt: item.issuedAt || now });
-    }
+    const entries = Array.isArray(storedTokens.data && storedTokens.data.tokens) ? storedTokens.data.tokens : [];
+    restoreTokens(entries, Date.now());
     if (tokens.size > 0) logger.info('auth tokens restored', { count: tokens.size });
   }
 

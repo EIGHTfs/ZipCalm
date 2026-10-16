@@ -27,9 +27,10 @@ import { registerErrorHandling } from './http/middleware/error.js';
 import { registerRequestLogger } from './http/middleware/logger.js';
 import { registerPathGuard } from './http/middleware/pathGuard.js';
 import router from './http/router.js';
+import { APP_VERSION } from '../shared/app-version.js';
 
-/** 版本号与 package.json 保持一致（M1 阶段手写常量，发布流程建立后再自动注入） */
-export const APP_VERSION = '0.1.0';
+/** 版本号：与 web 共用 shared/app-version.js 一处定义（避免两处各写一个后漂移） */
+export { APP_VERSION };
 
 /** 请求体上限：M1 只有登录表单，1MB 足够；压缩上传在 M2 之后再评估 */
 const BODY_LIMIT_BYTES = 1024 * 1024;
@@ -188,21 +189,10 @@ async function registerFrontend(app, { projectRoot, logger }) {
 }
 
 /**
- * 构建 Fastify 应用（不监听端口，便于测试里直接 inject）。
- * @param {{config: object, logger: object, projectRoot: string}} options
+ * 装配 M2（压缩/解压）与 M3（任务）两层，并把它们挂到 app 上。
+ * 单独成函数是为了让 buildApp 只保留"顺序"这一件事（每层内部各有自己的依赖顺序）。
  */
-export async function buildApp(options) {
-  const { config, logger, projectRoot } = options;
-
-  const app = createFastifyInstance(config);
-  await app.register(cookie);
-  registerTolerantJsonParser(app);
-
-  // 顺序有讲究：请求日志 → 错误处理 → 认证 → 路径白名单 → 任务/压缩层 → 路由
-  registerRequestLogger(app, { logger });
-  registerErrorHandling(app, { logger });
-
-  const authStore = await registerSecurityLayer(app, { config, logger });
+async function attachCompressAndTaskLayers(app, { config, logger, projectRoot }) {
   const taskLayer = await createTaskLayer({ config, logger });
   const compressLayer = await createCompressLayer({
     config,
@@ -228,6 +218,27 @@ export async function buildApp(options) {
     manager: taskLayer.manager,
     sseClients,
   });
+
+  return { taskLayer, sseClients };
+}
+
+/**
+ * 构建 Fastify 应用（不监听端口，便于测试里直接 inject）。
+ * @param {{config: object, logger: object, projectRoot: string}} options
+ */
+export async function buildApp(options) {
+  const { config, logger, projectRoot } = options;
+
+  const app = createFastifyInstance(config);
+  await app.register(cookie);
+  registerTolerantJsonParser(app);
+
+  // 顺序有讲究：请求日志 → 错误处理 → 认证 → 路径白名单 → 任务/压缩层 → 路由
+  registerRequestLogger(app, { logger });
+  registerErrorHandling(app, { logger });
+  const authStore = await registerSecurityLayer(app, { config, logger });
+
+  const { taskLayer, sseClients } = await attachCompressAndTaskLayers(app, { config, logger, projectRoot });
   registerShutdownHooks(app, { sseClients, manager: taskLayer.manager, authStore });
 
   const meta = {

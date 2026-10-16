@@ -23,6 +23,8 @@ const PID_FILE = process.env.ZIPCALM_PID_FILE || null;
 function writePidFile() {
   if (!PID_FILE) return;
   try {
+    // 先确保目录存在：PID 路径可由 ZIPCALM_PID_FILE 指定到任意位置，父目录不存在时 writeFile 会 ENOENT
+    fs.mkdirSync(path.dirname(PID_FILE), { recursive: true });
     fs.writeFileSync(PID_FILE, `${process.pid}\n`, 'utf8');
   } catch (error) {
     process.stderr.write(`[ZipCalm] 写入 PID 文件失败：${error.message}\n`);

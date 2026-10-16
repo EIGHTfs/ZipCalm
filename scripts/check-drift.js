@@ -70,7 +70,7 @@ const IMPORT_PATTERNS = [
 
 /** 递归收集待扫描文件（返回绝对路径数组） */
 function collectFiles(dir) {
-  const result = [];
+  const collected = [];
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -81,12 +81,12 @@ function collectFiles(dir) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       if (IGNORED_DIRS.has(entry.name)) continue;
-      result.push(...collectFiles(full));
+      collected.push(...collectFiles(full));
     } else if (entry.isFile() && SCAN_EXTENSIONS.has(path.extname(entry.name))) {
-      result.push(full);
+      collected.push(full);
     }
   }
-  return result;
+  return collected;
 }
 
 /** 剥掉注释但保留行数（避免注释里的 import 造成误报，同时不破坏行号） */
@@ -168,10 +168,10 @@ function main() {
   if (violations.length > 0) {
     console.error(`❌ 库收口检查未通过：发现 ${violations.length} 处越界 import`);
     console.error('');
-    for (const item of violations) {
-      console.error(`   ${item.file}:${item.line}  →  '${item.specifier}'`);
-      console.error(`      该库（${item.library}）只允许在 ${item.allowed} 中 import（${item.reason}）`);
-      console.error(`      代码：${item.snippet}`);
+    for (const violation of violations) {
+      console.error(`   ${violation.file}:${violation.line}  →  '${violation.specifier}'`);
+      console.error(`      该库（${violation.library}）只允许在 ${violation.allowed} 中 import（${violation.reason}）`);
+      console.error(`      代码：${violation.snippet}`);
       console.error('');
     }
     console.error('修复方式：不要在业务文件里直接 import 该库，改为使用对应的收口组件/模块。');

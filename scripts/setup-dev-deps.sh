@@ -3,10 +3,9 @@
 # ZipCalm 开发依赖安装脚本（方案 A：依赖装在可执行盘，工作区只留软链）
 #
 # ── 为什么需要这个脚本（实测结论，不是猜测）──────────────────────────────
-# 1. 工作区目录挂载为 NFS 且带 noexec：
-#      sa6400:/volume13/... on /volume1/VirtualDSM/DeepSeekHarness/工作区 type nfs (rw,nodev,noexec)
-#    /tmp 同样是 noexec。后果：node_modules 里的原生二进制（esbuild 等）在工作区内
-#    无法执行（execve 返回 EACCES / shell 报 exit 126）。
+# 1. 工作区目录挂载为 NFS 且带 noexec（`mount` 里能看到 rw,nodev,noexec 字样）：
+#    远端共享盘 → 工作区挂载点；/tmp 同样是 noexec。后果：node_modules 里的原生二进制（esbuild 等）
+#    在工作区内无法执行（execve 返回 EACCES / shell 报 exit 126）。
 # 2. 直接在项目根跑 `npm install` 会失败：npm 10 的 reify 阶段会执行
 #      npm warn reify Removing non-directory <项目根>/node_modules
 #    —— 它把项目根的 node_modules 软链当作"非目录"删掉，然后在 noexec 的工作区内
@@ -90,7 +89,8 @@ cp "${PROJECT_ROOT}/package.json" "${BUILD_DIR}/package.json"
 # ── 2. 在可执行盘内安装依赖 ─────────────────────────────────────────────
 echo "[setup-dev-deps] 在依赖目录执行 npm install ..."
 (
-  cd "${BUILD_DIR}"
+  # cd 失败必须立刻退出：否则会在"当前目录"里跑 npm install（污染工作区，且可能踩 noexec）
+  cd "${BUILD_DIR}" || { echo "[setup-dev-deps] 进入依赖目录失败：${BUILD_DIR}" >&2; exit 1; }
   npm install --no-audit --no-fund
 )
 

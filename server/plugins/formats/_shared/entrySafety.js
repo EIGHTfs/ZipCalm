@@ -102,10 +102,10 @@ export function planTargets(entries, targetDir, overwrite) {
   }
 
   if (!overwrite) {
-    for (const item of plan) {
-      if (item.isDir) continue;
-      if (fs.existsSync(item.targetPath)) {
-        throw apiError(ERROR_CODES.TARGET_EXISTS, '目标目录已存在同名文件（overwrite=false）', { entry: item.displayName });
+    for (const plannedEntry of plan) {
+      if (plannedEntry.isDir) continue;
+      if (fs.existsSync(plannedEntry.targetPath)) {
+        throw apiError(ERROR_CODES.TARGET_EXISTS, '目标目录已存在同名文件（overwrite=false）', { entry: plannedEntry.displayName });
       }
     }
   }
@@ -126,22 +126,22 @@ export async function writePlan(planned, targetDir, options = {}) {
 
   await fsp.mkdir(targetDir, { recursive: true });
 
-  for (const item of planned.plan) {
+  for (const plannedEntry of planned.plan) {
     if (signal && signal.aborted) throw apiError(ERROR_CODES.ABORTED, '任务已取消');
 
-    if (item.isDir) {
-      await fsp.mkdir(item.targetPath, { recursive: true });
+    if (plannedEntry.isDir) {
+      await fsp.mkdir(plannedEntry.targetPath, { recursive: true });
       entries += 1;
       continue;
     }
 
-    await fsp.mkdir(path.dirname(item.targetPath), { recursive: true });
+    await fsp.mkdir(path.dirname(plannedEntry.targetPath), { recursive: true });
     try {
       // 注意：signal 为空时绝不能传 undefined（pipeline 会把它当 stage 校验并抛错）
-      await pipelineWith([item.open(), fs.createWriteStream(item.targetPath)], signal);
+      await pipelineWith([plannedEntry.open(), fs.createWriteStream(plannedEntry.targetPath)], signal);
     } catch (error) {
       try {
-        if (fs.existsSync(item.targetPath)) await fsp.unlink(item.targetPath);
+        if (fs.existsSync(plannedEntry.targetPath)) await fsp.unlink(plannedEntry.targetPath);
       } catch {
         /* 清理失败不掩盖原始错误 */
       }
@@ -153,13 +153,13 @@ export async function writePlan(planned, targetDir, options = {}) {
 
     entries += 1;
     processedFiles += 1;
-    processedBytes += item.size;
+    processedBytes += plannedEntry.size;
     report({
       processedBytes,
       totalBytes: planned.totalBytes,
       processedFiles,
       totalFiles: planned.totalFiles,
-      currentFile: item.displayName,
+      currentFile: plannedEntry.displayName,
     });
   }
 

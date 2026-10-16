@@ -14,25 +14,21 @@
 // - zip-slip：zip 用手写 ZIP 记录、tar 系列用 node-tar 直接写 `../evil` 条目名。
 
 import { execFile } from 'node:child_process';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import zlib from 'node:zlib';
 
+import { hashTree, prepareFixture, writeRawTar, writeRawZip } from './helpers/m4-fixtures.mjs';
+import { verifyWithExternalTools } from './helpers/m4-verify.mjs';
+import { loadRuntimeConfig } from './helpers/test-config.mjs';
+import { createReporter } from './helpers/test-report.mjs';
 
 const execFileAsync = promisify(execFile);
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const runtimeConfig = await (async () => {
-  try {
-    return JSON.parse(await fsp.readFile(path.join(PROJECT_ROOT, 'storage', 'config.json'), 'utf8'));
-  } catch {
-    return {};
-  }
-})();
+const runtimeConfig = await loadRuntimeConfig(PROJECT_ROOT);
 
 const PORT = process.env.ZIPCALM_PORT || (runtimeConfig.server && runtimeConfig.server.port) || 3010;
 const BASE = process.env.ZIPCALM_BASE || `http://127.0.0.1:${PORT}/api/v1`;
@@ -51,26 +47,11 @@ const FORMATS = [
 ];
 
 let TOKEN = null;
-let passCount = 0;
-let failCount = 0;
-let skipCount = 0;
-const failures = [];
-
-function check(name, ok, detail = '') {
-  if (ok) {
-    passCount += 1;
-    console.log(`PASS | ${name}${detail ? ` | ${detail}` : ''}`);
-  } else {
-    failCount += 1;
-    failures.push(name);
-    console.log(`FAIL | ${name}${detail ? ` | ${detail}` : ''}`);
-  }
-}
-
-function skip(name, reason) {
-  skipCount += 1;
-  console.log(`SKIP | ${name} | ${reason}`);
-}
+// 断言/跳过/汇总统一走共用报告器（输出格式与既有套件逐字一致，test-all.sh 靠它提取总结行）
+/** HTTP 调用超时（毫秒）：服务僵死/半开连接时脚本不能永久挂住 */
+const HTTP_TIMEOUT_MS = 15000;
+const reporter = createReporter();
+const { check, skip } = reporter;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -83,6 +64,8 @@ async function api(method, urlPath, body) {
       ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}),
     },
     body: hasBody ? JSON.stringify(body) : undefined,
+    // 超时兜底：服务僵死/半开连接时不能让脚本永久挂住
+    signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
   });
   const text = await response.text();
   try {
@@ -106,227 +89,9 @@ async function waitTask(id, timeoutMs = 180000) {
   return last;
 }
 
-// ===== 夹具（确定性假数据，与 M2 同款思路）=====
-
-function createRandom(seed) {
-  let state = seed >>> 0;
-  return () => {
-    state ^= state << 13; state >>>= 0;
-    state ^= state >>> 17;
-    state ^= state << 5; state >>>= 0;
-    return state / 0xffffffff;
-  };
-}
-
-async function walkFiles(dir, base = dir, acc = new Map()) {
-  let dirents = [];
-  try {
-    dirents = await fsp.readdir(dir, { withFileTypes: true });
-  } catch {
-    return acc;
-  }
-  for (const dirent of dirents) {
-    const abs = path.join(dir, dirent.name);
-    if (dirent.isDirectory()) await walkFiles(abs, base, acc);
-    else if (dirent.isFile()) acc.set(path.relative(base, abs).split(path.sep).join('/'), abs);
-  }
-  return acc;
-}
-
-async function sha256File(filePath) {
-  const hash = crypto.createHash('sha256');
-  await new Promise((resolve, reject) => {
-    fs.createReadStream(filePath).on('data', (chunk) => hash.update(chunk)).on('end', resolve).on('error', reject);
-  });
-  return hash.digest('hex');
-}
-
-async function hashTree(dir) {
-  const files = await walkFiles(dir);
-  const hashes = new Map();
-  for (const [relative, abs] of files) hashes.set(relative, await sha256File(abs));
-  return hashes;
-}
-
-async function prepareFixture() {
-  const srcDir = path.join(WORK, 'src');
-  // 整个工作目录都清掉：上一轮的解压产物会让这一轮「首次解压」撞 TARGET_EXISTS
-  await fsp.rm(WORK, { recursive: true, force: true });
-  await fsp.mkdir(srcDir, { recursive: true });
-
-  const random = createRandom(20261016);
-  const layout = [
-    { dir: '', count: 2, min: 0, max: 400 },
-    { dir: '子目录/深层', count: 6, min: 1024, max: 65536 },
-    { dir: '中文 目录/带空格', count: 4, min: 1, max: 4096 },
-  ];
-  let index = 0;
-  for (const group of layout) {
-    const target = path.join(srcDir, group.dir);
-    await fsp.mkdir(target, { recursive: true });
-    for (let i = 0; i < group.count; i += 1) {
-      const size = Math.floor(group.min + random() * Math.max(1, group.max - group.min));
-      const buffer = Buffer.alloc(size);
-      for (let offset = 0; offset < size; offset += 1) buffer[offset] = Math.floor(random() * 256);
-      await fsp.writeFile(path.join(target, `file-${String(index).padStart(2, '0')}-${size}B.bin`), buffer);
-      index += 1;
-    }
-  }
-  return srcDir;
-}
-
-// ===== 外部工具交叉验证 =====
-
-async function verifyWithExternalTools(format, archiveAbsPath) {
-  if (format.id === 'zip') {
-    try {
-      const { stdout } = await execFileAsync('7z', ['t', archiveAbsPath], { timeout: 30000 });
-      check(`外部校验 7z t（${format.id}）`, /Everything is Ok/i.test(stdout), stdout.trim().split('\n').slice(-2).join(' / ').slice(0, 100));
-    } catch (error) {
-      check(`外部校验 7z t（${format.id}）`, false, String(error.stdout || error.message).slice(0, 120));
-    }
-    return;
-  }
-
-  if (format.id === 'tar') {
-    try {
-      const { stdout } = await execFileAsync('tar', ['-tf', archiveAbsPath], { timeout: 30000 });
-      const lines = stdout.trim().split('\n').filter(Boolean);
-      check('外部校验 tar -tf（tar）', lines.length >= 10, `${lines.length} 个条目，示例 ${lines[0]}`);
-    } catch (error) {
-      check('外部校验 tar -tf（tar）', false, String(error.stderr || error.message).slice(0, 120));
-    }
-    return;
-  }
-
-  if (format.id === 'targz') {
-    try {
-      const { stdout } = await execFileAsync('tar', ['-tzf', archiveAbsPath], { timeout: 30000 });
-      const lines = stdout.trim().split('\n').filter(Boolean);
-      check('外部校验 tar -tzf（tar.gz）', lines.length >= 10, `${lines.length} 个条目，示例 ${lines[0]}`);
-    } catch (error) {
-      check('外部校验 tar -tzf（tar.gz）', false, String(error.stderr || error.message).slice(0, 120));
-    }
-    return;
-  }
-
-  // tar.zst：本机没有 zstd 命令（docs/02 已实测）→ 用 Node 只解 zstd 层，再用系统 tar 校验 tar 层
-  const probePath = path.join(WORK, 'zstd-probe.tar');
-  try {
-    const compressed = await fsp.readFile(archiveAbsPath);
-    await fsp.writeFile(probePath, zlib.zstdDecompressSync(compressed));
-    const { stdout } = await execFileAsync('tar', ['-tf', probePath], { timeout: 30000 });
-    const lines = stdout.trim().split('\n').filter(Boolean);
-    check('外部校验 tar -tf（tar.zst：Node 只解 zstd 层 + 系统 tar 列内容）', lines.length >= 10, `${lines.length} 个条目，示例 ${lines[0]}`);
-  } catch (error) {
-    check('外部校验 tar -tf（tar.zst）', false, String(error.message).slice(0, 120));
-  }
-
-  // 7z 支持 zstd 的话再补一条外部工具交叉验证
-  try {
-    const { stdout } = await execFileAsync('7z', ['l', archiveAbsPath], { timeout: 30000 });
-    const entries = stdout.trim().split('\n').filter((line) => /\d{4}-\d{2}-\d{2}/.test(line)).length;
-    check('外部校验 7z l（tar.zst）', entries >= 10, `${entries} 个条目`);
-  } catch (error) {
-    skip('外部校验 7z l（tar.zst）', `本机 7z 不支持 zstd：${String(error.stderr || error.message).slice(0, 60)}`);
-  }
-}
-
-// ===== 恶意样本构造 =====
-
-/** 手写 ZIP 记录（archiver 会把 `../` 规范化，造不出真样本） */
-async function writeRawZip(destPath, entries) {
-  const nowTs = new Date();
-  const time = ((nowTs.getHours() << 11) | (nowTs.getMinutes() << 5) | Math.floor(nowTs.getSeconds() / 2)) & 0xffff;
-  const day = (((nowTs.getFullYear() - 1980) << 9) | ((nowTs.getMonth() + 1) << 5) | nowTs.getDate()) & 0xffff;
-  const chunks = [];
-  const centralParts = [];
-  let offset = 0;
-
-  for (const entry of entries) {
-    const nameBuf = Buffer.from(entry.name, 'utf8');
-    const data = Buffer.from(entry.content || 'evil', 'utf8');
-    const compressed = zlib.deflateRawSync(data);
-    const crc = zlib.crc32(data) >>> 0;
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(8, 8);
-    local.writeUInt16LE(time, 10);
-    local.writeUInt16LE(day, 12);
-    local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(compressed.length, 18);
-    local.writeUInt32LE(data.length, 22);
-    local.writeUInt16LE(nameBuf.length, 26);
-    chunks.push(local, nameBuf, compressed);
-
-    const central = Buffer.alloc(46);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(0x031e, 4);
-    central.writeUInt16LE(20, 6);
-    central.writeUInt16LE(8, 10);
-    central.writeUInt16LE(time, 12);
-    central.writeUInt16LE(day, 14);
-    central.writeUInt32LE(crc, 16);
-    central.writeUInt32LE(compressed.length, 20);
-    central.writeUInt32LE(data.length, 24);
-    central.writeUInt16LE(nameBuf.length, 28);
-    central.writeUInt32LE((0o100644 << 16) >>> 0, 38);
-    central.writeUInt32LE(offset, 42);
-    centralParts.push(central, nameBuf);
-    offset += local.length + nameBuf.length + compressed.length;
-  }
-
-  const centralBuf = Buffer.concat(centralParts);
-  const eocd = Buffer.alloc(22);
-  eocd.writeUInt32LE(0x06054b50, 0);
-  eocd.writeUInt16LE(entries.length, 8);
-  eocd.writeUInt16LE(entries.length, 10);
-  eocd.writeUInt32LE(centralBuf.length, 12);
-  eocd.writeUInt32LE(offset, 16);
-  await fsp.mkdir(path.dirname(destPath), { recursive: true });
-  await fsp.writeFile(destPath, Buffer.concat([...chunks, centralBuf, eocd]));
-}
-
-/**
- * 手写最小 tar（只用于**造恶意样本**）：node-tar 的写入 API 不接受任意条目名，
- * 而 zip-slip 用例必须真的把 `../`、绝对路径写进归档里 —— 所以这里自己拼 512 字节 ustar 头。
- * 只服务测试，生产代码的 tar 读写完全交给 node-tar。
- */
-function tarHeader(name, size) {
-  const buf = Buffer.alloc(512);
-  buf.write(name, 0, 100, 'utf8');
-  buf.write('0000644\0', 100, 8, 'ascii');
-  buf.write('0000000\0', 108, 8, 'ascii');
-  buf.write('0000000\0', 116, 8, 'ascii');
-  buf.write(`${size.toString(8).padStart(11, '0')}\0`, 124, 12, 'ascii');
-  buf.write(`${Math.floor(Date.now() / 1000).toString(8).padStart(11, '0')}\0`, 136, 12, 'ascii');
-  buf.write('        ', 148, 8, 'ascii'); // chksum 先占位
-  buf.write('0', 156, 1, 'ascii');
-  buf.write('ustar\0', 257, 6, 'ascii');
-  buf.write('00', 263, 2, 'ascii');
-  let sum = 0;
-  for (const byte of buf) sum += byte;
-  buf.write(`${sum.toString(8).padStart(6, '0')}\0 `, 148, 8, 'ascii');
-  return buf;
-}
-
-function tarEntry(name, content) {
-  const data = Buffer.from(content, 'utf8');
-  const padded = Buffer.alloc(Math.ceil(data.length / 512) * 512);
-  data.copy(padded);
-  return Buffer.concat([tarHeader(name, data.length), padded]);
-}
-
-/** 写恶意 tar（按格式套压缩层）：条目名可为 `../x` 或 `/abs/x` */
-async function writeRawTar(destPath, compression, entries) {
-  const body = Buffer.concat([...entries.map(([name, content]) => tarEntry(name, content)), Buffer.alloc(1024)]);
-  const payload = compression === 'gzip' ? zlib.gzipSync(body)
-    : compression === 'zstd' ? zlib.zstdCompressSync(body)
-      : body;
-  await fsp.mkdir(path.dirname(destPath), { recursive: true });
-  await fsp.writeFile(destPath, payload);
-}
+// ===== 夹具 / 外部校验 / 恶意样本：都在 scripts/helpers/ 下（主脚本只留流程与断言）=====
+//   m4-fixtures.mjs —— 确定性假数据、树 hash、手写 zip/tar 恶意样本
+//   m4-verify.mjs   —— 系统 tar/7z 的交叉验证
 
 async function zipSlipCase(format, label, archiveAbs, markers) {
   const archiveUser = archiveAbs.replace(ROOT, '').split(path.sep).join('/');
@@ -528,16 +293,23 @@ async function main() {
   TOKEN = login.json && login.json.data && login.json.data.token;
   check('登录拿到 Bearer Token', Boolean(TOKEN));
 
-  await prepareFixture();
+  await prepareFixture(WORK);
   await fsp.mkdir(path.join(WORK, 'packages'), { recursive: true });
   const beforeCount = (await hashTree(path.join(WORK, 'src'))).size;
   console.log(`    假数据：${beforeCount} 个文件（确定性种子）\n`);
 
   // ① 四格式往返 + 外部交叉验证
   for (const format of FORMATS) {
-    const result = await roundTrip(format.id);
-    check(`往返 hash 逐文件一致（${format.id}）`, result.ok, result.detail);
-    if (result.archiveAbs) await verifyWithExternalTools(format, result.archiveAbs);
+    const roundTripResult = await roundTrip(format.id);
+    check(`往返 hash 逐文件一致（${format.id}）`, roundTripResult.ok, roundTripResult.detail);
+    if (roundTripResult.archiveAbs) {
+      await verifyWithExternalTools({
+        formatId: format.id,
+        archiveAbsPath: roundTripResult.archiveAbs,
+        workDir: WORK,
+        report: reporter,
+      });
+    }
   }
 
   // ② zip-slip：四种格式各一组
@@ -567,11 +339,8 @@ async function main() {
 
   await cleanupArtefacts();
 
-  console.log(`\n── 汇总 ──\nPASS ${passCount} / FAIL ${failCount} / SKIP ${skipCount}`);
-  if (failures.length > 0) {
-    console.log(`失败项：${failures.join('；')}`);
-    process.exitCode = 1;
-  }
+  const runSummary = reporter.summary({ withSkip: true });
+  if (runSummary.fail > 0) process.exitCode = 1;
 }
 
 /** 收尾清理：测试产物（存储根下的 /m4-test）与回退链垫片；设 ZIPCALM_M4_KEEP=1 可保留 */

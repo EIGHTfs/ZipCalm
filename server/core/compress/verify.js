@@ -11,18 +11,22 @@ import { ERROR_CODES, apiError } from '../../lib/errors.js';
  * @param {string} archivePath 归档绝对路径
  * @returns {Promise<{ok: boolean, strategy: string|null, checked: number, failures: Array}>}
  */
+/** 把格式包 test() 的返回值规整成契约形状（缺字段一律给安全默认） */
+function normalizeTestResult(testResult) {
+  const failures = testResult && Array.isArray(testResult.failures) ? testResult.failures : [];
+  return {
+    ok: Boolean(testResult && testResult.ok === true),
+    strategy: (testResult && testResult.strategy) || null,
+    checked: Number((testResult && testResult.checked) || 0),
+    failures: failures.slice(0, 20),
+  };
+}
+
 export async function verifyArchive(plugin, archivePath) {
   if (!plugin || typeof plugin.test !== 'function') {
     throw apiError(ERROR_CODES.INTERNAL_ERROR, '格式包未实现完整性校验（test）', { format: plugin && plugin.id });
   }
-
-  const result = await plugin.test(archivePath, {});
-  return {
-    ok: Boolean(result && result.ok === true),
-    strategy: (result && result.strategy) || null,
-    checked: Number((result && result.checked) || 0),
-    failures: (result && Array.isArray(result.failures) ? result.failures : []).slice(0, 20),
-  };
+  return normalizeTestResult(await plugin.test(archivePath, {}));
 }
 
 /**

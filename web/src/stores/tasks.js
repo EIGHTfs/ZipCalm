@@ -80,13 +80,13 @@ export const useTasksStore = defineStore('tasks', () => {
     connectionMode.value = 'polling';
     const tick = async () => {
       try {
-        const data = await api.get('/tasks', { limit: 50 });
+        const listPayload = await api.get('/tasks', { limit: 50 });
         const next = new Map();
-        for (const task of data.items || []) next.set(task.id, task);
+        for (const task of listPayload.items || []) next.set(task.id, task);
         tasks.value = next;
-        queue.value = data.queue || queue.value;
-        history.value = data.history || history.value;
-        if (Number.isInteger(data.seq)) lastSeq.value = Math.max(lastSeq.value, data.seq);
+        queue.value = listPayload.queue || queue.value;
+        history.value = listPayload.history || history.value;
+        if (Number.isInteger(listPayload.seq)) lastSeq.value = Math.max(lastSeq.value, listPayload.seq);
       } catch {
         /* 轮询失败下个周期再试 */
       }
@@ -200,43 +200,43 @@ export const useTasksStore = defineStore('tasks', () => {
 
   /** 详情：从服务端拉完整任务（含 result/delete 明细）并回填 store */
   async function loadDetail(id) {
-    const data = await api.get(`/tasks/${id}`);
-    upsert(data.task);
-    return data.task;
+    const detailPayload = await api.get(`/tasks/${id}`);
+    upsert(detailPayload.task);
+    return detailPayload.task;
   }
 
   async function loadHistory(limit = 50) {
-    const data = await api.get('/tasks/history', { limit });
-    history.value = data.items || [];
+    const historyPayload = await api.get('/tasks/history', { limit });
+    history.value = historyPayload.items || [];
     return history.value;
   }
 
   async function cancel(id) {
-    const data = await api.post(`/tasks/${id}/cancel`, {});
-    upsert(data.task);
-    return data.task;
+    const cancelled = await api.post(`/tasks/${id}/cancel`, {});
+    upsert(cancelled.task);
+    return cancelled.task;
   }
 
   async function retry(id) {
-    const data = await api.post(`/tasks/${id}/retry`, {});
-    upsert(data.task);
-    return data.task;
+    const retried = await api.post(`/tasks/${id}/retry`, {});
+    upsert(retried.task);
+    return retried.task;
   }
 
   async function confirmDelete(id, expectedFiles) {
-    const data = await api.post(`/tasks/${id}/confirm-delete`, { confirm: true, expectedFiles });
-    upsert(data.task);
-    return data.task;
+    const confirmed = await api.post(`/tasks/${id}/confirm-delete`, { confirm: true, expectedFiles });
+    upsert(confirmed.task);
+    return confirmed.task;
   }
 
   /** 删除活动记录（仅终态；后端会拒绝非终态）。删除后本地立即移除，再拉一次历史保持一致 */
   async function remove(id) {
-    const result = await api.del(`/tasks/${id}`);
+    const removeResult = await api.del(`/tasks/${id}`);
     const next = new Map(tasks.value);
     next.delete(id);
     tasks.value = next;
     await loadHistory(50).catch(() => {});
-    return result;
+    return removeResult;
   }
 
   return {
