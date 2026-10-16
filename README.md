@@ -17,7 +17,7 @@
 |---|---|
 | [docs/00-原始讨论完整转录.md](docs/00-原始讨论完整转录.md) | 两场设计讨论的逐字全文（含 AI 思考过程），原始存档 |
 | [docs/01-需求与总体架构.md](docs/01-需求与总体架构.md) | 原始需求、决定架构的三个问题、必须想清楚的决策 |
-| [docs/02-压缩格式与库选型.md](docs/02-压缩格式与库选型.md) | zip/tar/tar.gz/tar.zst 的库选型、库 vs 二进制、zstd 风险 |
+| [docs/02-压缩格式与库选型.md](docs/02-压缩格式与库选型.md) | zip/tar/tar.gz/tar.zst 的库选型、库 vs 二进制、zstd 方案（Node 内置） |
 | [docs/03-插件化架构与格式契约.md](docs/03-插件化架构与格式契约.md) | 每个格式一个格式包、插件契约、总入口职责边界 |
 | [docs/04-压缩模式与黑名单.md](docs/04-压缩模式与黑名单.md) | 单独压缩/打包为一个、三层黑名单、智能跳过 |
 | [docs/05-任务系统与进度推送.md](docs/05-任务系统与进度推送.md) | 后台任务、进度连续性、SSE 推送、状态落盘 |
@@ -34,7 +34,7 @@
 ## 核心设计结论速览
 
 1. **架构先定，库后选**：先回答「压缩同步还是异步」「产物落盘还是下载即弃」「单用户还是多用户」，再谈选型。
-2. **库为主、zstd 用二进制**：zip 用 archiver、tar 系列用 node-tar、zstd 走外部二进制，别赌 NAS 上的原生编译。
+2. **库为主、全零依赖**：zip 用 archiver、tar 系列用 node-tar、zstd 走 Node ≥ 22.15 内置的 `node:zlib` —— 全部无原生编译，也不依赖用户额外安装压缩工具。
 3. **插件化**：每个格式一个格式包（ext/create/list/test/available/estimate），格式包只负责「怎么压」，调度/删除/预检归总入口。
 4. **两种压缩模式**：单独压缩（每个文件夹一个包）/ 打包为一个，做成互斥单选。
 5. **后台任务 + 事件驱动进度**：任务状态落盘、SSE 推送、前端断线不影响任务，重连拉快照。
@@ -50,7 +50,7 @@
 
 - 前端：Vue 3（SFC）+ vue-router + pinia + axios + dayjs + pretty-bytes；图标 **lucide-vue-next**、看板图表 **uplot**；构建 Vite + @vitejs/plugin-vue
 - 后端：Fastify；压缩 archiver（zip）/ node-tar（tar、tar.gz、tar.zst）；监控 systeminformation + pidusage
-- 系统级：`zstd` 命令（tar.zst 的默认实现，可用 WASM 兜底）
+- 系统级：无（zstd 由 **Node ≥ 22.15 内置的 `node:zlib`** 提供；系统 `zstd` 命令仅作回退项）
 - 不引入：7z / rar（v1 范围外）、数据库（用 JSON/JSONL 落盘）、p-queue（v1 强制串行）、UI 组件库 / Tailwind
 
 **库收口策略（换库改动量最小化）**：第三方库只允许在**唯一入口** import，由 `npm run check:drift` 门禁钉死（已挂到 `build` 前，违规即构建失败）：
@@ -66,7 +66,8 @@
 **框架级依赖（Vue / vue-router / pinia / Fastify）不做收口** —— 换框架等于重写，包一层适配只会增加间接层而无收益。
 门禁扫描器为正则实现（剥离注释后匹配 `import` / `export-from` / 动态 `import()` / `require`），已知边界：不支持极端多行 import 与 TS 装饰器；需要更强保证时再评估引入 AST 解析器。
 
-> 本项目**不追求零依赖**。取舍是「部署可靠 + 开发效率优先」：除 `zstd` 外全部依赖均为纯 JS，无原生编译，NAS 上无需构建工具链。
+> 本项目**不追求零依赖**。取舍是「部署可靠 + 开发效率优先」：所有依赖均为纯 JS 或 Node 内置（zstd 走 `node:zlib`），无原生编译，NAS 上无需构建工具链。
+> 运行时要求：**Node ≥ 22.15**（zstd 内置 API 自 v22.15.0 起提供；`fs.statfs` 自 v18.15 起）。
 > 目录与框架约定见 [docs/12-项目目录结构.md](docs/12-项目目录结构.md) 第三节。
 
 ## 讨论来源
