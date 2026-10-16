@@ -11,19 +11,15 @@
 //   因为通过 API 造 100+ 条终态要几分钟且不必要；
 // - 非终态不被清理必须在**服务运行中**验证（重启会把非终态迁成 interrupted，那就不再是非终态）。
 
-import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
 
+import { PROJECT_ROOT, execFileAsync } from './helpers/script-env.mjs';
 import { loadRuntimeConfig } from './helpers/test-config.mjs';
 import { createReporter } from './helpers/test-report.mjs';
 
-const execFileAsync = promisify(execFile);
-const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const runtimeConfig = await loadRuntimeConfig(PROJECT_ROOT);
 
@@ -368,7 +364,9 @@ async function caseDeleteSemantics() {
     check('DELETE 后该记录从 tasks.json 消失', !after.tasks.some((entry) => entry.info.id === target.info.id), `总数 ${before.total} → ${after.total}`);
 
     const historyAfter = await historyLineCount();
-    const stillInHistory = fs.existsSync(HISTORY_FILE) && fs.readFileSync(HISTORY_FILE, 'utf8').includes(target.info.id);
+    // 用异步读替代 existsSync+readFileSync（异步路径里不该有同步 I/O；读不到按空串处理，判定结果不变）
+    const historyText = await fsp.readFile(HISTORY_FILE, 'utf8').catch(() => '');
+    const stillInHistory = historyText.includes(target.info.id);
     check('DELETE 不影响 task-history.jsonl（行数不变）', historyAfter === historyBefore, `历史行数 ${historyBefore} → ${historyAfter}`);
     check('被删任务仍留在历史里（审计日志 append-only）', stillInHistory, `历史中含该 id=${stillInHistory}`);
   }

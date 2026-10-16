@@ -283,9 +283,12 @@ async function createTask(ctx, input) {
   return toApiTask(record);
 }
 
+/** 任务不存在时的统一文案（三处抛错共用同一句，避免文案漂移） */
+const TASK_NOT_FOUND_MESSAGE = '任务不存在';
+
 function requireRecord(ctx, id) {
   const record = ctx.tasks.get(id);
-  if (!record) throw apiError(ERROR_CODES.TASK_NOT_FOUND, '任务不存在', { taskId: id });
+  if (!record) throw apiError(ERROR_CODES.TASK_NOT_FOUND, TASK_NOT_FOUND_MESSAGE, { taskId: id });
   return record;
 }
 
@@ -351,19 +354,22 @@ async function beginRun(ctx, record) {
   await persistNow(ctx);
 }
 
+/** 失败任务的契约错误对象（aborted 时不带 error，返回 null 由调用方决定） */
+function taskErrorPayload(error, code) {
+  return {
+    code,
+    message: (error && error.message) || '任务失败',
+    details: (error && error.details) || null,
+    at: now(),
+  };
+}
+
 /** 执行器抛错：ABORTED → aborted（无 error）；其余 → failed（带契约错误码） */
 function handleTaskError(ctx, id, error, record) {
   const code = (error && error.code) || ERROR_CODES.INTERNAL_ERROR;
   const aborted = code === ERROR_CODES.ABORTED || record.abortController.signal.aborted;
   finalizeTask(ctx, id, aborted ? 'aborted' : 'failed', {
-    error: aborted
-      ? null
-      : {
-          code,
-          message: (error && error.message) || '任务失败',
-          details: (error && error.details) || null,
-          at: now(),
-        },
+    error: aborted ? null : taskErrorPayload(error, code),
   });
   if (!aborted) ctx.logger.error('task failed', { taskId: id, code });
 }
@@ -424,23 +430,40 @@ function computeSpeed(ctx, record, processedBytes) {
   return { speedBps, etaSeconds: Math.round(Math.max(0, totalBytes - processedBytes) / speedBps) };
 }
 
+/** 进度里的数值字段：只在调用方给了有限数时才覆盖（undefined/NaN 一律忽略） */
+const PROGRESS_NUMBER_FIELDS = [
+  'processedBytes',
+  'totalBytes',
+  'processedFiles',
+  'totalFiles',
+  'packagesDone',
+  'packagesTotal',
+];
+
+function applyProgressNumbers(progress, patch) {
+  for (const field of PROGRESS_NUMBER_FIELDS) {
+    if (Number.isFinite(patch[field])) progress[field] = patch[field];
+  }
+}
+
+/** 百分比（一位小数）：优先按字节算，没有总字节就按文件数算，都缺则保持原值 */
+function computePercent(progress) {
+  if (progress.totalBytes > 0) {
+    return Math.min(100, Math.round((progress.processedBytes / progress.totalBytes) * 1000) / 10);
+  }
+  if (progress.totalFiles > 0) {
+    return Math.min(100, Math.round((progress.processedFiles / progress.totalFiles) * 1000) / 10);
+  }
+  return progress.percent;
+}
+
 function updateProgress(ctx, id, patch) {
   const record = ctx.tasks.get(id);
   if (!record) return;
   const progress = record.info.progress;
-  if (Number.isFinite(patch.processedBytes)) progress.processedBytes = patch.processedBytes;
-  if (Number.isFinite(patch.totalBytes)) progress.totalBytes = patch.totalBytes;
-  if (Number.isFinite(patch.processedFiles)) progress.processedFiles = patch.processedFiles;
-  if (Number.isFinite(patch.totalFiles)) progress.totalFiles = patch.totalFiles;
-  if (Number.isFinite(patch.packagesDone)) progress.packagesDone = patch.packagesDone;
-  if (Number.isFinite(patch.packagesTotal)) progress.packagesTotal = patch.packagesTotal;
+  applyProgressNumbers(progress, patch);
   if (patch.currentFile !== undefined) progress.currentFile = patch.currentFile;
-
-  if (progress.totalBytes > 0) {
-    progress.percent = Math.min(100, Math.round((progress.processedBytes / progress.totalBytes) * 1000) / 10);
-  } else if (progress.totalFiles > 0) {
-    progress.percent = Math.min(100, Math.round((progress.processedFiles / progress.totalFiles) * 1000) / 10);
-  }
+  progress.percent = computePercent(progress);
 
   const speed = computeSpeed(ctx, record, progress.processedBytes);
   progress.speedBps = speed.speedBps;

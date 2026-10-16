@@ -16,19 +16,15 @@
 //
 // 注意：本脚本会 `kill -9` 本服务并重启（这是恢复语义的验收方式），请勿在有业务任务时手动运行。
 
-import { execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
 
+import { PROJECT_ROOT, execFileAsync } from './helpers/script-env.mjs';
 import { loadRuntimeConfig } from './helpers/test-config.mjs';
 import { createReporter } from './helpers/test-report.mjs';
 
-const execFileAsync = promisify(execFile);
-const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const runtimeConfig = await loadRuntimeConfig(PROJECT_ROOT);
 

@@ -56,12 +56,12 @@ async function pluginUnavailableReason(spec) {
 async function pluginEstimate(spec, inputBytes, options = {}) {
   const bytes = Number.isFinite(inputBytes) && inputBytes > 0 ? inputBytes : 0;
   const names = Array.isArray(options.sample && options.sample.names) ? options.sample.names : [];
-  const ratioOf = {
-    none: 1.0,
-    gzip: names.length > 0 && names.every((entryName) => ALREADY_COMPRESSED.test(entryName)) ? 0.98 : 0.6,
-    zstd: names.length > 0 && names.every((entryName) => ALREADY_COMPRESSED.test(entryName)) ? 0.95 : 0.5,
-  }[spec.compression];
-  const headerOverhead = 512 * Math.max(1, names.length || 1);
+  const everyEntryAlreadyCompressed = names.length > 0 && names.every((entryName) => ALREADY_COMPRESSED.test(entryName));
+  const ratioTable = ESTIMATED_RATIO[spec.compression];
+  const ratioOf = typeof ratioTable === 'number'
+    ? ratioTable
+    : (everyEntryAlreadyCompressed ? ratioTable.alreadyCompressed : ratioTable.mixed);
+  const headerOverhead = TAR_BLOCK_BYTES * Math.max(1, names.length || 1);
   return {
     estimatedBytes: Math.ceil(bytes * ratioOf) + (spec.compression === 'none' ? headerOverhead : 0),
     ratio: ratioOf,

@@ -241,7 +241,7 @@ function abortCreate(archive, tempPath, finish, reject) {
     try {
       archive.abort();
     } catch {
-      /* ignore */
+      /* abort 在归档已结束时可能抛错：取消路径上不影响后续清理，忽略即可 */
     }
     removeTempFile(tempPath);
     reject(apiError(ERROR_CODES.ABORTED, '任务已取消'));

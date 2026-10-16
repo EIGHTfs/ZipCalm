@@ -11,12 +11,16 @@
 // 注意：storage/ 已在 .gitignore 中，这些是运行期演示数据，不入库。
 
 import fs from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+import { PROJECT_ROOT } from './helpers/script-env.mjs';
+import path from 'node:path';
+
 /** 假二进制文件的填充字节（'Z'：肉眼可辨，且不是 0/0xFF 这类容易被误判的填充） */
 const DEMO_FILL_BYTE = 0x5a;
+/** 演示文件的假尺寸（字节）：只为让列表里的"大小"列有可辨认的样本，不是任何业务阈值 */
+const DEMO_PHOTO_JPG_BYTES = 1200;
+const DEMO_PHOTO_PNG_BYTES = 800;
+const DEMO_ARCHIVE_BYTES = 2048;
 const ROOT = path.resolve(
   process.argv[2] || process.env.ZIPCALM_STORAGE_ROOT || path.join(PROJECT_ROOT, 'storage', 'fs-root'),
 );
@@ -81,9 +85,9 @@ async function main() {
   await writeFileIfAbsent('文档/readme.txt', '这是一个用于演示的文本文件。\n第二行。\n');
   await writeFileIfAbsent('文档/notes.md', '# 笔记\n\n- 支持多格式压缩（M2 起）\n- 黑名单智能跳过（M6）\n');
   await writeFileIfAbsent('文档/子目录/深层文件.log', 'deep file for path testing\n');
-  await writeFileIfAbsent('图片/photo-a.jpg', fakeBytes(1200, 'photo-a'));
-  await writeFileIfAbsent('图片/photo-b.png', fakeBytes(800, 'photo-b'));
-  await writeFileIfAbsent('备份/old-archive.zip', fakeBytes(2048, 'old-archive'));
+  await writeFileIfAbsent('图片/photo-a.jpg', fakeBytes(DEMO_PHOTO_JPG_BYTES, 'photo-a'));
+  await writeFileIfAbsent('图片/photo-b.png', fakeBytes(DEMO_PHOTO_PNG_BYTES, 'photo-b'));
+  await writeFileIfAbsent('备份/old-archive.zip', fakeBytes(DEMO_ARCHIVE_BYTES, 'old-archive'));
   await writeFileIfAbsent('.隐藏目录/secret.txt', 'hidden by default（showHidden=true 才返回）\n');
 
   // 根内链接：进入应该成功

@@ -13,20 +13,17 @@
 //   tar.zst 本机无 zstd 命令，故先用 Node 只做 zstd 解压、再用系统的 `tar -tf` 校验 tar 层；
 // - zip-slip：zip 用手写 ZIP 记录、tar 系列用 node-tar 直接写 `../evil` 条目名。
 
-import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
 
-import { hashTree, prepareFixture, writeRawTar, writeRawZip } from './helpers/m4-fixtures.mjs';
+import { hashTree, prepareFixture, writeRawTar, writeRawZip } from './helpers/archive-fixtures.mjs';
 import { verifyWithExternalTools } from './helpers/m4-verify.mjs';
+import { PROJECT_ROOT, execFileAsync } from './helpers/script-env.mjs';
 import { loadRuntimeConfig } from './helpers/test-config.mjs';
 import { createReporter } from './helpers/test-report.mjs';
 
-const execFileAsync = promisify(execFile);
-const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const runtimeConfig = await loadRuntimeConfig(PROJECT_ROOT);
 
@@ -36,6 +33,12 @@ const ROOT = path.resolve(PROJECT_ROOT, (runtimeConfig.storage && runtimeConfig.
 const DATA_DIR = path.resolve(PROJECT_ROOT, (runtimeConfig.storage && runtimeConfig.storage.dataDir) || './storage');
 const PLUGINS_DIR = path.join(PROJECT_ROOT, 'server', 'plugins', 'formats');
 const LOGIN = { username: process.env.ZIPCALM_TEST_USER || 'admin', password: process.env.ZIPCALM_TEST_PASSWORD || 'zipcalm' };
+/**
+ * 绝对路径逃逸样本的目标位置。
+ * 攻击样本的**条目名本身就是绝对路径**（这是用例要考的东西），所以这里必须给出绝对路径；
+ * 但用系统临时目录推导而不是写死 `/tmp`，换平台/换机器都不会失效。
+ */
+const ABS_PATH_ESCAPE_TARGET = path.join(os.tmpdir(), 'zc-m4-tar-abs-evil.txt');
 
 const API_WORK = '/m4-test';
 const WORK = path.join(ROOT, 'm4-test');
@@ -213,7 +216,7 @@ async function caseZstdFallbackChain() {
   // ② 禁用内置 + 指向垫片 → 走"系统命令"回退，且仍能往返
   // 垫片必须放在**可执行挂载**上：工作区是 noexec（依赖装在 zipcalm-build 就是这个原因），
   // 放 storage/ 下即使有 +x 也会被 EACCES 拒绝，回退链验证会变成假阴性。
-  const buildDir = path.dirname(fs.realpathSync(path.join(PROJECT_ROOT, 'node_modules')));
+  const buildDir = path.dirname(await fsp.realpath(path.join(PROJECT_ROOT, 'node_modules')));
   const shimPath = path.join(buildDir, 'm4-tmp', 'zstd-shim');
   await fsp.mkdir(path.dirname(shimPath), { recursive: true });
   await fsp.writeFile(shimPath, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(PROJECT_ROOT, 'scripts/helpers/zstd-shim.mjs'))} "$@"\n`, 'utf8');
@@ -322,9 +325,9 @@ async function main() {
     const evilAbs = path.join(evilRoot, `${spec.id}-evil.${spec.compression === 'none' ? 'tar' : spec.compression === 'gzip' ? 'tar.gz' : 'tar.zst'}`);
     await writeRawTar(evilAbs, spec.compression, [
       ['../tar-slip-evil.txt', 'evil'],
-      ['/tmp/zc-m4-tar-abs-evil.txt', 'evil'],
+      [ABS_PATH_ESCAPE_TARGET, 'evil'], // 绝对路径条目：攻击样本本体
     ]);
-    await zipSlipCase(spec.id, '../ 与绝对路径', evilAbs, [path.join(WORK, 'evil', 'tar-slip-evil.txt'), '/tmp/zc-m4-tar-abs-evil.txt']);
+    await zipSlipCase(spec.id, '../ 与绝对路径', evilAbs, [path.join(WORK, 'evil', 'tar-slip-evil.txt'), ABS_PATH_ESCAPE_TARGET]);
   }
 
   // ③ 注册表：加目录即注册 + 复合扩展名
@@ -350,7 +353,7 @@ async function cleanupArtefacts() {
     return;
   }
   await fsp.rm(WORK, { recursive: true, force: true }).catch(() => {});
-  const buildDir = path.dirname(fs.realpathSync(path.join(PROJECT_ROOT, 'node_modules')));
+  const buildDir = path.dirname(await fsp.realpath(path.join(PROJECT_ROOT, 'node_modules')));
   await fsp.rm(path.join(buildDir, 'm4-tmp'), { recursive: true, force: true }).catch(() => {});
 }
 

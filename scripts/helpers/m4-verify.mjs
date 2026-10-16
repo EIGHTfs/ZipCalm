@@ -6,13 +6,11 @@
 // tar.zst 的特殊处理：本机没有 `zstd` 命令（docs/02 已实测），所以只用 Node 解 zstd 那一层，
 // 再把解出来的 tar 交给系统 `tar -tf` 校验 —— zstd 层用 Node、tar 层用外部工具，仍然不是自证（并在汇报里写明）。
 
-import { execFile } from 'node:child_process';
+import { execFileAsync } from './script-env.mjs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import zlib from 'node:zlib';
 
-const execFileAsync = promisify(execFile);
 const TOOL_TIMEOUT_MS = 30000;
 /** 夹具固定 12 个文件：外部工具列出的条目数少于这个数就说明归档不完整 */
 const MIN_EXPECTED_ENTRIES = 10;

@@ -19,6 +19,8 @@ const DEFAULT_PLUGINS_DIR = path.resolve(
 );
 
 const AVAILABILITY_TTL_MS = 60 * 1000;
+/** 被拒格式包的统一日志文案（三处拒绝原因共用，避免文案漂移） */
+const REJECTED_LOG = 'format plugin rejected';
 
 /** 契约要求的必需成员 */
 const REQUIRED_MEMBERS = ['id', 'name', 'ext', 'mime'];
@@ -107,21 +109,21 @@ export function createRegistry(options = {}) {
       const valid = validatePlugin(plugin, source);
       if (!valid.ok) {
         loadFailures.push(valid.reason);
-        logger.warn('format plugin rejected', { source, reason: valid.reason });
+        logger.warn(REJECTED_LOG, { source, reason: valid.reason });
         continue;
       }
 
       // id / ext 全局唯一：冲突时禁用后来者（不影响已注册的包）
       if (byId.has(plugin.id)) {
         loadFailures.push(`${source}: id 与已注册格式冲突（${plugin.id}）`);
-        logger.warn('format plugin rejected', { source, reason: `id 冲突 ${plugin.id}` });
+        logger.warn(REJECTED_LOG, { source, reason: `id 冲突 ${plugin.id}` });
         continue;
       }
       const exts = [plugin.ext, ...(Array.isArray(plugin.extAliases) ? plugin.extAliases : [])].map((ext) => ext.toLowerCase());
       const extConflict = exts.find((ext) => byExt.has(ext));
       if (extConflict) {
         loadFailures.push(`${source}: 扩展名与已注册格式冲突（${extConflict}）`);
-        logger.warn('format plugin rejected', { source, reason: `扩展名冲突 ${extConflict}` });
+        logger.warn(REJECTED_LOG, { source, reason: `扩展名冲突 ${extConflict}` });
         continue;
       }
 

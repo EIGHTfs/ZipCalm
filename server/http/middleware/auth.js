@@ -27,47 +27,11 @@ export function registerAuth(app, { store, config }) {
 
   app.addHook('onRequest', async (request) => {
     const bearer = readBearer(request);
-
-    // ① Bearer 优先
     if (bearer) {
-      const record = store.verifyToken(bearer);
-      if (record) {
-        request.auth = { type: 'bearer', user: record.user, expiresAt: record.expiresAt };
-        // Bearer 通过时仍看一眼 Cookie：能验证就复用（并给滑动续期机会）；
-        // 带了却验证不过（典型：服务重启后内存 session 失效）→ 标记补发新会话 Cookie。
-        // 为什么必须补：EventSource 无法携带 Authorization 头，浏览器里 SSE 只能靠 Cookie ——
-        // 不补的话重启后 SSE 会一直 401，而其余 axios 请求因为有 Bearer 照常工作（表象极具迷惑性）。
-        const cookieValue = request.cookies ? request.cookies[config.cookieName] : null;
-        if (cookieValue) {
-          const session = store.verifySession(cookieValue);
-          if (session) {
-            request.sessionId = cookieValue;
-            request.sessionRenewed = session.renewed;
-          } else {
-            request.needsSessionMint = true;
-          }
-        }
-        return;
-      }
-      request.authFailure = ERROR_CODES.AUTH_INVALID;
+      applyBearerAuth(request, store, config, bearer); // ① Bearer 优先
       return;
     }
-
-    // ② Cookie 兜底
-    const cookieValue = request.cookies ? request.cookies[config.cookieName] : null;
-    if (cookieValue) {
-      const session = store.verifySession(cookieValue);
-      if (session) {
-        request.auth = { type: 'session', user: session.user, expiresAt: session.expiresAt };
-        request.sessionId = cookieValue;
-        request.sessionRenewed = session.renewed;
-        return;
-      }
-      request.authFailure = ERROR_CODES.AUTH_EXPIRED;
-      return;
-    }
-
-    request.authFailure = ERROR_CODES.AUTH_REQUIRED;
+    applySessionCookie(request, store, config); // ② Cookie 兜底
   });
 
   /**
@@ -75,25 +39,82 @@ export function registerAuth(app, { store, config }) {
    * 注意：Session 续期需要"写 Cookie"，所以放在这里（只有真正访问受保护端点时才续期）。
    */
   app.decorate('requireAuth', async function requireAuth(request, reply) {
-    if (!request.auth) {
-      const code = request.authFailure || ERROR_CODES.AUTH_REQUIRED;
-      throw apiError(code, code === ERROR_CODES.AUTH_REQUIRED ? '需要登录后才能访问' : '登录凭据无效或已过期');
-    }
-    if (request.auth.type === 'session' && request.sessionRenewed && request.sessionId) {
-      setSessionCookie(reply, config, request.sessionId, store.sessionTtlMs);
-      return;
-    }
-    // Bearer 通过但客户端带着失效的会话 Cookie → 补发一次（只补一次：新 Cookie 下次即可验证通过）
-    if (request.auth.type === 'bearer' && request.needsSessionMint) {
-      const session = store.createSession(request.auth.user);
-      setSessionCookie(reply, config, session.sid, store.sessionTtlMs);
-    }
+    assertAuthenticated(request);
+    renewSessionCookie(request, reply, config, store);
   });
 
   // ===== Cookie 助手（统一 HttpOnly / SameSite=Lax，契约 §二）=====
 
   app.decorate('setSessionCookie', (reply, sid, ttlMs) => setSessionCookie(reply, config, sid, ttlMs));
   app.decorate('clearSessionCookie', (reply) => reply.clearCookie(config.cookieName, { path: '/' }));
+}
+
+/** 取会话 Cookie 的值（没装 cookie 插件或没带该 Cookie 时返回 null） */
+function readSessionCookie(request, config) {
+  return request.cookies ? request.cookies[config.cookieName] : null;
+}
+
+/**
+ * ① Bearer 分支（优先）。
+ * Bearer 通过时仍看一眼 Cookie：能验证就复用（并给滑动续期机会）；
+ * 带了却验证不过（典型：服务重启后内存 session 失效）→ 标记补发新会话 Cookie。
+ * 为什么必须补：EventSource 无法携带 Authorization 头，浏览器里 SSE 只能靠 Cookie ——
+ * 不补的话重启后 SSE 会一直 401，而其余 axios 请求因为有 Bearer 照常工作（表象极具迷惑性）。
+ */
+function applyBearerAuth(request, store, config, bearer) {
+  const record = store.verifyToken(bearer);
+  if (!record) {
+    request.authFailure = ERROR_CODES.AUTH_INVALID;
+    return;
+  }
+  request.auth = { type: 'bearer', user: record.user, expiresAt: record.expiresAt };
+
+  const cookieValue = readSessionCookie(request, config);
+  if (!cookieValue) return;
+  const session = store.verifySession(cookieValue);
+  if (session) {
+    request.sessionId = cookieValue;
+    request.sessionRenewed = session.renewed;
+    return;
+  }
+  request.needsSessionMint = true;
+}
+
+/** ② Cookie 兜底：验证不过时区分"已过期"与"未带凭据"（前端据此决定是提示重登还是跳登录页） */
+function applySessionCookie(request, store, config) {
+  const cookieValue = readSessionCookie(request, config);
+  if (!cookieValue) {
+    request.authFailure = ERROR_CODES.AUTH_REQUIRED;
+    return;
+  }
+  const session = store.verifySession(cookieValue);
+  if (!session) {
+    request.authFailure = ERROR_CODES.AUTH_EXPIRED;
+    return;
+  }
+  request.auth = { type: 'session', user: session.user, expiresAt: session.expiresAt };
+  request.sessionId = cookieValue;
+  request.sessionRenewed = session.renewed;
+}
+
+/** 未认证就抛契约错误（早返回：把后续的续期/补发逻辑从 if 里解放出来） */
+function assertAuthenticated(request) {
+  if (request.auth) return;
+  const code = request.authFailure || ERROR_CODES.AUTH_REQUIRED;
+  throw apiError(code, code === ERROR_CODES.AUTH_REQUIRED ? '需要登录后才能访问' : '登录凭据无效或已过期');
+}
+
+/** 需要续期/补发时才写 Cookie（Session 续期与 Bearer 补发共用同一个出口） */
+function renewSessionCookie(request, reply, config, store) {
+  if (request.auth.type === 'session' && request.sessionRenewed && request.sessionId) {
+    setSessionCookie(reply, config, request.sessionId, store.sessionTtlMs);
+    return;
+  }
+  // Bearer 通过但客户端带着失效的会话 Cookie → 补发一次（只补一次：新 Cookie 下次即可验证通过）
+  if (request.auth.type === 'bearer' && request.needsSessionMint) {
+    const session = store.createSession(request.auth.user);
+    setSessionCookie(reply, config, session.sid, store.sessionTtlMs);
+  }
 }
 
 /** 写会话 Cookie（统一属性；放模块级，避免在注册函数里再嵌一层函数） */

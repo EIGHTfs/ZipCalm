@@ -16,7 +16,7 @@
 # 可覆盖的环境变量（均有默认值，无硬编码路径/凭据）：
 #   ZC_TEST_PORT      服务端口（默认 3010）
 #   ZC_TEST_USER      登录用户（默认 admin）
-#   ZC_TEST_PASSWORD  登录密码（默认 zipcalm）
+#   ZC_TEST_PASSWORD  登录密码（默认值见 scripts/helpers/test-credentials.sh）
 #   ZC_TEST_DIR       测试夹具目录名，相对存储根（默认 m3-test）
 #   ZC_TEST_SIZE_MB   造多大的假数据（默认 50，需足够大以便在任务执行中被杀）
 #
@@ -29,8 +29,10 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}" || exit 1
 
 PORT="${ZC_TEST_PORT:-3010}"
-USER_NAME="${ZC_TEST_USER:-admin}"
-PASSWORD="${ZC_TEST_PASSWORD:-zipcalm}"
+# 测试账号统一来源（默认值 / 覆盖方式 / 审计豁免说明都写在 helper 里，三个脚本不再各写一份）
+source "${SCRIPT_DIR}/helpers/test-credentials.sh"
+AUTH_USER="${TEST_USER}"
+AUTH_PASSWORD="${TEST_PASSWORD}"
 FIXTURE_NAME="${ZC_TEST_DIR:-m3-test}"
 SIZE_MB="${ZC_TEST_SIZE_MB:-50}"
 
@@ -44,12 +46,21 @@ FIXTURE_API="/${FIXTURE_NAME}"
 
 PASS=0
 FAIL=0
+# 把变量安全地喂给下游命令（脚本里反复用到，收成一处）。
+# 为什么不用 echo：echo 对 -n / 反斜杠转义 / 多行内容的处理在不同 shell 不一致，printf 原样输出才是对的。
+pipe_var() { printf '%s' "$1"; }
+
+# 从 JSON 文本里取字段（取不到给空串；jq 报错也不打断脚本）
+json_field() { pipe_var "$1" | jq -r "$2 // empty" 2>/dev/null || true; }
+
 check() { # check <描述> <期望包含> <实际>
-  if printf '%s' "$3" | grep -q "$2"; then
-    printf 'PASS | %s | %s\n' "$1" "$(printf '%s' "$3" | head -1 | cut -c1-90)"
+  local summary # 单行摘要只算一次（PASS/FAIL 两条分支共用）
+  summary="$(pipe_var "$3" | head -1 | cut -c1-90)"
+  if pipe_var "$3" | grep -q "$2"; then
+    printf 'PASS | %s | %s\n' "$1" "${summary}"
     PASS=$((PASS + 1))
   else
-    printf 'FAIL | %s | 期望含「%s」实际：%s\n' "$1" "$2" "$(printf '%s' "$3" | head -1 | cut -c1-90)"
+    printf 'FAIL | %s | 期望含「%s」实际：%s\n' "$1" "$2" "${summary}"
     FAIL=$((FAIL + 1))
   fi
 }
@@ -59,7 +70,7 @@ trap cleanup EXIT
 login() {
   curl -s -c "${COOKIE_JAR}" -X POST "${API}/auth/login" \
     -H 'Content-Type: application/json' \
-    -d "{\"username\":\"${USER_NAME}\",\"password\":\"${PASSWORD}\"}" -o /dev/null
+    -d "{\"username\":\"${AUTH_USER}\",\"password\":\"${AUTH_PASSWORD}\"}" -o /dev/null
 }
 
 echo "M3 崩溃恢复验收 —— ${PROJECT_ROOT}（port=${PORT}）"
@@ -68,7 +79,7 @@ echo
 # ── 0. 准备假数据（在存储根内，走 API 可见的相对路径）────────────────────
 STORAGE_ROOT="$(curl -s -c "${COOKIE_JAR}" -X POST "${API}/auth/login" \
   -H 'Content-Type: application/json' \
-  -d "{\"username\":\"${USER_NAME}\",\"password\":\"${PASSWORD}\"}" >/dev/null 2>&1; \
+  -d "{\"username\":\"${AUTH_USER}\",\"password\":\"${AUTH_PASSWORD}\"}" >/dev/null 2>&1; \
   jq -r '.storage.root // empty' "${PROJECT_ROOT}/storage/config.json" 2>/dev/null)"
 if [ -z "${STORAGE_ROOT}" ] || [ ! -d "${STORAGE_ROOT}" ]; then
   echo "SKIP：无法从 storage/config.json 解析存储根，跳过（先启动过一次服务以生成配置）"
@@ -117,9 +128,9 @@ login
 
 TASK_JSON="$(curl -s -b "${COOKIE_JAR}" "${API}/tasks/${TASK_ID}")"
 # 注意：任务详情响应形如 { ok, data: { task: {...} } } —— 是 data.task，不是 data
-STATUS="$(printf '%s' "${TASK_JSON}" | jq -r '.data.task.status // empty' 2>/dev/null)"
-CODE="$(printf '%s' "${TASK_JSON}" | jq -r '.data.task.error.code // empty' 2>/dev/null)"
-REASON="$(printf '%s' "${TASK_JSON}" | jq -r '.data.task.error.details.reason // empty' 2>/dev/null)"
+STATUS="$(json_field "${TASK_JSON}" '.data.task.status')"
+CODE="$(json_field "${TASK_JSON}" '.data.task.error.code')"
+REASON="$(json_field "${TASK_JSON}" '.data.task.error.details.reason')"
 check "恢复后状态为 interrupted" "interrupted" "${STATUS}"
 check "恢复后错误码为 INTERRUPTED" "INTERRUPTED" "${CODE}"
 check "恢复后带重启原因（details.reason）" "SERVER_RESTART" "${REASON}"

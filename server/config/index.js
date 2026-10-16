@@ -16,17 +16,17 @@ import { DEFAULT_CONFIG, ENV_OVERRIDES } from './defaults.js';
 import { validateConfig } from './schema.js';
 import { checkAccess, ensureDir, readJson } from '../lib/atomic-json.js';
 
+/** 可深合并的普通对象（数组/标量/null 都不算） */
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
 /** 深合并（只合并普通对象；数组/标量直接覆盖） */
 function deepMerge(base, patch) {
-  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return base;
+  if (!isPlainObject(patch)) return base;
   const out = { ...base };
   for (const [key, value] of Object.entries(patch)) {
-    const current = out[key];
-    if (value && typeof value === 'object' && !Array.isArray(value) && current && typeof current === 'object' && !Array.isArray(current)) {
-      out[key] = deepMerge(current, value);
-    } else {
-      out[key] = value;
-    }
+    out[key] = isPlainObject(value) && isPlainObject(out[key]) ? deepMerge(out[key], value) : value;
   }
   return out;
 }
@@ -101,14 +101,16 @@ export async function loadConfig(options = {}) {
   }
 
   // ===== 路径绝对化 =====
+  // 基准目录（项目根）只在一处决定：所有 storage 子路径都经它换算，避免四处各写一次 path.resolve
+  const resolveUnderProject = (value) => path.resolve(projectRoot, value);
   const resolved = {
     ...config,
     storage: {
       ...config.storage,
-      root: path.resolve(projectRoot, config.storage.root),
-      dataDir: path.resolve(projectRoot, config.storage.dataDir),
-      trashDir: path.resolve(projectRoot, config.storage.trashDir),
-      logDir: path.resolve(projectRoot, config.storage.logDir),
+      root: resolveUnderProject(config.storage.root),
+      dataDir: resolveUnderProject(config.storage.dataDir),
+      trashDir: resolveUnderProject(config.storage.trashDir),
+      logDir: resolveUnderProject(config.storage.logDir),
     },
   };
 

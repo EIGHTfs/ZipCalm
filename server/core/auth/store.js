@@ -16,6 +16,31 @@ import { randomToken, sha256 } from './password.js';
 
 /** 滑动续期阈值：剩余时间低于 TTL 的一半时才重新签发 Cookie（避免每个请求都 Set-Cookie） */
 const RENEW_THRESHOLD_RATIO = 0.5;
+/** token 落盘节流窗口：把同一窗口内的多次变更合并成一次原子写（登录/续期/清理都会触发变更） */
+const TOKEN_PERSIST_THROTTLE_MS = 50;
+/** 过期条目清理周期（1 分钟；定时器 unref，不阻止进程退出） */
+const CLEANUP_INTERVAL_MS = 60 * 1000;
+
+/**
+ * 清掉已过期的条目并返回清掉的条数。
+ * token 与 session 两张表结构相同（都是 {expiresAt}），所以共用这一份实现。
+ */
+function pruneExpired(map, nowTs) {
+  let removed = 0;
+  for (const [key, value] of map) {
+    if (value.expiresAt > nowTs) continue;
+    map.delete(key);
+    removed += 1;
+  }
+  return removed;
+}
+
+/** 登录失败计数按限流窗口过期（窗口外的不再计入） */
+function pruneLoginFailures(records, windowMs, nowTs) {
+  for (const [ip, record] of records) {
+    if (nowTs - record.firstAt > windowMs) records.delete(ip);
+  }
+}
 
 export function createAuthStore({ config, logger, dataDir }) {
   const sessionTtlMs = config.sessionTtlMs;
@@ -70,7 +95,7 @@ export function createAuthStore({ config, logger, dataDir }) {
     persistTimer = setTimeout(() => {
       persistTimer = null;
       persist().catch((error) => logger.error('persist auth tokens failed', { error: error.message }));
-    }, 50);
+    }, TOKEN_PERSIST_THROTTLE_MS);
     if (typeof persistTimer.unref === 'function') persistTimer.unref();
   }
 
@@ -203,24 +228,14 @@ export function createAuthStore({ config, logger, dataDir }) {
   function startCleanup() {
     const timer = setInterval(() => {
       const now = Date.now();
-      let removedTokens = 0;
-      for (const [key, value] of tokens) {
-        if (value.expiresAt <= now) {
-          tokens.delete(key);
-          removedTokens += 1;
-        }
-      }
-      for (const [key, value] of sessions) {
-        if (value.expiresAt <= now) sessions.delete(key);
-      }
-      for (const [ip, record] of loginFailures) {
-        if (now - record.firstAt > config.loginRateLimit.windowMs) loginFailures.delete(ip);
-      }
+      const removedTokens = pruneExpired(tokens, now);
+      pruneExpired(sessions, now);
+      pruneLoginFailures(loginFailures, config.loginRateLimit.windowMs, now);
       if (removedTokens > 0) {
         schedulePersist();
         logger.debug('expired auth tokens cleaned', { removedTokens });
       }
-    }, 60 * 1000);
+    }, CLEANUP_INTERVAL_MS);
     if (typeof timer.unref === 'function') timer.unref();
     return () => clearInterval(timer);
   }

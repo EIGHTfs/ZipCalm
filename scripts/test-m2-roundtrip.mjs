@@ -13,21 +13,16 @@
 // - **zip-slip**：手工构造 `../`、绝对路径、symlink 三种恶意包，断言被拒且目标目录外无写入；
 // - **删除受 delete.mode 约束**：默认 log-only 只记日志不真删 —— 断言文件仍在 + 删除日志有记录。
 
-import { execFile } from 'node:child_process';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
-import zlib from 'node:zlib';
 
+import { createRandom, hashTree, walkFiles, writeRawZip } from './helpers/archive-fixtures.mjs';
+import { PROJECT_ROOT, execFileAsync } from './helpers/script-env.mjs';
 import { loadRuntimeConfig } from './helpers/test-config.mjs';
 import { createReporter } from './helpers/test-report.mjs';
 
-const execFileAsync = promisify(execFile);
 
-const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // ===== 配置：端口与存储根都从运行期配置读（不写死）=====
 
@@ -86,74 +81,40 @@ async function waitTask(id, timeoutMs = 60000) {
 }
 
 // ===== 假数据（确定性）=====
+//
+// createRandom / walkFiles / hashTree 都从 helpers/archive-fixtures.mjs 引入：
+// M4 当初就是照这套实现拆出去的，两份各留一份只会漂移（例如种子或 hash 口径改一处忘一处）。
 
-/** 固定种子的 xorshift32：保证每次运行生成同样的字节，便于 hash 比对可复现 */
-function createRandom(seed) {
-  let state = seed >>> 0;
-  return () => {
-    state ^= state << 13;
-    state >>>= 0;
-    state ^= state >>> 17;
-    state ^= state << 5;
-    state >>>= 0;
-    return state / 0xffffffff;
-  };
-}
-
-async function sha256File(filePath) {
-  const hash = crypto.createHash('sha256');
-  await new Promise((resolve, reject) => {
-    fs.createReadStream(filePath).on('data', (chunk) => hash.update(chunk)).on('end', resolve).on('error', reject);
-  });
-  return hash.digest('hex');
-}
-
-/** 递归收集目录下所有文件（相对路径 → 绝对路径）；目录不存在时返回空集合（由断言去判失败） */
-async function walkFiles(dir, base = dir, acc = new Map()) {
-  let dirents;
-  try {
-    dirents = await fsp.readdir(dir, { withFileTypes: true });
-  } catch {
-    return acc;
-  }
-  for (const dirent of dirents) {
-    const abs = path.join(dir, dirent.name);
-    if (dirent.isDirectory()) await walkFiles(abs, base, acc);
-    else if (dirent.isFile()) acc.set(path.relative(base, abs).split(path.sep).join('/'), abs);
-  }
-  return acc;
-}
-
-async function hashTree(dir) {
-  const files = await walkFiles(dir);
-  const hashes = new Map();
-  for (const [relative, abs] of files) hashes.set(relative, await sha256File(abs));
-  return hashes;
-}
+/** M2 的夹具布局：0 字节文件、超大文件、空目录、中文/空格路径都要有 */
+const FIXTURE_LAYOUT = [
+  { dir: '', count: 3, minSize: 0, maxSize: 512 },
+  { dir: '子目录A', count: 12, minSize: 1024, maxSize: 65536 },
+  { dir: '子目录B/深层', count: 8, minSize: 65536, maxSize: 300000 },
+  { dir: 'empty-dir', count: 0, minSize: 0, maxSize: 0 },
+  { dir: '中文目录/带空格 的目录', count: 5, minSize: 1, maxSize: 4096 },
+];
+/** 夹具随机种子：固定值保证每次生成同样的字节，便于 hash 比对可复现 */
+const FIXTURE_SEED = 20261016;
+/** 假数据字节取值范围（0~255）；文件名序号对齐宽度 */
+const BYTE_VALUES = 256;
+const INDEX_PAD_WIDTH = 3;
 
 async function prepareFixture() {
   await fsp.rm(WORK, { recursive: true, force: true });
   const srcDir = path.join(WORK, 'src');
   await fsp.mkdir(srcDir, { recursive: true });
 
-  const random = createRandom(20261016);
-  const layout = [
-    { dir: '', count: 3, minSize: 0, maxSize: 512 },
-    { dir: '子目录A', count: 12, minSize: 1024, maxSize: 65536 },
-    { dir: '子目录B/深层', count: 8, minSize: 65536, maxSize: 300000 },
-    { dir: 'empty-dir', count: 0, minSize: 0, maxSize: 0 },
-    { dir: '中文目录/带空格 的目录', count: 5, minSize: 1, maxSize: 4096 },
-  ];
+  const random = createRandom(FIXTURE_SEED);
 
   let index = 0;
-  for (const group of layout) {
+  for (const group of FIXTURE_LAYOUT) {
     const target = path.join(srcDir, group.dir);
     await fsp.mkdir(target, { recursive: true });
     for (let i = 0; i < group.count; i += 1) {
       const size = Math.floor(group.minSize + random() * Math.max(1, group.maxSize - group.minSize));
-      const name = `file-${String(index).padStart(3, '0')}-${size}B.bin`;
+      const name = `file-${String(index).padStart(INDEX_PAD_WIDTH, '0')}-${size}B.bin`;
       const buffer = Buffer.alloc(size);
-      for (let offset = 0; offset < size; offset += 1) buffer[offset] = Math.floor(random() * 256);
+      for (let offset = 0; offset < size; offset += 1) buffer[offset] = Math.floor(random() * BYTE_VALUES);
       await fsp.writeFile(path.join(target, name), buffer);
       index += 1;
     }
@@ -168,79 +129,9 @@ async function prepareFixture() {
 //
 // 为什么不用 archiver：实测它会把 `../evil.txt` **规范化**成 `evil.txt`（7z l 实证），
 // 那样根本造不出真实的攻击样本 —— 门禁/安全用例绝不能是"假攻击"。
-// 因此这里手写最小 ZIP 记录（local header + central directory + EOCD），
-// **仅用于测试夹具**；生产代码不解析 ZIP，读写都交给 archiver / unzipper。
-
-/** 组装一个 ZIP 文件（支持任意条目名与 unix 模式，用于制造 ../、绝对路径、symlink 等样本） */
-async function writeRawZip(destPath, entries) {
-  const now = new Date();
-  const time = ((now.getHours() << 11) | (now.getMinutes() << 5) | Math.floor(now.getSeconds() / 2)) & 0xffff;
-  const day = (((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate()) & 0xffff;
-
-  const chunks = [];
-  const centralParts = [];
-  let offset = 0;
-
-  for (const entry of entries) {
-    const nameBuf = Buffer.from(entry.name, 'utf8');
-    const isSymlink = entry.type === 'symlink';
-    const payloadBytes = Buffer.from(isSymlink ? entry.target : (entry.content ?? 'x'), 'utf8');
-    const method = isSymlink ? 0 : 8; // symlink 用 store，普通文件用 deflate
-    const compressed = method === 8 ? zlib.deflateRawSync(payloadBytes) : payloadBytes;
-    const crc = zlib.crc32(payloadBytes) >>> 0;
-    const externalAttr = isSymlink ? ((0o120777 << 16) >>> 0) : ((0o100644 << 16) >>> 0);
-
-    const local = Buffer.alloc(30);
-    local.writeUInt32LE(0x04034b50, 0);
-    local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(0, 6);
-    local.writeUInt16LE(method, 8);
-    local.writeUInt16LE(time, 10);
-    local.writeUInt16LE(day, 12);
-    local.writeUInt32LE(crc, 14);
-    local.writeUInt32LE(compressed.length, 18);
-    local.writeUInt32LE(payloadBytes.length, 22);
-    local.writeUInt16LE(nameBuf.length, 26);
-    local.writeUInt16LE(0, 28);
-    chunks.push(local, nameBuf, compressed);
-
-    const central = Buffer.alloc(46);
-    central.writeUInt32LE(0x02014b50, 0);
-    central.writeUInt16LE(0x031e, 4); // made by unix
-    central.writeUInt16LE(20, 6);
-    central.writeUInt16LE(0, 8);
-    central.writeUInt16LE(method, 10);
-    central.writeUInt16LE(time, 12);
-    central.writeUInt16LE(day, 14);
-    central.writeUInt32LE(crc, 16);
-    central.writeUInt32LE(compressed.length, 20);
-    central.writeUInt32LE(payloadBytes.length, 24);
-    central.writeUInt16LE(nameBuf.length, 28);
-    central.writeUInt16LE(0, 30);
-    central.writeUInt16LE(0, 32);
-    central.writeUInt16LE(0, 34);
-    central.writeUInt16LE(0, 36);
-    central.writeUInt32LE(externalAttr, 38);
-    central.writeUInt32LE(offset, 42);
-    centralParts.push(central, nameBuf);
-
-    offset += local.length + nameBuf.length + compressed.length;
-  }
-
-  const centralBuf = Buffer.concat(centralParts);
-  const eocd = Buffer.alloc(22);
-  eocd.writeUInt32LE(0x06054b50, 0);
-  eocd.writeUInt16LE(0, 4);
-  eocd.writeUInt16LE(0, 6);
-  eocd.writeUInt16LE(entries.length, 8);
-  eocd.writeUInt16LE(entries.length, 10);
-  eocd.writeUInt32LE(centralBuf.length, 12);
-  eocd.writeUInt32LE(offset, 16);
-  eocd.writeUInt16LE(0, 20);
-
-  await fsp.mkdir(path.dirname(destPath), { recursive: true });
-  await fsp.writeFile(destPath, Buffer.concat([...chunks, centralBuf, eocd]));
-}
+// 手写最小 ZIP 记录（local header + central directory + EOCD）的实现见
+// helpers/archive-fixtures.mjs 的 writeRawZip：M2 与 M4 的 zip-slip 用例共用同一份，
+// 支持任意条目名与 unix 模式（../、绝对路径、symlink 样本都靠它造）。
 
 // ===== 主流程 =====
 

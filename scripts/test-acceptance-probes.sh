@@ -15,7 +15,7 @@
 # 用法：
 #   bash scripts/test-acceptance-probes.sh
 # 可覆盖的环境变量（无硬编码凭据/端口）：
-#   ZC_TEST_PORT（默认 3010）· ZC_TEST_USER（默认 admin）· ZC_TEST_PASSWORD（默认 zipcalm）
+#   ZC_TEST_PORT（默认 3010）· ZC_TEST_USER（默认 admin）· ZC_TEST_PASSWORD（默认见 scripts/helpers/test-credentials.sh）
 
 set -u
 
@@ -24,8 +24,10 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}" || exit 1
 
 PORT="${ZC_TEST_PORT:-3010}"
-USER_NAME="${ZC_TEST_USER:-admin}"
-PASSWORD="${ZC_TEST_PASSWORD:-zipcalm}"
+# 测试账号统一来源（默认值 / 覆盖方式 / 审计豁免说明都写在 helper 里，三个脚本不再各写一份）
+source "${SCRIPT_DIR}/helpers/test-credentials.sh"
+AUTH_USER="${TEST_USER}"
+AUTH_PASSWORD="${TEST_PASSWORD}"
 API="http://127.0.0.1:${PORT}/api/v1"
 COOKIE_JAR="$(mktemp)"
 # 临时响应体统一放本次运行的私有目录：不再散落硬编码的 /tmp 文件名（互不打架，退出即清理）
@@ -36,12 +38,24 @@ FAIL=0
 cleanup() { rm -f "${COOKIE_JAR}"; rm -rf "${TMP_DIR}"; }
 trap cleanup EXIT
 
+# 把变量安全地喂给下游命令（脚本里反复用到，收成一处）。
+# 为什么不用 echo：echo 对 -n / 反斜杠转义 / 多行内容的处理在不同 shell 不一致，printf 原样输出才是对的。
+pipe_var() { printf '%s' "$1"; }
+
+# 文本里匹配的行数（grep 无匹配时返回码为 1，这里兜底成 0，避免 set -e 场景误判）
+count_matches() { pipe_var "$1" | grep -c "$2" || true; }
+
+# 从 JSON 文本里取字段（取不到给空串；jq 报错也不打断脚本）
+json_field() { pipe_var "$1" | jq -r "$2 // empty" 2>/dev/null || true; }
+
 check() { # check <描述> <期望> <实际>
-  if printf '%s' "$3" | grep -q "$2"; then
-    printf 'PASS | %-46s | %s\n' "$1" "$(printf '%s' "$3" | head -1 | cut -c1-60)"
+  local summary # 单行摘要只算一次（PASS/FAIL 两条分支共用）
+  summary="$(pipe_var "$3" | head -1 | cut -c1-60)"
+  if pipe_var "$3" | grep -q "$2"; then
+    printf 'PASS | %-46s | %s\n' "$1" "${summary}"
     PASS=$((PASS + 1))
   else
-    printf 'FAIL | %-46s | 期望含「%s」实际：%s\n' "$1" "$2" "$(printf '%s' "$3" | head -1 | cut -c1-60)"
+    printf 'FAIL | %-46s | 期望含「%s」实际：%s\n' "$1" "$2" "${summary}"
     FAIL=$((FAIL + 1))
   fi
 }
@@ -62,7 +76,7 @@ echo
 bash "${SCRIPT_DIR}/start.sh" start >/dev/null 2>&1
 sleep 2
 curl -s -c "${COOKIE_JAR}" -X POST "${API}/auth/login" -H 'Content-Type: application/json' \
-  -d "{\"username\":\"${USER_NAME}\",\"password\":\"${PASSWORD}\"}" -o /dev/null
+  -d "{\"username\":\"${AUTH_USER}\",\"password\":\"${AUTH_PASSWORD}\"}" -o /dev/null
 
 echo "── 一、路径越界形态（每种都必须拒绝，且响应不泄漏存储根）──"
 # 形态类探测：不依赖夹具是否存在，靠形态判定拒绝
@@ -102,12 +116,12 @@ echo "── 四、API 响应不得泄漏绝对路径（曾抓到的真 bug）�
 LIST_BODY="$(curl -s -b "${COOKIE_JAR}" "${API}/tasks")"
 # 注意：只找「存储根绝对路径」特征，不能用 `"/` 这种宽匹配 —— 用户路径本身就以 `/` 开头（契约规定），
 # 拿它当泄漏会假阳性（本节曾经就是被这个宽匹配误报过一次）。
-check "任务列表不含存储根绝对路径" "LEAK=0" "LEAK=$(printf '%s' "${LIST_BODY}" | grep -c '/volume\|storage/fs-root' || true)"
-check "任务列表不含 absPath 字段" "ABS=0" "ABS=$(printf '%s' "${LIST_BODY}" | grep -c 'absPath' || true)"
-TASK_ID="$(printf '%s' "${LIST_BODY}" | jq -r '.data.items[0].id // empty' 2>/dev/null)"
+check "任务列表不含存储根绝对路径" "LEAK=0" "LEAK=$(count_matches "${LIST_BODY}" '/volume\|storage/fs-root')"
+check "任务列表不含 absPath 字段" "ABS=0" "ABS=$(count_matches "${LIST_BODY}" 'absPath')"
+TASK_ID="$(json_field "${LIST_BODY}" '.data.items[0].id')"
 if [ -n "${TASK_ID}" ]; then
   DETAIL_BODY="$(curl -s -b "${COOKIE_JAR}" "${API}/tasks/${TASK_ID}")"
-  check "任务详情不含 absPath 字段" "ABS=0" "ABS=$(printf '%s' "${DETAIL_BODY}" | grep -c 'absPath' || true)"
+  check "任务详情不含 absPath 字段" "ABS=0" "ABS=$(count_matches "${DETAIL_BODY}" 'absPath')"
 else
   printf 'SKIP | 任务详情泄漏检查（列表为空，无样本）\n'
 fi

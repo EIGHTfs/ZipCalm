@@ -103,6 +103,32 @@ async function collectSource(source, sourceName, skipped) {
   return { entries, bytes, skippedSymlinks };
 }
 
+/** 建好写入链路：Pack（纯 JS 打包）→ 压缩层（可省）→ 输出流 */
+function openTarPipeline(ctx, collected, stats) {
+  const output = fs.createWriteStream(ctx.tempPath);
+  const pack = new tar.Pack({ cwd: collected.base, portable: true, gzip: false });
+  const compressor = createCompressStream(stats.compression, stats.level);
+  const done = pipelineWith([pack, compressor || new PassThrough(), output], stats.signal);
+  return { pack, done };
+}
+
+/** 把条目逐个加进 Pack（每个条目检查一次取消信号：大目录要能及时中断） */
+function addEntriesToPack(pack, fileItems, signal) {
+  for (const fileEntry of fileItems) {
+    if (signal && signal.aborted) throw apiError(ERROR_CODES.ABORTED, '任务已取消');
+    pack.add(fileEntry.name);
+  }
+  pack.end();
+}
+
+/** 把执行器抛出的错误翻译成契约错误（取消 → ABORTED，其余原样上抛） */
+function mapTarFailure(error, signal) {
+  if (error && (error.name === 'AbortError' || (signal && signal.aborted))) {
+    return apiError(ERROR_CODES.ABORTED, '任务已取消');
+  }
+  return error;
+}
+
 /**
  * 写入归档：单个 `Pack({ cwd })` 一次性写全部条目 → 套压缩层 → 输出到 tempPath。
  *
@@ -112,27 +138,16 @@ async function collectSource(source, sourceName, skipped) {
 export async function writeTarStream(ctx, collected, stats) {
   const report = createThrottledReporter(ctx.onProgress || (() => {}), { intervalMs: 100 });
   const startedAt = Date.now();
-  const { items, base, sourceStats, totalBytes, totalFiles } = collected;
-
-  const output = fs.createWriteStream(ctx.tempPath);
-  const pack = new tar.Pack({ cwd: base, portable: true, gzip: false });
-  const compressor = createCompressStream(stats.compression, stats.level);
-  const done = pipelineWith([pack, compressor || new PassThrough(), output], stats.signal);
+  const { items, totalBytes, totalFiles } = collected;
+  const { pack, done } = openTarPipeline(ctx, collected, stats);
 
   try {
-    for (const fileEntry of items) {
-      if (stats.signal && stats.signal.aborted) throw apiError(ERROR_CODES.ABORTED, '任务已取消');
-      pack.add(fileEntry.name);
-    }
-    pack.end();
-    reportBySource(sourceStats, { report, totalBytes, totalFiles });
+    addEntriesToPack(pack, items, stats.signal);
+    reportBySource(collected.sourceStats, { report, totalBytes, totalFiles });
     await done;
   } catch (error) {
     await discardTemp(ctx.tempPath);
-    if (error && (error.name === 'AbortError' || (stats.signal && stats.signal.aborted))) {
-      throw apiError(ERROR_CODES.ABORTED, '任务已取消');
-    }
-    throw error;
+    throw mapTarFailure(error, stats.signal);
   }
 
   // 产物大小：stat 失败（理论上不会）就当 0，不用 existsSync 先探一次（同步 I/O）

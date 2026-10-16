@@ -131,6 +131,53 @@ export const useTasksStore = defineStore('tasks', () => {
     }
   }
 
+  /** SSE 地址（带 since 续传参数；lastSeq=0 时不带） */
+  function eventsUrl() {
+    const since = lastSeq.value > 0 ? `&since=${lastSeq.value}` : '';
+    return `/api/v1/tasks/events?channels=tasks${since}`;
+  }
+
+  /**
+   * 记一次连接失败；达到阈值就降级轮询。
+   * @returns {boolean} true = 已降级到轮询（调用方据此决定还要不要安排重连）
+   */
+  function recordConnectFailure() {
+    failures += 1;
+    if (failures >= FALLBACK_AFTER_FAILURES) {
+      startPolling();
+      return true;
+    }
+    return false;
+  }
+
+  /** 挂上快照/增量/心跳/开闭事件（每条只做自己那件事） */
+  function attachSourceHandlers(openedSource) {
+    openedSource.addEventListener('snapshot', (event) => {
+      handleFrame('snapshot', event);
+      connectionMode.value = 'connected';
+      failures = 0;
+      reconnectDelay = 1000;
+      stopPolling();
+    });
+    openedSource.addEventListener('task', (event) => handleFrame('task', event));
+    openedSource.addEventListener('heartbeat', () => {
+      connectionMode.value = 'connected';
+    });
+    openedSource.onopen = () => {
+      connectionMode.value = 'connected';
+      failures = 0;
+    };
+    openedSource.onerror = () => {
+      connectionMode.value = 'connecting';
+      if (source) {
+        source.close();
+        source = null;
+      }
+      recordConnectFailure();
+      scheduleReconnect();
+    };
+  }
+
   /** 建立 SSE：连接后服务端**先发快照**再发增量；重连时带 since 续传 */
   function connect() {
     if (typeof EventSource === 'undefined') {
@@ -142,47 +189,16 @@ export const useTasksStore = defineStore('tasks', () => {
       source = null;
     }
     connectionMode.value = 'connecting';
-    const since = lastSeq.value > 0 ? `&since=${lastSeq.value}` : '';
-    const url = `/api/v1/tasks/events?channels=tasks${since}`;
 
     try {
-      source = new EventSource(url);
+      source = new EventSource(eventsUrl());
     } catch {
-      failures += 1;
-      if (failures >= FALLBACK_AFTER_FAILURES) startPolling();
-      else scheduleReconnect();
+      // 构造失败（如浏览器禁用 EventSource）：降级轮询；没到阈值才安排重连
+      if (!recordConnectFailure()) scheduleReconnect();
       return;
     }
 
-    source.addEventListener('snapshot', (event) => {
-      handleFrame('snapshot', event);
-      connectionMode.value = 'connected';
-      failures = 0;
-      reconnectDelay = 1000;
-      stopPolling();
-    });
-    source.addEventListener('task', (event) => handleFrame('task', event));
-    source.addEventListener('heartbeat', () => {
-      connectionMode.value = 'connected';
-    });
-    source.onopen = () => {
-      connectionMode.value = 'connected';
-      failures = 0;
-    };
-    source.onerror = () => {
-      failures += 1;
-      connectionMode.value = 'connecting';
-      if (source) {
-        source.close();
-        source = null;
-      }
-      if (failures >= FALLBACK_AFTER_FAILURES) {
-        startPolling();
-        scheduleReconnect();
-        return;
-      }
-      scheduleReconnect();
-    };
+    attachSourceHandlers(source);
   }
 
   function disconnect() {
@@ -235,7 +251,8 @@ export const useTasksStore = defineStore('tasks', () => {
     const next = new Map(tasks.value);
     next.delete(id);
     tasks.value = next;
-    await loadHistory(50).catch(() => {});
+    // loadHistory 自带默认页大小（不重复写 50，避免两处默认值漂移）
+    await loadHistory().catch(() => {});
     return removeResult;
   }
 

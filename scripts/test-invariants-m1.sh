@@ -33,8 +33,10 @@ if [ -z "${PORT}" ]; then
 fi
 BASE="${ZIPCALM_BASE:-http://127.0.0.1:${PORT}}"
 API="${BASE}/api/v1"
-USERNAME="${ZIPCALM_TEST_USER:-admin}"
-PASSWORD="${ZIPCALM_TEST_PASSWORD:-zipcalm}"
+# 测试账号统一来源（见 scripts/helpers/test-credentials.sh：默认值、覆盖方式与审计豁免说明）
+source "${SCRIPT_DIR}/helpers/test-credentials.sh"
+AUTH_USER="${TEST_USER}"
+AUTH_PASSWORD="${TEST_PASSWORD}"
 
 COOKIE_JAR="$(mktemp)"
 PASS_COUNT=0
@@ -105,10 +107,11 @@ printf '── 认证（Session + Bearer 双通道）──\n'
 LOGIN_BODY="$(mktemp)"
 LOGIN_HTTP="$(curl -s -o "${LOGIN_BODY}" -w '%{http_code}' -c "${COOKIE_JAR}" \
   -X POST "${API}/auth/login" -H 'Content-Type: application/json' \
-  -d "{\"username\":\"${USERNAME}\",\"password\":\"${PASSWORD}\"}")"
+  -d "{\"username\":\"${AUTH_USER}\",\"password\":\"${AUTH_PASSWORD}\"}")"
 TOKEN="$("${NODE_BIN}" -e '
   const fs = require("node:fs");
-  try { const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(String(j?.data?.token || "")); } catch {}
+  try { const j = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(String(j?.data?.token || "")); }
+  catch { /* 响应不是合法 JSON：token 留空，由下面的断情报失败 */ }
 ' "${LOGIN_BODY}")"
 
 if [ "${LOGIN_HTTP}" = "200" ] && [ -n "${TOKEN}" ]; then
@@ -129,7 +132,7 @@ check_raw "Bearer 通道 /auth/me" 200 OK -H "Authorization: Bearer ${TOKEN}" "$
 check_raw "未认证访问 /auth/me" 401 AUTH_REQUIRED "${API}/auth/me"
 check_raw "伪造 Bearer /auth/me" 401 AUTH_INVALID -H 'Authorization: Bearer not-a-real-token' "${API}/auth/me"
 check_raw "错误密码登录" 401 AUTH_INVALID -X POST "${API}/auth/login" -H 'Content-Type: application/json' \
-  -d "{\"username\":\"${USERNAME}\",\"password\":\"definitely-wrong\"}"
+  -d "{\"username\":\"${AUTH_USER}\",\"password\":\"definitely-wrong\"}"
 check_raw "缺少字段登录" 400 VALIDATION_FAILED -X POST "${API}/auth/login" -H 'Content-Type: application/json' -d '{}'
 
 # ===== 2. 正常浏览 =====

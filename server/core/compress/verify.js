@@ -11,6 +11,9 @@ import { ERROR_CODES, apiError } from '../../lib/errors.js';
  * @param {string} archivePath 归档绝对路径
  * @returns {Promise<{ok: boolean, strategy: string|null, checked: number, failures: Array}>}
  */
+/** 失败明细最多回传多少条（避免一个坏包把响应撑爆） */
+const MAX_REPORTED_FAILURES = 20;
+
 /** 把格式包 test() 的返回值规整成契约形状（缺字段一律给安全默认） */
 function normalizeTestResult(testResult) {
   const failures = testResult && Array.isArray(testResult.failures) ? testResult.failures : [];
@@ -18,7 +21,7 @@ function normalizeTestResult(testResult) {
     ok: Boolean(testResult && testResult.ok === true),
     strategy: (testResult && testResult.strategy) || null,
     checked: Number((testResult && testResult.checked) || 0),
-    failures: failures.slice(0, 20),
+    failures: failures.slice(0, MAX_REPORTED_FAILURES),
   };
 }
 

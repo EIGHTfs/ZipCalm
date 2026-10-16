@@ -54,55 +54,48 @@ function archiveAbsOf(rootAbs, userPath) {
 
 // ===== 阶段一：删除（压缩删原文件 / 解压删压缩包共用）=====
 
-/**
- * 执行删除阶段：等二次确认（除非创建时已确认）→ 调删除服务 → 回填删除状态。
- * 前置条件：调用方**必须**已经通过校验（INV-01）。
- */
-async function stageDelete(record, input, deps) {
-  const { manager, logger, deleteService } = deps;
-  const info = record.info;
-  if (!info.delete) return null;
-
-  info.delete.targets = input.targets.map((target) => ({
+/** 把 API 用户路径的删除目标转成删除服务入参形状 */
+function buildDeleteTargets(input) {
+  return input.targets.map((target) => ({
     path: target.userPath,
     kind: target.kind || 'file',
     sizeBytes: Number.isFinite(target.size) ? target.size : null,
   }));
+}
 
-  const skipConfirm = input.confirmedAtCreate === true;
-  if (!skipConfirm) {
-    manager.markWaitingConfirm(info.id);
-    const gate = await manager.waitConfirm(info.id);
-    if (gate.confirmed !== true) {
-      info.delete.status = 'skipped';
-      info.delete.confirmed = false;
-      info.delete.deletedAt = Date.now();
-      logger.info('用户放弃删除，原文件/压缩包保持不动', { taskId: info.id });
-      return null;
-    }
-    if (Number.isInteger(gate.expectedFiles) && gate.expectedFiles !== info.delete.targets.length) {
-      throw apiError(ERROR_CODES.VALIDATION_FAILED, '确认弹窗与实际待删数量不一致，已中止删除', {
-        expectedFiles: gate.expectedFiles,
-        actualFiles: info.delete.targets.length,
-      });
-    }
-    info.delete.confirmed = true;
-    info.delete.confirmedAt = gate.at || Date.now();
-  } else {
+/**
+ * 等二次确认（创建时已确认则直接放行）。
+ * @returns {Promise<boolean>} true = 可以删；false = 用户放弃（调用方据此跳过删除，原文件不动）
+ */
+async function awaitDeleteConfirm(manager, logger, info, skipConfirm) {
+  if (skipConfirm) {
     info.delete.confirmed = true;
     info.delete.confirmedAt = Date.now();
+    return true;
   }
 
-  manager.setPhase(info.id, 'deleting');
-  info.delete.status = 'deleting';
+  manager.markWaitingConfirm(info.id);
+  const gate = await manager.waitConfirm(info.id);
+  if (gate.confirmed !== true) {
+    info.delete.status = 'skipped';
+    info.delete.confirmed = false;
+    info.delete.deletedAt = Date.now();
+    logger.info('用户放弃删除，原文件/压缩包保持不动', { taskId: info.id });
+    return false;
+  }
+  if (Number.isInteger(gate.expectedFiles) && gate.expectedFiles !== info.delete.targets.length) {
+    throw apiError(ERROR_CODES.VALIDATION_FAILED, '确认弹窗与实际待删数量不一致，已中止删除', {
+      expectedFiles: gate.expectedFiles,
+      actualFiles: info.delete.targets.length,
+    });
+  }
+  info.delete.confirmed = true;
+  info.delete.confirmedAt = gate.at || Date.now();
+  return true;
+}
 
-  const deleteOutcome = await deleteService.deleteTargets({
-    taskId: info.id,
-    kind: info.kind,
-    reason: input.reason,
-    targets: input.targets,
-  });
-
+/** 把删除结果回填到任务 info.delete（字段名与契约一致） */
+function applyDeleteOutcome(info, deleteOutcome) {
   info.delete.mode = deleteOutcome.mode;
   info.delete.batchId = deleteOutcome.batchId;
   info.delete.logFile = deleteOutcome.logFile;
@@ -116,6 +109,31 @@ async function stageDelete(record, input, deps) {
   info.delete.error = deleteOutcome.failed.length > 0
     ? { code: deleteOutcome.failed[0].code, message: '删除失败' }
     : null;
+}
+
+/**
+ * 执行删除阶段：等二次确认（除非创建时已确认）→ 调删除服务 → 回填删除状态。
+ * 前置条件：调用方**必须**已经通过校验（INV-01）。
+ */
+async function stageDelete(record, input, deps) {
+  const { manager, logger, deleteService } = deps;
+  const info = record.info;
+  if (!info.delete) return null;
+
+  info.delete.targets = buildDeleteTargets(input);
+  const confirmed = await awaitDeleteConfirm(manager, logger, info, input.confirmedAtCreate === true);
+  if (!confirmed) return null;
+
+  manager.setPhase(info.id, 'deleting');
+  info.delete.status = 'deleting';
+  const deleteOutcome = await deleteService.deleteTargets({
+    taskId: info.id,
+    kind: info.kind,
+    reason: input.reason,
+    targets: input.targets,
+  });
+
+  applyDeleteOutcome(info, deleteOutcome);
   return deleteOutcome;
 }
 

@@ -77,30 +77,38 @@ export function apiError(code, message, details = null) {
  * 已经是 ApiError 的原样返回；系统错误按表翻译；其余归 INTERNAL_ERROR（保留 cause 便于排查）。
  *
  * 安全：对外可见的 message **绝不携带本机绝对路径与内部细节**——
- * Node 系统错误的原始 message 里通常带 `realpath '/volume1/...'`，直接透出等于把存储根布局
+ * Node 系统错误的原始 message 里通常带 `realpath '<绝对路径>'`，直接透出等于把存储根布局
  * 告诉任何已登录客户端。因此这里只保留 syscall（如 realpath）作为排障线索，路径不进 message。
  */
+/** 标 expected=true 的错误：属于调用方造成的可预期失败，不写内部堆栈 */
+function expectedError(code, details) {
+  const mapped = new ApiError(code, undefined, details);
+  mapped.expected = true;
+  return mapped;
+}
+
+/**
+ * 系统错误码 → 契约错误（不为认知的错误返回 null，由调用方继续兜底）。
+ * @returns {ApiError|null}
+ */
+function mapSystemError(error) {
+  const systemCode = error && error.code;
+  if (typeof systemCode !== 'string') return null;
+  if (SYSTEM_ERROR_MAP[systemCode]) {
+    return expectedError(SYSTEM_ERROR_MAP[systemCode], { syscall: error.syscall || null });
+  }
+  // 未映射的路径类 syscall：按"路径非法"处理（4xx），不要变成 500
+  if (PATH_SYSCALLS.has(error && error.syscall)) {
+    return expectedError(ERROR_CODES.INVALID_PATH, { syscall: error.syscall, sys: systemCode });
+  }
+  return null;
+}
+
 export function toApiError(error) {
   if (error instanceof ApiError) return error;
 
-  const systemCode = error && error.code;
-  if (typeof systemCode === 'string' && SYSTEM_ERROR_MAP[systemCode]) {
-    const mapped = new ApiError(SYSTEM_ERROR_MAP[systemCode], undefined, {
-      syscall: error.syscall || null,
-    });
-    mapped.expected = true;
-    return mapped;
-  }
-
-  // 兜底：路径类 syscall 抛出的未映射错误码，也按"路径非法"处理（4xx），不要变成 500
-  if (typeof systemCode === 'string' && PATH_SYSCALLS.has(error && error.syscall)) {
-    const mapped = new ApiError(ERROR_CODES.INVALID_PATH, undefined, {
-      syscall: error.syscall,
-      sys: systemCode,
-    });
-    mapped.expected = true;
-    return mapped;
-  }
+  const mappedSystem = mapSystemError(error);
+  if (mappedSystem) return mappedSystem;
 
   // Fastify 自带校验错误（如 body 结构不对）
   if (error && error.validation) {
