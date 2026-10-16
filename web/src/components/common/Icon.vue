@@ -15,6 +15,7 @@ import {
   Archive,
   ChartColumn,
   CircleHelp,
+  File,
   FileArchive,
   Folder,
   HardDrive,
@@ -34,6 +35,7 @@ const props = defineProps({
 // 新增图标只改这里；调用方永远只写 <Icon name="..." />
 const ICON_COMPONENTS = {
   files: Folder,
+  file: File,
   tasks: Archive,
   metrics: ChartColumn,
   settings: Settings,

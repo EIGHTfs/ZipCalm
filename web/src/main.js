@@ -1,22 +1,23 @@
-// 前端挂载入口（F1 前端准备块 · Vue 3 版）
+// 前端挂载入口（M1：真实登录态 + 401 统一跳登录）
 //
 // 职责：
-// 1. 装配 createApp(App) + pinia + vue-router，挂到 #app；
-// 2. 注册 401 统一钩子：把「凭据失效」翻译成 ui 状态（M1 接入登录页后改为跳转 #/login）；
-// 3. 留一个轻量的运行期错误观察器（window.__zipcalmErrors），供自动化验收读取
-//    「控制台是否有报错」——这是 docs/11 §十四「每阶段结束固定动作」里自审的一部分。
+// 1. 装配 createApp(App) + pinia + vue-router；
+// 2. **先探测登录态、再安装 router**：路由守卫依赖 session.authenticated，
+//    如果先安装 router，已登录用户首屏会被守卫误判成未登录而弹到登录页（一帧闪烁 + redirect 污染）；
+// 3. 注册 401 统一钩子：清态 + 跳登录页（带 redirect 回跳）；
+// 4. 运行期错误观察器（window.__zipcalmErrors）：供自动化验收判断"控制台有没有报错"。
 
 import { createApp } from 'vue';
 import { createPinia } from 'pinia';
 
-// 样式：原生 CSS + CSS 变量（技术栈约定，不用预处理器/CSS-in-JS）
-// 必须在挂载前引入，否则四区栅格不生效、页面会退化成块级堆叠
+// 样式：原生 CSS + CSS 变量（必须在挂载前引入，否则四区栅格不生效）
 import './styles/variables.css';
 import './styles/base.css';
 import './styles/layout.css';
 
 import App from './App.vue';
 import router from './router/index.js';
+import { ROUTES } from './constants/index.js';
 import { setUnauthorizedHandler } from './api/client.js';
 import { useSessionStore } from './stores/session.js';
 import { useUiStore } from './stores/ui.js';
@@ -25,29 +26,12 @@ import { useUiStore } from './stores/ui.js';
 
 const app = createApp(App);
 const pinia = createPinia();
-
 app.use(pinia);
-app.use(router);
-
-// ===== 2. 401 钩子：任何请求判定凭据失效时统一走这里 =====
 
 const sessionStore = useSessionStore(pinia);
 const uiStore = useUiStore(pinia);
 
-setUnauthorizedHandler((info) => {
-  // 契约（docs/M0/API规范.md §二）：401 分 AUTH_REQUIRED / AUTH_INVALID / AUTH_EXPIRED，
-  // 客户端动作是「先刷新 token，失败再跳登录」。F1 还没有登录页，所以只落状态：
-  // 顶栏会显示「未登录」，M1 补上登录路由后在这里改为 router.push(ROUTES.LOGIN)。
-  sessionStore.markUnauthorized(info);
-});
-
-// 路由 → UI store：MainArea 的标题/提示、顶栏面包屑都读这里（单一来源，避免各组件各自推断）
-router.afterEach((to) => {
-  uiStore.syncRoute(to);
-});
-uiStore.syncRoute(router.currentRoute.value);
-
-// ===== 3. 运行期错误观察器（供验收断言，不影响业务逻辑）=====
+// ===== 2. 运行期错误观察器（先装，才能捕获后面所有阶段的问题）=====
 
 window.__zipcalmErrors = [];
 const recordError = (kind, detail) => {
@@ -67,21 +51,55 @@ console.error = (...args) => {
   originalConsoleError(...args);
 };
 
-// ===== 4. 挂载 =====
+// ===== 3. 401 钩子：凭据失效 → 清态 + 跳登录（带 redirect）=====
 
-app.mount('#app');
+setUnauthorizedHandler((info) => {
+  const current = router.currentRoute.value;
 
-// 给自动化验收留一个可读的启动快照（区域数量、当前路由）。
-// 必须等 router.isReady()：初始导航完成前 currentRoute 还是 '/'，
-// 过早快照会记录成错误的初始路由（同时补一次 syncRoute，保证首屏标题/提示正确）。
-router.isReady().then(() => {
+  // 已经在登录页时不落"过期"状态：此时的 401 多半是用户输错密码或探测未登录，
+  // 标成「登录已过期」是误导（真实踩过：登录失败后顶栏显示"登录已过期"）。
+  if (current.path === ROUTES.LOGIN) return;
+
+  sessionStore.markUnauthorized(info);
+
+  router.replace({
+    path: ROUTES.LOGIN,
+    query: current.fullPath && current.fullPath !== '/' ? { redirect: current.fullPath } : undefined,
+  });
+});
+
+// ===== 4. 路由 → UI store（标题/提示/面包屑的单一来源）=====
+
+router.afterEach((to) => {
+  uiStore.syncRoute(to);
+});
+
+// ===== 5. 启动序列：探测登录态 → 安装 router → 挂载 =====
+
+async function bootstrap() {
+  try {
+    await sessionStore.ensureLoaded();
+  } catch (error) {
+    // 探测失败（例如后端没起）不应白屏：记录后继续，由页面/守卫给出可读提示
+    recordError('session-probe', (error && error.message) || '登录态探测失败');
+  }
+
+  app.use(router);
+  app.mount('#app');
+
+  await router.isReady();
   uiStore.syncRoute(router.currentRoute.value);
+
+  // 给自动化验收留一个可读的启动快照
   window.__zipcalmBoot = {
     mountedAt: Date.now(),
     route: router.currentRoute.value.path,
+    authenticated: sessionStore.authenticated,
     viewMode: uiStore.viewMode,
     regions: ['topbar', 'sidebar', 'main-area', 'bottom-task-bar'].filter((region) =>
       Boolean(document.querySelector(`[data-region="${region}"]`)),
     ),
   };
-});
+}
+
+bootstrap();

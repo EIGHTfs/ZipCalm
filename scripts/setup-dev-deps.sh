@@ -21,8 +21,8 @@
 # - package-lock.json 留在构建目录，不入库。
 #
 # ── 用法 ──────────────────────────────────────────────────────────────
-#   bash scripts/setup-dev-deps.sh                     # 默认依赖目录 /volume1/@tmp/zipcalm-build
-#   ZIPCALM_BUILD_DIR=/some/exec/path bash scripts/setup-dev-deps.sh   # 覆盖依赖目录
+#   bash scripts/setup-dev-deps.sh                     # 依赖目录：自探测（不写死机器路径）
+#   ZIPCALM_BUILD_DIR=/some/exec/path bash scripts/setup-dev-deps.sh   # 显式指定依赖目录（优先级最高）
 #   脚本幂等：可重复执行，每次都重建软链并复跑安装。
 #
 set -euo pipefail
@@ -31,11 +31,56 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-# 依赖目录：默认落在本机可执行盘，可通过环境变量覆盖（不写死）
-BUILD_DIR="${ZIPCALM_BUILD_DIR:-/volume1/@tmp/zipcalm-build}"
+# ── 依赖目录：配置优先，否则自探测 ──────────────────────────────────────
+# 原则：不写死任何机器专属路径。判定标准只有两条 —— 目录可写、且放进去的文件**能被执行**
+#（noexec 挂载会被 probe 直接挡住，无需知道它是 NFS 还是别的什么盘）。
+probe_exec_dir() {
+  local dir="$1" probe out
+  [ -n "${dir}" ] || return 1
+  mkdir -p "${dir}" 2>/dev/null || return 1
+  probe="${dir}/.zipcalm-exec-probe-$"
+  printf '#!/bin/sh\nprintf ok\n' > "${probe}" 2>/dev/null || { rm -f "${probe}"; return 1; }
+  chmod +x "${probe}" 2>/dev/null
+  out="$("${probe}" 2>/dev/null || true)"
+  rm -f "${probe}"
+  [ "${out}" = "ok" ]
+}
+
+detect_build_dir() {
+  local candidates=() root="${PROJECT_ROOT}" i
+  # ① 项目根同级（就近放置，便于与项目一起备份/清理）
+  candidates+=("${PROJECT_ROOT%/*}/.zipcalm-build")
+  # ② 从项目根向上逐层找（工作区通常被挂在 noexec 上，上一层往往可用）
+  for i in 1 2 3; do
+    root="$(cd "${root}/.." 2>/dev/null && pwd || true)"
+    [ -n "${root}" ] && [ "${root}" != "/" ] && candidates+=("${root}/zipcalm-build")
+  done
+  # ③ 系统/用户临时目录（可能被清理或 noexec，仅作兜底）
+  candidates+=("${TMPDIR:-/tmp}/zipcalm-build" "${HOME:-/tmp}/.cache/zipcalm-build")
+  for c in "${candidates[@]}"; do
+    if probe_exec_dir "${c}"; then printf '%s' "${c}"; return 0; fi
+  done
+  return 1
+}
+
+if [ -n "${ZIPCALM_BUILD_DIR:-}" ]; then
+  BUILD_DIR="${ZIPCALM_BUILD_DIR}"
+  if ! probe_exec_dir "${BUILD_DIR}"; then
+    echo "[setup-dev-deps] 错误：ZIPCALM_BUILD_DIR=${BUILD_DIR} 不可写或不可执行（noexec 挂载？）" >&2
+    exit 1
+  fi
+  BUILD_DIR_SOURCE="环境变量 ZIPCALM_BUILD_DIR"
+else
+  if ! BUILD_DIR="$(detect_build_dir)"; then
+    echo "[setup-dev-deps] 错误：自探测未找到「可写且可执行」的目录。" >&2
+    echo "[setup-dev-deps] 请用 ZIPCALM_BUILD_DIR=<可执行目录> 显式指定后重跑。" >&2
+    exit 1
+  fi
+  BUILD_DIR_SOURCE="自探测"
+fi
 
 echo "[setup-dev-deps] 项目根：${PROJECT_ROOT}"
-echo "[setup-dev-deps] 依赖目录：${BUILD_DIR}（可用 ZIPCALM_BUILD_DIR 覆盖）"
+echo "[setup-dev-deps] 依赖目录：${BUILD_DIR}（来源：${BUILD_DIR_SOURCE}）"
 
 # ── 1. 准备构建目录，并同步 package.json ────────────────────────────────
 # 依赖声明的唯一来源仍是项目根 package.json；这里只是复制一份给安装用。

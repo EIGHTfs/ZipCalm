@@ -1,44 +1,207 @@
 <script setup>
-// 文件浏览页（占位）：M1 接入 GET /api/v1/fs/list + /fs/stat
+// 文件浏览页（M1：真实联调 GET /api/v1/fs/list）
 //
-// F1 只做「看得出这是文件页」的骨架：工具条占位 + 空状态卡片 + 占位网格。
-// 不写死任何枚举字面量（黑名单/格式相关的展示全部读 shared/ 或 constants/）。
+// 状态来源：**只有 API**（docs/09 约定 1）。当前路径放在 URL query（#/files?path=/文档），
+// 这样刷新/分享/回退都能恢复，符合"状态可从 API/URL 拉回"的约定。
+//
+// 交互（docs/08 第八节，鼠标优先）：
+// - 点目录行进入；面包屑可跳任意上级；「上级」按钮在根目录置灰；
+// - 列头可点排序（名称/大小/修改时间），排序参数交给服务端（服务端是唯一真相）。
+//
+// 错误态：展示后端契约错误码 + message（如 PATH_NOT_FOUND / PERMISSION_DENIED），
+// 401 由 client.js 的统一钩子处理（跳登录页），页面不重复处理。
 
-import { formatBytes } from '../utils/format.js';
-import { FORMATS } from '../constants/index.js';
+import { computed, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+
+import { api } from '../api/client.js';
+import Icon from '../components/common/Icon.vue';
+import { ROUTES } from '../constants/index.js';
+import { formatBytes, formatDateTime } from '../utils/format.js';
+import { breadcrumbsOf, parentPath } from '../utils/path.js';
+
+const route = useRoute();
+const router = useRouter();
+
+/** loading | ready | error */
+const status = ref('loading');
+const entries = ref([]);
+const listing = ref({ path: '/', parent: null, total: 0, truncated: false });
+const errorInfo = ref(null);
+const sortKey = ref('name');
+const order = ref('asc');
+const lastLoadedAt = ref(null);
+
+const currentPath = computed(() => {
+  const value = route.query.path;
+  return typeof value === 'string' && value.length > 0 ? value : '/';
+});
+const crumbs = computed(() => breadcrumbsOf(currentPath.value));
+const upLevel = computed(() => parentPath(currentPath.value));
+
+async function load() {
+  status.value = 'loading';
+  errorInfo.value = null;
+  try {
+    const data = await api.get('/fs/list', {
+      path: currentPath.value,
+      sort: sortKey.value,
+      order: order.value,
+    });
+    entries.value = Array.isArray(data && data.entries) ? data.entries : [];
+    listing.value = {
+      path: (data && data.path) || currentPath.value,
+      parent: data && typeof data.parent === 'string' ? data.parent : null,
+      total: data && Number.isInteger(data.total) ? data.total : entries.value.length,
+      truncated: Boolean(data && data.truncated),
+    };
+    lastLoadedAt.value = Date.now();
+    status.value = 'ready';
+  } catch (error) {
+    // 契约错误码优先；网络类错误由 client.js 归一到 SERVICE_UNAVAILABLE
+    errorInfo.value = {
+      code: (error && error.code) || 'INTERNAL_ERROR',
+      message: (error && error.message) || '加载目录失败',
+    };
+    entries.value = [];
+    status.value = 'error';
+  }
+}
+
+// 路径变化即重新拉取（immediate：首屏也走同一路径，避免"两套初始化逻辑"）
+watch(currentPath, load, { immediate: true });
+
+function goto(path) {
+  const target = typeof path === 'string' && path.length > 0 ? path : '/';
+  router.push(target === '/' ? { path: ROUTES.FILES } : { path: ROUTES.FILES, query: { path: target } });
+}
+
+function openEntry(entry) {
+  if (entry.type === 'dir') goto(entry.path);
+}
+
+function changeSort(key) {
+  if (sortKey.value === key) {
+    order.value = order.value === 'asc' ? 'desc' : 'asc';
+  } else {
+    sortKey.value = key;
+    order.value = 'asc';
+  }
+  load();
+}
+
+function sortIndicator(key) {
+  if (sortKey.value !== key) return '';
+  return order.value === 'asc' ? '↑' : '↓';
+}
+
+function typeLabel(entry) {
+  if (entry.type === 'dir') return '目录';
+  if (entry.type === 'symlink') return '链接';
+  return (entry.extension || '').replace('.', '').toUpperCase() || '文件';
+}
+
+function rowIcon(entry) {
+  return entry.type === 'dir' ? 'files' : 'file';
+}
 </script>
 
 <template>
-  <section class="card">
-    <h3 class="card__title">文件浏览</h3>
-    <p class="card__desc">
-      F1 仅占位。M1 起接入 <code>/api/v1/fs/list</code>（列目录）与
-      <code>/api/v1/fs/stat</code>（条目详情），路径一律为「相对存储根的 POSIX 路径」，
-      根为 <code>/</code>。
-    </p>
-  </section>
+  <section class="card file-browser" data-testid="files-page">
+    <div class="file-browser__toolbar">
+      <button
+        type="button"
+        data-testid="go-up"
+        :disabled="!upLevel"
+        @click="goto(upLevel)"
+      >
+        ← 上级
+      </button>
 
-  <section class="card">
-    <h3 class="card__title">压缩产物命名规则（契约预览）</h3>
-    <p class="card__desc">
-      单项：<code>&lt;源名&gt;&lt;扩展名&gt;</code>；多项打包：
-      <code>&lt;首个源名&gt; 等 N 项&lt;扩展名&gt;</code>；同名时自动追加
-      <code> (1)</code>、<code> (2)</code> —— 绝不覆盖既有文件。
-    </p>
-    <div class="placeholder-grid" style="margin-top: var(--space-4)">
-      <div v-for="format in FORMATS" :key="format.id" class="placeholder-block">
-        <strong>{{ format.name }}</strong> · {{ format.ext }}<br />
-        <span>{{ format.mime }}</span>
-      </div>
+      <nav class="file-browser__crumbs" aria-label="面包屑" data-testid="files-breadcrumb">
+        <template v-for="(crumb, index) in crumbs" :key="crumb.path">
+          <span v-if="index > 0" aria-hidden="true">/</span>
+          <button
+            type="button"
+            class="file-browser__crumb"
+            :aria-current="index === crumbs.length - 1 ? 'page' : undefined"
+            @click="goto(crumb.path)"
+          >
+            {{ crumb.label }}
+          </button>
+        </template>
+      </nav>
+
+      <div class="topbar__spacer"></div>
+      <button type="button" data-testid="reload" :disabled="status === 'loading'" @click="load">
+        刷新
+      </button>
     </div>
-  </section>
 
-  <section class="card">
-    <h3 class="card__title">预检提示（M6 会用到）</h3>
-    <p class="card__desc">
-      启动压缩前，服务端会校验「剩余空间 ≥ 待压文件 × 2」；被黑名单跳过的文件保留在原目录、
-      不进压缩包、也永远不会被删除。示例展示：{{ formatBytes(5368709120) }} 的目录需要约
-      {{ formatBytes(10737418240) }} 可用空间。
+    <p v-if="status === 'loading'" class="file-browser__hint" data-testid="files-loading">正在加载目录…</p>
+
+    <template v-else-if="status === 'error'">
+      <div class="file-browser__error" data-testid="files-error" role="alert">
+        <strong>加载失败</strong>
+        <span class="badge badge--error">{{ errorInfo.code }}</span>
+        <p>{{ errorInfo.message }}</p>
+        <button type="button" @click="load">重试</button>
+      </div>
+    </template>
+
+    <template v-else-if="entries.length === 0">
+      <div class="file-browser__empty" data-testid="files-empty">
+        <p>这个目录是空的。</p>
+        <p class="card__desc">当前路径：{{ listing.path }}</p>
+      </div>
+    </template>
+
+    <table v-else class="file-table" data-testid="files-table">
+      <thead>
+        <tr>
+          <th scope="col">
+            <button type="button" class="file-table__sort" @click="changeSort('name')">
+              名称 {{ sortIndicator('name') }}
+            </button>
+          </th>
+          <th scope="col" class="file-table__col-type">类型</th>
+          <th scope="col">
+            <button type="button" class="file-table__sort" @click="changeSort('size')">
+              大小 {{ sortIndicator('size') }}
+            </button>
+          </th>
+          <th scope="col">
+            <button type="button" class="file-table__sort" @click="changeSort('mtime')">
+              修改时间 {{ sortIndicator('mtime') }}
+            </button>
+          </th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr
+          v-for="entry in entries"
+          :key="entry.path"
+          class="file-table__row"
+          :class="{ 'file-table__row--dir': entry.type === 'dir' }"
+          :data-name="entry.name"
+          :data-type="entry.type"
+          @click="openEntry(entry)"
+        >
+          <td>
+            <span class="file-table__name">
+              <Icon :name="rowIcon(entry)" :size="15" />
+              <span>{{ entry.name }}</span>
+            </span>
+          </td>
+          <td class="file-table__col-type">{{ typeLabel(entry) }}</td>
+          <td class="file-table__size">{{ entry.type === 'dir' ? '—' : formatBytes(entry.size) }}</td>
+          <td class="file-table__mtime">{{ formatDateTime(entry.mtime) }}</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p v-if="status === 'ready'" class="file-browser__hint">
+      共 {{ listing.total }} 项<template v-if="listing.truncated">（已截断，仅显示前 {{ entries.length }} 项）</template>
     </p>
   </section>
 </template>

@@ -88,17 +88,20 @@
 
 本工作区挂载在 NFS 上且带 `noexec`（`/tmp` 同样是 noexec），`node_modules` 里的原生二进制（esbuild 等）在工作区内无法执行；**直接在项目根执行 `npm install` 也会失败**——npm 10 的 reify 阶段会先删掉项目根的 `node_modules` 软链（日志：`npm warn reify Removing non-directory`），再在 noexec 盘建真实目录，随后 esbuild postinstall 报 `EACCES`。
 
-因此依赖装在**本机可执行盘**，项目根只保留一个指向它的软链：
+因此依赖装在**可执行目录**（脚本自探测），项目根只保留一个指向它的软链：
 
 ```bash
-bash scripts/setup-dev-deps.sh                                     # 幂等；依赖目录取脚本内默认值（本机可执行盘）
-ZIPCALM_BUILD_DIR=/some/exec/path bash scripts/setup-dev-deps.sh   # 覆盖依赖目录（不写死路径）
+bash scripts/setup-dev-deps.sh                                     # 幂等：未指定则自动探测可执行目录
+ZIPCALM_BUILD_DIR=/some/exec/path bash scripts/setup-dev-deps.sh   # 显式指定（优先级最高）
 ```
 
-- 依赖位置：`${ZIPCALM_BUILD_DIR:-<默认可执行盘路径>}/node_modules`（默认值见 `scripts/setup-dev-deps.sh`）；软链：项目根 `node_modules` → 该目录。
-- `package-lock.json` 落在依赖目录，不入库。
-- 日常在项目根执行：`npm run dev`（开发服务，端口 5180）、`npm run build`（产物 `web/dist`）、`npm run preview`。
+- 依赖目录的确定顺序（`scripts/setup-dev-deps.sh` 的 `detect_build_dir`）：
+  1. 环境变量 `ZIPCALM_BUILD_DIR`——先校验「可写 + 可执行」，不合格直接报错退出（不会默默换路径）；
+  2. 自探测候选：项目根同级 `<父目录>/.zipcalm-build` → 从项目根**向上逐层**的 `<上层>/zipcalm-build` → `$TMPDIR/zipcalm-build`、`$HOME/.cache/zipcalm-build`（临时目录仅作兜底，可能被系统清理，重跑本脚本即可恢复）。
+- **探测方式是「真写一个脚本并执行」**（`probe_exec_dir`）：noexec 挂载会被直接挡掉，所以不需要预先知道某个盘是不是 NFS、是不是 noexec；**脚本里没有任何机器专属的硬编码路径**。
+- 软链：项目根 `node_modules` → `<依赖目录>/node_modules`；`package-lock.json` 落在依赖目录，不入库。
+- 日常在项目根执行：`npm run dev`（开发服务，端口 5180）、`npm run build`（产物 `web/dist`）、`npm run preview`；后端服务用 `bash scripts/start.sh {start|stop|restart|status}`。
 - **不要在项目根直接执行 `npm install` / `npm ci`**：会删掉软链并把依赖重新装到 noexec 盘。
-- 源码始终留在工作区（`shared/`、`web/`、`scripts/`、`package.json`）；依赖目录只是构建缓存，可随时重装。
-- 忽略规则：`.gitignore` 用 `node_modules`（不带斜杠，同时匹配真实目录与软链两种形态）与 `web/dist/`，依赖目录与构建产物都不会入库。
+- 源码始终留在工作区（`shared/`、`web/`、`server/`、`scripts/`、`package.json`）；依赖目录只是构建缓存，可随时重装。
+- 忽略规则：`.gitignore` 忽略 `node_modules`（不带斜杠，同时匹配真实目录与软链）、`web/dist/`、`ZipCalm.pid`（运行时 PID 文件）、`storage/`（运行态数据与凭据配置）。
 

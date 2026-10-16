@@ -1,23 +1,37 @@
 <script setup>
 // 顶部栏（docs/08 第八节布局图第一行）
-// 内容：品牌 | 面包屑 | 搜索 | 视图切换 | 用户态
+// 内容：品牌 | 面包屑 | 搜索 | 视图切换 | 用户态 + 登出
 //
-// F1 阶段的克制点：
-// - 搜索框只做视觉占位（disabled + 提示 M1 接入），不发请求；
-// - 视图切换是「真交互」：点列表/网格会改 pinia 里的 viewMode（鼠标优先设计的一部分）；
-// - 用户态来自 session store，未登录时不跳转（登录页 M1 才做）。
+// M1 变更：
+// - 面包屑改为**跟随当前浏览路径**（ui store 由 route.query.path 推导）；
+// - 用户态从占位变成真实登录态，并新增「登出」按钮（调用 POST /auth/logout）。
+//
+// 仍未做的：搜索框保持 disabled（M8 打磨期实现）。
 
 import { computed } from 'vue';
+import { useRouter } from 'vue-router';
 
 import { useUiStore } from '../../stores/ui.js';
 import { useSessionStore } from '../../stores/session.js';
-import { APP_NAME, APP_NAME_ZH, VIEW_MODES, VIEW_MODE_LABELS } from '../../constants/index.js';
+import {
+  APP_NAME,
+  APP_NAME_ZH,
+  ROUTES,
+  VIEW_MODES,
+  VIEW_MODE_LABELS,
+} from '../../constants/index.js';
 
 const ui = useUiStore();
 const session = useSessionStore();
+const router = useRouter();
 
 const crumbs = computed(() => ui.breadcrumbs);
 const viewModes = VIEW_MODES;
+
+async function handleLogout() {
+  await session.logout();
+  await router.replace({ path: ROUTES.LOGIN });
+}
 </script>
 
 <template>
@@ -27,7 +41,7 @@ const viewModes = VIEW_MODES;
       <span class="topbar__brand-sub">{{ APP_NAME_ZH }}</span>
     </div>
 
-    <nav class="topbar__crumbs" aria-label="面包屑">
+    <nav class="topbar__crumbs" aria-label="面包屑" data-testid="topbar-breadcrumb">
       <template v-for="(crumb, index) in crumbs" :key="crumb.path">
         <span v-if="index > 0" aria-hidden="true">/</span>
         <span :aria-current="index === crumbs.length - 1 ? 'page' : undefined">{{ crumb.label }}</span>
@@ -36,12 +50,7 @@ const viewModes = VIEW_MODES;
 
     <div class="topbar__search">
       <label class="visually-hidden" for="topbar-search">搜索文件</label>
-      <input
-        id="topbar-search"
-        type="search"
-        placeholder="搜索文件（M1 接入）"
-        disabled
-      />
+      <input id="topbar-search" type="search" placeholder="搜索文件（M8 接入）" disabled />
     </div>
 
     <div class="topbar__spacer"></div>
@@ -60,7 +69,15 @@ const viewModes = VIEW_MODES;
     </div>
 
     <div class="topbar__user">
-      <span class="badge" :class="session.badgeClass">{{ session.label }}</span>
+      <span class="badge" :class="session.badgeClass" data-testid="session-badge">{{ session.label }}</span>
+      <button
+        v-if="session.authenticated"
+        type="button"
+        data-testid="logout"
+        @click="handleLogout"
+      >
+        登出
+      </button>
     </div>
   </header>
 </template>

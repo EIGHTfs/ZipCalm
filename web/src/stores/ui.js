@@ -6,7 +6,8 @@
 
 import { defineStore } from 'pinia';
 
-import { VIEW_MODE, VIEW_MODES, DEFAULT_ROUTE } from '../constants/index.js';
+import { VIEW_MODE, VIEW_MODES, DEFAULT_ROUTE, ROUTES } from '../constants/index.js';
+import { breadcrumbsOf } from '../utils/path.js';
 
 export const useUiStore = defineStore('ui', {
   state: () => ({
@@ -15,6 +16,8 @@ export const useUiStore = defineStore('ui', {
     /** 页面标题/提示：取自路由 meta，避免组件重复推断 */
     pageTitle: '',
     pageHint: '',
+    /** 文件页当前浏览路径（由 route.query.path 推导；null 表示当前页面不是文件页） */
+    fsPath: null,
     /** 视图模式：docs/08 §二 默认列表视图 */
     viewMode: VIEW_MODE.LIST,
     /** 底部任务条摘要：F1 恒为 0，M3 由 /api/v1/tasks 填充 */
@@ -24,11 +27,18 @@ export const useUiStore = defineStore('ui', {
   }),
 
   getters: {
-    /** 面包屑：F1 只有「根目录 + 当前页」两级，M1 接入真实目录层级后替换 */
-    breadcrumbs: (state) => [
-      { label: '根目录', path: '/' },
-      { label: state.pageTitle || '文件浏览', path: state.route },
-    ],
+    /**
+     * 面包屑：
+     * - 文件页 → 跟随真实浏览路径（/文档/子目录）；
+     * - 其它页 → 「根目录 + 当前页标题」两级。
+     */
+    breadcrumbs: (state) => {
+      if (state.route === ROUTES.FILES) return breadcrumbsOf(state.fsPath || '/');
+      return [
+        { label: '根目录', path: '/' },
+        { label: state.pageTitle || 'ZipCalm', path: state.route },
+      ];
+    },
     viewModeLabel: (state) => VIEW_MODES.find((mode) => mode === state.viewMode) || VIEW_MODE.LIST,
   },
 
@@ -38,6 +48,13 @@ export const useUiStore = defineStore('ui', {
       this.route = to.path;
       this.pageTitle = (to.meta && to.meta.title) || '';
       this.pageHint = (to.meta && to.meta.hint) || '';
+
+      if (to.path === ROUTES.FILES) {
+        const queryPath = to.query && to.query.path;
+        this.fsPath = typeof queryPath === 'string' && queryPath.length > 0 ? queryPath : '/';
+      } else {
+        this.fsPath = null;
+      }
     },
     /** 切换列表/网格视图；非法值直接忽略，不抛错（UI 不该因脏输入崩） */
     setViewMode(mode) {

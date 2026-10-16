@@ -1,0 +1,31 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 3010,
+    "trustProxy": false
+  },
+  "auth": {
+    "username": "admin",
+    "passwordHash": "scrypt$16384$8$1$<salt-base64>$<hash-base64>",
+    "password": null,
+    "sessionTtlMs": 604800000,
+    "tokenTtlMs": 2592000000,
+    "loginRateLimit": { "max": 5, "windowMs": 60000 },
+    "cookieName": "zc_session"
+  },
+  "storage": {
+    "root": "./storage/fs-root",
+    "dataDir": "./storage",
+    "trashDir": "./storage/trash",
+    "logDir": "./storage/logs"
+  },
+  "limits": {
+    "maxPathLength": 4096,
+    "maxPathSegmentLength": 255,
+    "maxListEntries": 5000,
+    "defaultPageSize": 200
+  },
+  "log": {
+    "level": "info"
+  }
+}
