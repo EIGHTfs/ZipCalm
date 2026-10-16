@@ -74,7 +74,9 @@ async function handleCompressTaskCreate(app, request, reply) {
 async function handleExtractPreflight(app, request, reply) {
   const parsed = await parseExtractRequest(app, request.body || {});
   const result = await extractPreflightFor(app, parsed);
-  reply.ok(result);
+  // 把"这个归档被识别成哪个格式"显式告诉前端：复合扩展名（x.tar.gz）的识别完全在服务端做，
+  // 对话框据此展示，用户可一眼确认没被更短的 .gz 抢走
+  reply.ok({ ...result, format: parsed.plugin.id, formatName: parsed.plugin.name });
 }
 
 /** POST /extract/tasks —— 创建解压任务 */
@@ -217,9 +219,12 @@ async function extractPreflightFor(app, parsed) {
   );
 }
 
-/** 归档 → 格式包（按扩展名匹配；匹配不到报 UNSUPPORTED_FORMAT） */
+/** 归档 → 格式包（按扩展名匹配；匹配不到报 UNSUPPORTED_FORMAT）
+ *  注意：必须传**完整文件名/路径**而不是 path.extname() —— 复合扩展名如 `x.tar.gz` 的
+ *  extname 只有 `.gz`，光看它匹配不到 `targz`（注册表按"整体后缀最长匹配"判定）。
+ */
 function pluginForArchive(app, userPath) {
-  const plugin = app.m2.registry.byExtension(path.extname(userPath));
+  const plugin = app.m2.registry.byExtension(path.basename(userPath));
   if (!plugin) {
     throw apiError(ERROR_CODES.UNSUPPORTED_FORMAT, '不支持的压缩包格式', { path: userPath });
   }

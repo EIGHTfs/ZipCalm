@@ -68,7 +68,9 @@ async function submit() {
       <div class="drawer__body">
         <p class="card__desc">压缩包：<code>{{ archivePath }}</code></p>
         <p v-if="preflightInfo" class="card__desc">
-          内含 {{ preflightInfo.entries }} 个条目，解压后约 {{ preflightInfo.totalBytes }} 字节
+          <!-- 格式由服务端按扩展名识别（复合扩展名取最长匹配），这里只做展示 -->
+          识别格式：<span class="badge" data-testid="extract-format">{{ preflightInfo.formatName || preflightInfo.format || '未知' }}</span>
+          · 内含 {{ preflightInfo.entries }} 个条目，解压后约 {{ preflightInfo.totalBytes }} 字节
         </p>
 
         <label class="field__label" for="extract-target">目标目录</label>

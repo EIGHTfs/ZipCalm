@@ -78,13 +78,20 @@ async function submit() {
 
         <fieldset class="field">
           <legend>格式</legend>
-          <label v-for="item in formats" :key="item.id" class="field__option">
+          <!-- 格式列表完全来自 GET /formats：新增一个格式包目录就会自动多一项，前端不需要改代码 -->
+          <label
+            v-for="item in formats"
+            :key="item.id"
+            class="field__option"
+            :title="item.available ? `${item.mime}` : (item.unavailableReason || '不可用')"
+          >
             <input
               v-model="formatId"
               type="radio"
               name="format"
               :value="item.id"
               :disabled="!item.available"
+              :data-testid="`format-${item.id}`"
             />
             <span>{{ item.name }} <code>{{ item.ext }}</code></span>
             <span v-if="!item.available" class="badge badge--warn">{{ item.unavailableReason || '不可用' }}</span>

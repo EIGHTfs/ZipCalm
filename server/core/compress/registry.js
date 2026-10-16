@@ -52,6 +52,26 @@ export function createRegistry(options = {}) {
   /** Map<id, {value:boolean, at:number}> */
   const availabilityCache = new Map();
   const loadFailures = [];
+  /** 插件目录上次扫描时的 mtime：用于「加/删一个目录即注册」的运行时重扫 */
+  let lastScanMtimeMs = 0;
+
+  /**
+   * 目录内容变化时重扫（"新增一个格式 = 新增一个目录"的运行时支撑）。
+   * 目录 mtime 在增删子项时会变；没有变化就直接跳过，代价只有一次 stat。
+   * @returns {Promise<boolean>} 是否真的重扫了
+   */
+  async function refreshIfChanged() {
+    try {
+      const stat = await fs.stat(pluginsDir);
+      if (stat.mtimeMs === lastScanMtimeMs) return false;
+      lastScanMtimeMs = stat.mtimeMs;
+      await discover();
+      return true;
+    } catch (error) {
+      logger.warn('format plugins dir stat failed', { dir: pluginsDir, error: error.message });
+      return false;
+    }
+  }
 
   /** 扫描插件目录并注册 */
   async function discover() {
@@ -70,6 +90,8 @@ export function createRegistry(options = {}) {
 
     for (const dirent of dirents) {
       if (!dirent.isDirectory()) continue;
+      // `_shared` 之类的下划线目录是内部共享代码目录，不是格式包（约定：格式包 id 不用下划线打头）
+      if (dirent.name.startsWith('_')) continue;
       const source = `plugins/formats/${dirent.name}`;
       const entryFile = path.join(pluginsDir, dirent.name, 'index.js');
       let plugin;
@@ -108,6 +130,12 @@ export function createRegistry(options = {}) {
     }
 
     extKeysDesc = [...byExt.keys()].sort((a, b) => b.length - a.length);
+    // 记下本次扫描时的目录 mtime，供 refreshIfChanged 判断"有没有增删过"
+    try {
+      lastScanMtimeMs = (await fs.stat(pluginsDir)).mtimeMs;
+    } catch {
+      lastScanMtimeMs = 0;
+    }
     logger.info('format registry loaded', { formats: [...byId.keys()], failures: loadFailures.length });
     return { loaded: byId.size, failed: loadFailures.length };
   }
@@ -132,6 +160,8 @@ export function createRegistry(options = {}) {
 
   /** 供 API /formats 使用 */
   async function list() {
+    // 每次列格式前先看看插件目录有没有增删（放一个目录进去就能出现，不需要改注册代码、也不需要重启）
+    await refreshIfChanged();
     const items = [];
     for (const plugin of byId.values()) {
       const available = await isAvailable(plugin.id);
@@ -183,6 +213,7 @@ export function createRegistry(options = {}) {
 
   return {
     discover,
+    refreshIfChanged,
     list,
     get,
     require,

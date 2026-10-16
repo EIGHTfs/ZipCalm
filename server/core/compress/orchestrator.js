@@ -37,7 +37,8 @@ async function uniqueTargetPath(dirAbs, baseName, ext) {
 /** 默认解压目标目录：与压缩包同级的同名目录（已存在则加 " (n)"，避免与既有目录混在一起） */
 export async function defaultExtractDir(archiveAbsPath) {
   const dir = path.dirname(archiveAbsPath);
-  const base = path.basename(archiveAbsPath).replace(/\.zip$/i, '');
+  // 复合扩展名要整体去掉（`x.tar.gz` → `x`，而不是 `x.tar`）
+  const base = path.basename(archiveAbsPath).replace(/\.(tar\.(gz|zst)|tar|zip|tgz|tzst)$/i, '');
   for (let attempt = 0; attempt < 1000; attempt += 1) {
     const suffix = attempt === 0 ? '' : ` (${attempt})`;
     const candidate = path.join(dir, `${base}${suffix}`);

@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
 import { loadConfig } from './config/index.js';
 import { createLogger } from './lib/logger.js';
+import { checkNodeVersion } from './lib/runtime-guard.js';
 
 // 项目根 = 本文件所在目录（server/）的上一级；不写死绝对路径
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -44,6 +45,14 @@ function removePidFile() {
 async function main() {
   const env = process.env;
 
+  // ===== 0. 运行期自检（版本不够就明确拒绝启动，别等用户点压缩才炸）=====
+  // 放在配置之前：这是"环境根本不满足"的问题，与配置无关，越早说清越好
+  const nodeCheck = checkNodeVersion();
+  if (!nodeCheck.ok) {
+    process.stderr.write(`[ZipCalm] 运行环境不满足要求，已拒绝启动：\n${nodeCheck.message}\n`);
+    process.exit(1);
+  }
+
   // ===== 1. 配置 =====
   let loaded;
   try {
@@ -56,6 +65,12 @@ async function main() {
   const { config, warnings, sources } = loaded;
 
   const logger = createLogger({ level: config.log.level });
+  // 自检结果入日志（版本号 + 通过状态），便于事后核"这台机器的运行时到底够不够"
+  logger.info('runtime check passed', {
+    node: nodeCheck.current,
+    requiredNode: nodeCheck.required,
+    message: nodeCheck.message,
+  });
   for (const warning of warnings) logger.warn('config warning', { message: warning });
 
   logger.info('config loaded', {

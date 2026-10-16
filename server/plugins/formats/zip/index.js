@@ -18,7 +18,6 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { pipeline } from 'node:stream/promises';
 import zlib from 'node:zlib';
 
 import archiver from 'archiver';
@@ -26,12 +25,10 @@ import unzipper from 'unzipper';
 
 import { ERROR_CODES, apiError } from '../../../lib/errors.js';
 import { createThrottledReporter } from '../../../lib/throttle.js';
-// 与 pathGuard 同一套路径判定（契约 §3.4.1 第 1 条明确要求）：纯函数，不碰磁盘
-import { normalizeUserPath } from '../../../core/fs/safePath.js';
+// 条目安全判定与写出**各格式共用一套**（zip-slip 防护不各写一份，见 _shared/entrySafety.js）
+import { planTargets, writePlan } from '../_shared/entrySafety.js';
 
 const FORMAT_ID = 'zip';
-const MAX_PATH_LENGTH = 4096;
-const MAX_SEGMENT_LENGTH = 255;
 
 // ===== 元数据（静态，注册表启动时不等待任何异步探测）=====
 
@@ -132,44 +129,17 @@ function entryToItem(entry) {
 }
 
 /**
- * zip-slip 核心：把归档条目名解析成目标目录内的绝对路径；任何逃逸企图直接抛错。
- * 复用 core/fs/safePath.js 的 normalizeUserPath（与 pathGuard 同一套判定：拆段拒绝 ..、拒绝编码后的 ..、
- * 拒绝 NUL、按字节限长），再叠加归档特有的盘符检查与最终前缀校验。
+ * 读取侧「条目 → 通用条目」适配：open() 给出可读流，link 标记符号链接。
+ * 安全判定与写出统一交给 `_shared/entrySafety.js`（与 tar 系列共用同一套 zip-slip 判定）。
  */
-function resolveEntryTarget(targetDir, entryName) {
-  if (typeof entryName !== 'string' || entryName.length === 0) {
-    throw apiError(ERROR_CODES.INVALID_PATH, '归档条目名为空', { entry: entryName });
-  }
-  const unified = entryName.replace(/\\/g, '/');
-  // 盘符（Windows 绝对路径形态，如 C:/evil 或 C:\evil）：API 语义里不可能合法
-  if (/^[A-Za-z]:/.test(unified)) {
-    throw apiError(ERROR_CODES.PATH_OUT_OF_ROOT, '归档条目含盘符（zip-slip）', { entry: entryName });
-  }
-  // 绝对路径：同样拒绝（我们总是相对目标目录展开）
-  if (unified.startsWith('/')) {
-    throw apiError(ERROR_CODES.PATH_OUT_OF_ROOT, '归档条目为绝对路径（zip-slip）', { entry: entryName });
-  }
-
-  let normalized;
-  try {
-    normalized = normalizeUserPath(unified, {
-      maxPathLength: MAX_PATH_LENGTH,
-      maxPathSegmentLength: MAX_SEGMENT_LENGTH,
-    });
-  } catch (error) {
-    // normalizeUserPath 抛的是契约错误（.. / 编码 .. / NUL / 超长），原样抛即可，
-    // 只把条目名补进 details，便于前端定位是哪个条目有问题
-    if (error && error.details) error.details.entry = entryName;
-    throw error;
-  }
-
-  const root = path.resolve(targetDir);
-  const target = path.resolve(root, ...normalized.segments);
-  // 最终前缀校验必须带分隔符（防 /data-evil 被 /data 放行）
-  if (target !== root && !target.startsWith(root + path.sep)) {
-    throw apiError(ERROR_CODES.PATH_OUT_OF_ROOT, '归档条目逃逸目标目录（zip-slip）', { entry: entryName });
-  }
-  return { targetPath: target, segments: normalized.segments, isRoot: target === root };
+function toSharedEntries(directory) {
+  return directory.files.map((entry) => ({
+    name: entry.path,
+    isDir: isDirectoryEntry(entry),
+    size: Number(entry.uncompressedSize || 0),
+    link: isSymlinkEntry(entry),
+    open: () => entry.stream(),
+  }));
 }
 
 /** 递归收集待归档条目（不跟随符号链接，避免把链接指向的外部内容打进去） */
@@ -431,113 +401,6 @@ async function test(archivePath, options = {}) {
 
 // ===== extract（解压）=====
 
-/**
- * 解压**条目预检**：写盘之前做完 zip-slip 判定与覆盖判定。
- * 这是本文件最关键的一段 —— 任何逃逸企图都在这里被拒，且此时磁盘尚未被写过。
- * @returns {{plan: Array, totalBytes: number, totalFiles: number}}
- */
-function planExtraction(directory, targetDir, overwrite) {
-  const plan = [];
-  let totalBytes = 0;
-  let totalFiles = 0;
-
-  for (const entry of directory.files) {
-    if (isSymlinkEntry(entry)) {
-      throw apiError(ERROR_CODES.PATH_OUT_OF_ROOT, '归档包含符号链接条目，已拒绝解压', { entry: entry.path });
-    }
-
-    const unified = String(entry.path || '').replace(/\\/g, '/');
-    // 目录条目（以 / 结尾的写法）统一成相对段后再判定
-    const nameForCheck = unified.replace(/\/+$/, '');
-    const resolved = resolveEntryTarget(targetDir, nameForCheck);
-    const isDir = isDirectoryEntry(entry) || unified.endsWith('/');
-
-    plan.push({
-      entry,
-      isDir,
-      targetPath: resolved.targetPath,
-      displayName: entry.path,
-      size: isDir ? 0 : Number(entry.uncompressedSize || 0),
-    });
-    if (!isDir) {
-      totalBytes += Number(entry.uncompressedSize || 0);
-      totalFiles += 1;
-    }
-  }
-
-  // 覆盖检查（同样在写盘之前；契约第 7 条：绝不覆盖）
-  if (!overwrite) {
-    for (const item of plan) {
-      if (item.isDir) continue;
-      if (fs.existsSync(item.targetPath)) {
-        throw apiError(ERROR_CODES.TARGET_EXISTS, '目标目录已存在同名文件（overwrite=false）', {
-          entry: item.displayName,
-        });
-      }
-    }
-  }
-
-  return { plan, totalBytes, totalFiles };
-}
-
-/** 按计划写盘：目录先建、文件走流式管道；失败/取消清理半成品 */
-async function writeExtractionPlan(plan, totals, ctx, targetDir) {
-  const report = createThrottledReporter(ctx.onProgress || (() => {}), { intervalMs: 100 });
-  const signal = ctx.options && ctx.options.signal;
-
-  let processedBytes = 0;
-  let processedFiles = 0;
-  let entries = 0;
-
-  await fsp.mkdir(targetDir, { recursive: true });
-
-  for (const item of plan) {
-    if (signal && signal.aborted) {
-      throw apiError(ERROR_CODES.ABORTED, '任务已取消');
-    }
-
-    if (item.isDir) {
-      await fsp.mkdir(item.targetPath, { recursive: true });
-      entries += 1;
-      continue;
-    }
-
-    await fsp.mkdir(path.dirname(item.targetPath), { recursive: true });
-
-    try {
-      await pipeline(
-        item.entry.stream(),
-        fs.createWriteStream(item.targetPath),
-        signal ? { signal } : undefined,
-      );
-    } catch (error) {
-      // 半成品清理（契约 §3.4.1 第 4 条：abort 后停止写入并清理；失败同理）
-      try {
-        if (fs.existsSync(item.targetPath)) await fsp.unlink(item.targetPath);
-      } catch {
-        /* ignore */
-      }
-      if (error && (error.name === 'AbortError' || (signal && signal.aborted))) {
-        throw apiError(ERROR_CODES.ABORTED, '任务已取消');
-      }
-      throw error;
-    }
-
-    entries += 1;
-    processedFiles += 1;
-    processedBytes += item.size;
-    report({
-      processedBytes,
-      totalBytes: totals.totalBytes,
-      processedFiles,
-      totalFiles: totals.totalFiles,
-      currentFile: item.displayName,
-    });
-  }
-
-  return { entries, bytesOut: processedBytes };
-}
-
 async function extract(ctx) {
   if (!(await available())) {
     throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, 'zip 格式当前不可用');
@@ -548,11 +411,14 @@ async function extract(ctx) {
   const overwrite = Boolean(ctx.options && ctx.options.overwrite);
   const directory = await openArchive(ctx.archivePath);
 
-  // ① + ② 条目预检与覆盖检查（都在写盘之前完成）
-  const { plan, totalBytes, totalFiles } = planExtraction(directory, targetDir, overwrite);
+  // ① 判定（写盘之前）：zip-slip + 覆盖检查，全部通过才开始写 —— 与 tar 系列共用同一套代码
+  const planned = planTargets(toSharedEntries(directory), targetDir, overwrite);
 
-  // ③ 执行（此时已知所有条目都是安全的）
-  const written = await writeExtractionPlan(plan, { totalBytes, totalFiles }, ctx, targetDir);
+  // ② 写出
+  const written = await writePlan(planned, targetDir, {
+    signal: ctx.options && ctx.options.signal,
+    onProgress: ctx.onProgress,
+  });
 
   return {
     targetDir,

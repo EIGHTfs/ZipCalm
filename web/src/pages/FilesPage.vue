@@ -4,11 +4,11 @@
 // 数据来源：**只有 API**（docs/09 约定 1）。路径放 URL query（#/files?path=/文档），刷新/分享可恢复。
 //
 // M2 新增：
-// - 多选（复选框列）→ 工具栏入口：压缩（≥1 项）、解压（恰好选 1 个 .zip）；
+// - 多选（复选框列）→ 工具栏入口：压缩（≥1 项）、解压（恰好选 1 个归档，扩展名清单来自 GET /formats）；
 // - 压缩抽屉（格式/模式/保留原文件）+ 解压对话框（目标目录 / 解压后删除压缩包）；
 // - 任务进度面板（M2 用轮询，M3 换 SSE）；任务结束自动刷新目录（新产物/新解压目录立即可见）。
 
-import { computed, ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
 import { api } from '../api/client.js';
@@ -50,11 +50,38 @@ const upLevel = computed(() => parentPath(currentPath.value));
 
 const selectedEntries = computed(() => [...selected.value.values()]);
 const canCompress = computed(() => selectedEntries.value.length > 0);
+
+// 可解压的扩展名**动态来自 GET /formats**（含 extAliases），不在前端写死 .zip：
+// 这样注册表里多一个格式包目录，UI 立刻能识别它的归档（M4「加目录即注册」的 UI 侧闭环）。
+// 注意必须按长度倒序比对，否则 `x.tar.gz` 会被更短的 `.gz` 规则先命中。
+const archiveExts = ref([]);
+
+async function loadArchiveExts() {
+  try {
+    const data = await api.get('/formats');
+    const exts = [];
+    for (const item of (data && data.formats) || []) {
+      for (const candidate of [item.ext, ...(item.extAliases || [])]) {
+        if (typeof candidate === 'string' && candidate.startsWith('.')) exts.push(candidate.toLowerCase());
+      }
+    }
+    archiveExts.value = [...new Set(exts)].sort((a, b) => b.length - a.length);
+  } catch {
+    // 拉不到就退化为"仅按服务端预检判定"：不阻塞页面，解压入口保守置灰
+    archiveExts.value = [];
+  }
+}
+
+function looksLikeArchive(name) {
+  const lower = String(name || '').toLowerCase();
+  return archiveExts.value.some((ext) => lower.endsWith(ext));
+}
+
 const extractTarget = computed(() => {
   const items = selectedEntries.value;
   if (items.length !== 1) return null;
   const entry = items[0];
-  return entry.type === 'file' && /\.zip$/i.test(entry.name) ? entry : null;
+  return entry.type === 'file' && looksLikeArchive(entry.name) ? entry : null;
 });
 
 async function load() {
@@ -93,6 +120,9 @@ watch(
   },
   { immediate: true },
 );
+
+// 可解压扩展名清单：挂载时拉一次即可（目录切换与它无关）
+onMounted(loadArchiveExts);
 
 function goto(path) {
   const target = typeof path === 'string' && path.length > 0 ? path : '/';

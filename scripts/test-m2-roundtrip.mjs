@@ -409,7 +409,11 @@ async function main() {
 
   // 8) 删除：log-only 只记日志不真删（压缩删原文件 + 解压删压缩包两个方向）
   const srcSnapshot = (await walkFiles(path.join(WORK, 'src'))).size;
-  const deleteLogPath = path.join(PROJECT_ROOT, 'storage', 'logs', `delete-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.jsonl`);
+  // 日志文件名必须按**本地日期**拼：服务端用 getFullYear/getMonth/getDate（本地），
+  // 这里若用 toISOString()（UTC）在 UTC+8 的 00:00–08:00 会差一天，测试会盯错文件而假失败。
+  const today = new Date();
+  const stamp = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
+  const deleteLogPath = path.join(PROJECT_ROOT, 'storage', 'logs', `delete-${stamp}.jsonl`);
   const logSizeBefore = fs.existsSync(deleteLogPath) ? (await fsp.stat(deleteLogPath)).size : 0;
 
   // 输出目录必须**已存在**（服务端不会替用户静默建目录）——先建好再发任务
