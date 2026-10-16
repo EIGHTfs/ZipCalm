@@ -178,7 +178,7 @@ check_path "⑨ 穿过越界链接读子路径" 403 PATH_OUT_OF_ROOT /fs/list /�
 check_path "⑩ root 内正常路径（放行）" 200 OK /fs/list /文档/子目录
 
 # ===== 4. 路径长度上限（配置驱动：limits.maxPathLength / limits.maxPathSegmentLength）=====
-# 背景：Lead 试探发现 `/aaaa…(300)` 曾返回 500 INTERNAL_ERROR（底层 ENAMETOOLONG 未翻译成契约码）。
+# 背景：验收时发现 `/aaaa…(300)` 曾返回 500 INTERNAL_ERROR（底层 ENAMETOOLONG 未翻译成契约码）。
 # 修复后：长度类问题一律 400 INVALID_PATH；且上限来自配置，不写死数字。
 
 printf '\n── 路径长度上限（可配置，超长必须 400 而非 500）──\n'

@@ -274,7 +274,7 @@ export function createTaskManager(options = {}) {
     return record.confirmPromise;
   }
 
-  /** 用户确认（或放弃）删除 */
+  /** 二次确认（或放弃）删除 */
   function resolveConfirm(id, payload = {}) {
     const record = requireTask(id);
     if (record.info.phase !== 'waiting_confirm') {

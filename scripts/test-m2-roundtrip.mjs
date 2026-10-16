@@ -7,7 +7,7 @@
 //   node scripts/test-m2-roundtrip.mjs                # 默认 http://127.0.0.1:<配置端口>
 //   ZIPCALM_BASE=http://10.0.0.5:3010/api/v1 node scripts/test-m2-roundtrip.mjs
 //
-// 设计要点（用户指定的验收方式）：
+// 设计要点（验收方式）：
 // - **假数据 + hash 往返**：确定性生成（种子固定，不随机）→ 记录每文件 sha256 → 压缩 → 解压 → 逐文件比对；
 // - **外部工具交叉验证**：生成的 zip 交给系统 `7z t` / `zip -T` 校验，不靠自家代码自证；
 // - **zip-slip**：手工构造 `../`、绝对路径、symlink 三种恶意包，断言被拒且目标目录外无写入；
@@ -321,6 +321,27 @@ async function main() {
 
   const extractTask = extractTaskId ? await waitTask(extractTaskId) : null;
   check('解压任务完成', Boolean(extractTask && extractTask.status === 'done'), extractTask ? `status=${extractTask.status} phase=${extractTask.phase}` : 'timeout');
+
+  // 4.5) 回归断言：任务响应体**不得包含绝对路径**（曾出现 sources[].absPath 泄漏存储根绝对路径）
+  const taskBodies = [];
+  for (const [label, id] of [['详情-压缩', compressTaskId], ['详情-解压', extractTaskId]]) {
+    if (!id) continue;
+    const response = await api('GET', `/tasks/${id}`);
+    taskBodies.push([label, JSON.stringify(response.json)]);
+  }
+  const listResponse = await api('GET', '/tasks?limit=50');
+  taskBodies.push(['列表', JSON.stringify(listResponse.json)]);
+
+  const leakFindings = [];
+  for (const [label, text] of taskBodies) {
+    if (text.includes(ROOT)) leakFindings.push(`${label}:含存储根绝对路径`);
+    if (text.includes('absPath')) leakFindings.push(`${label}:含 absPath 字段`);
+  }
+  check(
+    '任务响应不含绝对路径（防 sources[].absPath 泄漏回归）',
+    leakFindings.length === 0,
+    leakFindings.length === 0 ? `已扫描 ${taskBodies.length} 个响应体` : leakFindings.join('；'),
+  );
 
   // 5) 往返 hash 逐文件比对（正确性核心证据）
   const outDir = path.join(WORK, 'out');

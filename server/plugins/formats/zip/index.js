@@ -2,7 +2,7 @@
 //
 // 契约：docs/M0/插件契约.md §3.4 create / §3.4.1 extract / §3.5 list / §3.6 test / §3.2 available / §3.3 estimate
 //
-// 两个库各司其职（Lead 拍板方案 A）：
+// 两个库各司其职（读写分离）：
 // - **archiver**：只负责生成（流式写入 zip）；
 // - **unzipper**：负责读取（列条目 / CRC 校验 / 解压）。
 //   archiver 没有读取能力，硬用一个库去凑是行不通的。
@@ -11,6 +11,9 @@
 // 写盘**之前**先枚举全部条目名 → 用与 pathGuard 同一套判定（core/fs/safePath.js 的 normalizeUserPath）
 // 规范化并校验 → 拒绝 `..`、绝对路径、盘符、NUL、symlink 条目 → 全部通过后才开始写。
 // 这样恶意归档不会产生任何"写到一半才发现"的副作用。
+//
+// 结构：create / extract 各自拆成「前置检查 → 收集计划 → 执行 → 汇总」四段小函数，
+// 每个函数只做一件事，便于单独审读与测试。
 
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
@@ -212,156 +215,179 @@ async function collectEntries(ctx) {
 
 // ===== create（压缩）=====
 
-async function create(ctx) {
+/** create 前置检查：库可用 + 绝不覆盖（.part 与最终产物都不许已存在，契约第 7 条） */
+async function assertCreatable(ctx) {
   if (!(await available())) {
     throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, 'zip 格式当前不可用');
   }
-  // 契约第 7 条：绝不覆盖（.part 与最终产物都不许已存在）
   if (fs.existsSync(ctx.tempPath)) {
     throw apiError(ERROR_CODES.TARGET_EXISTS, '临时产物已存在', { file: safeName(ctx.tempPath) });
   }
   if (fs.existsSync(ctx.outputPath)) {
     throw apiError(ERROR_CODES.TARGET_EXISTS, '目标压缩包已存在（绝不覆盖）', { file: safeName(ctx.outputPath) });
   }
+}
 
-  const { items, skippedSymlinks } = await collectEntries(ctx);
+/** 汇总待压总量，并建"条目名 → 大小"索引（进度需要按条目累加字节） */
+function summarizeEntries(items) {
   const totalBytes = items.reduce((sum, item) => sum + item.size, 0);
-  const sizeByEntry = new Map(items.map((item) => [item.entryName, item.size]));
+  return { totalBytes, sizeByEntry: new Map(items.map((item) => [item.entryName, item.size])) };
+}
 
-  const level = Number.isInteger(ctx.options && ctx.options.level)
-    ? ctx.options.level
-    : meta.defaultLevel;
-  const signal = ctx.options && ctx.options.signal;
+/** 决定压缩级别（未指定就用格式默认值） */
+function resolveLevel(options) {
+  return Number.isInteger(options && options.level) ? options.level : meta.defaultLevel;
+}
 
-  const startedAt = Date.now();
+/** 建立"归档 → 输出流"管道（archiver 写、file stream 落盘） */
+function openArchivePipeline(tempPath, level) {
+  const output = fs.createWriteStream(tempPath);
+  const archive = archiver('zip', { zlib: { level } });
+  archive.pipe(output);
+  return { output, archive };
+}
+
+/** 删除半成品临时文件（清理失败不掩盖原始错误） */
+function removeTempFile(tempPath) {
+  try {
+    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+  } catch {
+    // 清理失败不掩盖原始错误
+  }
+}
+
+/** 只允许结算一次（成功/失败/取消只会有一个生效） */
+function createSettler(state) {
+  return (fn) => {
+    if (state.settled) return;
+    state.settled = true;
+    fn();
+  };
+}
+
+/** 取消：中止归档 + 清理半成品 + 抛 ABORTED */
+function abortCreate(archive, tempPath, finish, reject) {
+  finish(() => {
+    try {
+      archive.abort();
+    } catch {
+      /* ignore */
+    }
+    removeTempFile(tempPath);
+    reject(apiError(ERROR_CODES.ABORTED, '任务已取消'));
+  });
+}
+
+/** 失败收尾：清理半成品后 reject（ENOSPC 等交给 errors.js 的映射） */
+function attachCreateFailureHandlers({ archive, output, tempPath, finish, reject }) {
+  const fail = (error) => finish(() => {
+    removeTempFile(tempPath);
+    reject(error);
+  });
+
+  archive.on('warning', (error) => {
+    if (error && error.code === 'ENOENT') return; // 条目消失：跳过而不是整个失败
+    fail(apiError(ERROR_CODES.INTERNAL_ERROR, `打包告警：${error.message}`, { cause: error.code || 'warning' }));
+  });
+  archive.on('error', fail);
+  output.on('error', fail);
+}
+
+/** 条目进度：archiver 每写完一个条目发 'entry'（事件驱动，不是定时采样） */
+function attachEntryProgress(archive, { items, report, counters, sizeByEntry, totalBytes }) {
+  archive.on('entry', (entry) => {
+    const name = entry && entry.name ? entry.name : '';
+    counters.processedBytes += sizeByEntry.get(name) || 0;
+    counters.processedFiles += 1;
+    report({
+      processedBytes: counters.processedBytes,
+      totalBytes,
+      processedFiles: counters.processedFiles,
+      totalFiles: items.length,
+      currentFile: name,
+    });
+  });
+}
+
+/** 把待压条目塞进归档；空集合也要上报一次（避免进度停在 0 让人以为卡住） */
+function appendEntriesToArchive(archive, items, report) {
+  for (const item of items) {
+    archive.file(item.absPath, { name: item.entryName });
+  }
+  if (items.length === 0) {
+    report({ processedBytes: 0, totalBytes: 0, processedFiles: 0, totalFiles: 0, currentFile: null });
+  }
+}
+
+/**
+ * 流式写入归档：archiver 逐条目写、进度事件驱动、取消即清理 .part。
+ * 完成条件是**输出流 close**（finalize 返回 ≠ 文件已写完，契约第 5 条），
+ * 所以这里同时跟踪 outputClosed 与 archiveFinished 两个标志，二者齐备才算成功。
+ */
+function runCreateStream(ctx, items, summary, stats) {
+  const { totalBytes, sizeByEntry } = summary;
   const report = createThrottledReporter(ctx.onProgress || (() => {}), { intervalMs: 100 });
+  const counters = { processedBytes: 0, processedFiles: 0 };
 
-  let processedBytes = 0;
-  let processedFiles = 0;
-  let currentFile = null;
+  return new Promise((resolve, reject) => {
+    const state = { settled: false, outputClosed: false, archiveFinished: false };
+    const { output, archive } = openArchivePipeline(ctx.tempPath, stats.level);
+    const finish = createSettler(state);
 
-  return await new Promise((resolve, reject) => {
-    let settled = false;
-    let outputClosed = false;
-    let archiveFinished = false;
+    const resolveIfComplete = () => {
+      if (!state.outputClosed || !state.archiveFinished) return;
+      finish(() =>
+        resolve({
+          outputPath: ctx.tempPath,
+          entries: items.length,
+          bytesIn: counters.processedBytes,
+          bytesOut: archive.pointer(),
+          durationMs: Date.now() - stats.startedAt,
+          skippedSymlinks: stats.skippedSymlinks,
+        }),
+      );
+    };
 
-    const output = fs.createWriteStream(ctx.tempPath);
-    const archive = archiver('zip', { zlib: { level } });
-
-    const cleanupTemp = () => {
-      try {
-        if (fs.existsSync(ctx.tempPath)) fs.unlinkSync(ctx.tempPath);
-      } catch {
-        // 清理失败不掩盖原始错误
+    if (stats.signal) {
+      if (stats.signal.aborted) {
+        abortCreate(archive, ctx.tempPath, finish, reject);
+        return;
       }
-    };
-
-    const finish = (fn) => {
-      if (settled) return;
-      settled = true;
-      fn();
-    };
-
-    const maybeResolve = () => {
-      // 契约第 5 条：必须等到输出流 close（finalize 完成 ≠ 文件写完）
-      if (outputClosed && archiveFinished) {
-        finish(() =>
-          resolve({
-            outputPath: ctx.tempPath,
-            entries: items.length,
-            bytesIn: processedBytes,
-            bytesOut: archive.pointer(),
-            durationMs: Date.now() - startedAt,
-            skippedSymlinks,
-          }),
-        );
-      }
-    };
-
-    const onAbort = () => {
-      finish(() => {
-        try {
-          archive.abort();
-        } catch {
-          /* ignore */
-        }
-        cleanupTemp();
-        reject(apiError(ERROR_CODES.ABORTED, '任务已取消'));
-      });
-    };
-
-    if (signal) {
-      if (signal.aborted) return onAbort();
-      signal.addEventListener('abort', onAbort, { once: true });
+      stats.signal.addEventListener('abort', () => abortCreate(archive, ctx.tempPath, finish, reject), { once: true });
     }
 
-    // 进度：archiver 每写完一个条目发 'entry'（事件驱动，不是定时采样）
-    archive.on('entry', (entry) => {
-      const name = entry && entry.name ? entry.name : '';
-      const size = sizeByEntry.get(name) || 0;
-      processedBytes += size;
-      processedFiles += 1;
-      currentFile = name;
-      report({
-        processedBytes,
-        totalBytes,
-        processedFiles,
-        totalFiles: items.length,
-        currentFile: name,
-      });
-    });
-
-    archive.on('warning', (error) => {
-      if (error && error.code === 'ENOENT') return; // 条目消失：跳过而不是整个失败
-      finish(() => {
-        cleanupTemp();
-        reject(apiError(ERROR_CODES.INTERNAL_ERROR, `打包告警：${error.message}`, { cause: error.code || 'warning' }));
-      });
-    });
-
-    archive.on('error', (error) => {
-      finish(() => {
-        cleanupTemp();
-        // ENOSPC 等系统错误交给 errors.js 的映射（DISK_FULL / QUOTA_EXCEEDED …）
-        reject(error);
-      });
-    });
-
-    output.on('error', (error) => {
-      finish(() => {
-        cleanupTemp();
-        reject(error);
-      });
-    });
-
+    attachEntryProgress(archive, { items, report, counters, sizeByEntry, totalBytes });
+    attachCreateFailureHandlers({ archive, output, tempPath: ctx.tempPath, finish, reject });
     output.on('close', () => {
-      outputClosed = true;
-      maybeResolve();
+      state.outputClosed = true;
+      resolveIfComplete();
     });
 
-    archive.pipe(output);
-
-    // 逐个加入（archiver 内部串行处理，内存恒定）
-    for (const item of items) {
-      archive.file(item.absPath, { name: item.entryName });
-    }
-    if (items.length === 0) {
-      // 空目录/无文件：archiver 会产出空 zip，这是合法的（但 M6 黑名单会尽量避免）
-      report({ processedBytes: 0, totalBytes: 0, processedFiles: 0, totalFiles: 0, currentFile: null });
-    }
-
+    appendEntriesToArchive(archive, items, report);
     archive.finalize().then(
       () => {
-        archiveFinished = true;
-        maybeResolve();
+        state.archiveFinished = true;
+        resolveIfComplete();
       },
-      (error) => {
-        finish(() => {
-          cleanupTemp();
-          reject(error);
-        });
-      },
+      (error) => finish(() => {
+        removeTempFile(ctx.tempPath);
+        reject(error);
+      }),
     );
+  });
+}
+
+async function create(ctx) {
+  await assertCreatable(ctx);
+
+  const { items, skippedSymlinks } = await collectEntries(ctx);
+  const summary = summarizeEntries(items);
+
+  return runCreateStream(ctx, items, summary, {
+    startedAt: Date.now(),
+    skippedSymlinks,
+    level: resolveLevel(ctx.options),
+    signal: ctx.options && ctx.options.signal,
   });
 }
 
@@ -405,18 +431,12 @@ async function test(archivePath, options = {}) {
 
 // ===== extract（解压）=====
 
-async function extract(ctx) {
-  if (!(await available())) {
-    throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, 'zip 格式当前不可用');
-  }
-
-  const directory = await openArchive(ctx.archivePath);
-  const targetDir = path.resolve(ctx.targetDir);
-  const overwrite = Boolean(ctx.options && ctx.options.overwrite);
-  const signal = ctx.options && ctx.options.signal;
-  const startedAt = Date.now();
-
-  // ===== ① zip-slip 预扫描（写盘之前；这是本文件最关键的一段）=====
+/**
+ * 解压**条目预检**：写盘之前做完 zip-slip 判定与覆盖判定。
+ * 这是本文件最关键的一段 —— 任何逃逸企图都在这里被拒，且此时磁盘尚未被写过。
+ * @returns {{plan: Array, totalBytes: number, totalFiles: number}}
+ */
+function planExtraction(directory, targetDir, overwrite) {
   const plan = [];
   let totalBytes = 0;
   let totalFiles = 0;
@@ -445,7 +465,7 @@ async function extract(ctx) {
     }
   }
 
-  // ===== ② 覆盖检查（同样在写盘之前；契约第 7 条：绝不覆盖）=====
+  // 覆盖检查（同样在写盘之前；契约第 7 条：绝不覆盖）
   if (!overwrite) {
     for (const item of plan) {
       if (item.isDir) continue;
@@ -457,14 +477,20 @@ async function extract(ctx) {
     }
   }
 
+  return { plan, totalBytes, totalFiles };
+}
+
+/** 按计划写盘：目录先建、文件走流式管道；失败/取消清理半成品 */
+async function writeExtractionPlan(plan, totals, ctx, targetDir) {
   const report = createThrottledReporter(ctx.onProgress || (() => {}), { intervalMs: 100 });
+  const signal = ctx.options && ctx.options.signal;
+
   let processedBytes = 0;
   let processedFiles = 0;
   let entries = 0;
 
   await fsp.mkdir(targetDir, { recursive: true });
 
-  // ===== ③ 执行（此时已知所有条目都是安全的）=====
   for (const item of plan) {
     if (signal && signal.aborted) {
       throw apiError(ERROR_CODES.ABORTED, '任务已取消');
@@ -502,17 +528,36 @@ async function extract(ctx) {
     processedBytes += item.size;
     report({
       processedBytes,
-      totalBytes,
+      totalBytes: totals.totalBytes,
       processedFiles,
-      totalFiles,
+      totalFiles: totals.totalFiles,
       currentFile: item.displayName,
     });
   }
 
+  return { entries, bytesOut: processedBytes };
+}
+
+async function extract(ctx) {
+  if (!(await available())) {
+    throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, 'zip 格式当前不可用');
+  }
+
+  const startedAt = Date.now();
+  const targetDir = path.resolve(ctx.targetDir);
+  const overwrite = Boolean(ctx.options && ctx.options.overwrite);
+  const directory = await openArchive(ctx.archivePath);
+
+  // ① + ② 条目预检与覆盖检查（都在写盘之前完成）
+  const { plan, totalBytes, totalFiles } = planExtraction(directory, targetDir, overwrite);
+
+  // ③ 执行（此时已知所有条目都是安全的）
+  const written = await writeExtractionPlan(plan, { totalBytes, totalFiles }, ctx, targetDir);
+
   return {
     targetDir,
-    entries,
-    bytesOut: processedBytes,
+    entries: written.entries,
+    bytesOut: written.bytesOut,
     durationMs: Date.now() - startedAt,
   };
 }
