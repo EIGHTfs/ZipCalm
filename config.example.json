@@ -24,7 +24,10 @@
     "maxPathSegmentLength": 255,
     "maxListEntries": 5000,
     "maxSourcesPerTask": 200,
-    "defaultPageSize": 200
+    "defaultPageSize": 200,
+    "taskHistoryMax": 200,
+    "sseRetention": 1000,
+    "sseHeartbeatMs": 15000
   },
   "compress": {
     "defaultFormat": "zip",

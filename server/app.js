@@ -2,6 +2,9 @@
 //
 // 层次（docs/12 §二）：http/ 只做入口（中间件 + 路由），core/ 放业务，lib/ 放工具。
 // 本文件只负责"接线"，不含任何业务逻辑，便于将来换 Web 框架时只改这一处。
+//
+// 结构：每个装配步骤是一个**模块级小函数**（实例 / 观测 / 安全 / 任务层 / 压缩层 / 前端 / 关停钩子），
+// buildApp 只按顺序把它们串起来 —— 顺序本身有讲究（见各步骤注释）。
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -16,7 +19,9 @@ import { verifyPassword } from './core/auth/password.js';
 import { createDeleteService } from './core/compress/deleter.js';
 import { createOrchestrator } from './core/compress/orchestrator.js';
 import { createRegistry } from './core/compress/registry.js';
+import { createTaskEvents } from './core/task/events.js';
 import { createTaskManager } from './core/task/manager.js';
+import { createTaskStore } from './core/task/store.js';
 import { registerAuth } from './http/middleware/auth.js';
 import { registerErrorHandling } from './http/middleware/error.js';
 import { registerRequestLogger } from './http/middleware/logger.js';
@@ -49,42 +54,52 @@ function createPasswordVerifier(authConfig) {
   throw new Error('auth.passwordHash 或 auth.password 必须配置其中之一');
 }
 
-/**
- * 构建 Fastify 应用（不监听端口，便于测试里直接 inject）。
- * @param {{config: object, logger: object, projectRoot: string}} options
- */
-export async function buildApp(options) {
-  const { config, logger, projectRoot } = options;
-
-  const app = Fastify({
+function createFastifyInstance(config) {
+  return Fastify({
     logger: false, // 用我们自己的结构化日志（lib/logger.js），避免双份日志格式
     trustProxy: config.server.trustProxy === true,
     bodyLimit: BODY_LIMIT_BYTES,
     disableRequestLogging: true,
     genReqId: () => crypto.randomUUID(),
   });
+}
 
-  // Cookie 插件：Session 通道的载体（API 规范 §二）
-  await app.register(cookie);
-
-  // 顺序有讲究：请求日志 → 错误处理 → 认证 → 路径白名单 → 路由
-  registerRequestLogger(app, { logger });
-  registerErrorHandling(app, { logger });
-
+/** 认证与路径白名单：authStore 先加载；pathGuard 提供 fsContext（后续所有层都依赖它） */
+async function registerSecurityLayer(app, { config, logger }) {
   const authStore = createAuthStore({ config: config.auth, logger, dataDir: config.storage.dataDir });
   await authStore.load();
   app.decorate('authStore', authStore);
 
   registerAuth(app, { store: authStore, config: config.auth });
   registerPathGuard(app, { config, logger });
+  return authStore;
+}
 
-  // ===== M2：格式注册表 + 任务队列 + 删除服务 + 编排器 =====
-  // 装配顺序有讲究：pathGuard 先（提供 fsContext），m2 后（编排器要用 rootAbs），
-  // 路由最后注册（路由插件初始化时会读 app.m2）。
+/**
+ * M3 任务层：落盘 store → 事件总线 → 管理器（含启动恢复）。
+ * 恢复必须在路由挂载前完成：这样第一个请求看到的就已是 interrupted 终态（INV-10）。
+ */
+async function createTaskLayer({ config, logger }) {
+  const store = createTaskStore({
+    dataDir: config.storage.dataDir,
+    historyMax: config.limits.taskHistoryMax,
+    logger,
+  });
+  await store.init();
+
+  const events = createTaskEvents({ retention: config.limits.sseRetention, logger });
+  const manager = createTaskManager({ logger, store, events });
+  const recovery = await manager.recover();
+  logger.info('任务状态已加载', { ...recovery, bootId: manager.bootId });
+
+  return { store, events, manager };
+}
+
+/** M2 压缩层：格式注册表 → 删除服务 → 编排器（编排器要用 rootAbs，必须在 pathGuard 之后） */
+async function createCompressLayer({ config, logger, projectRoot, manager }) {
   const registry = createRegistry({ logger });
   await registry.discover();
 
-  const taskManager = createTaskManager({ logger });
   const deleteService = createDeleteService({
     config,
     logger,
@@ -96,23 +111,96 @@ export async function buildApp(options) {
     config,
     logger,
     registry,
-    manager: taskManager,
+    manager,
     deleteService,
     rootAbs: config.storage.root,
   });
 
+  return { registry, deleteService, orchestrator };
+}
+
+/**
+ * 优雅关闭分两步（顺序很关键）：
+ * - preClose：Fastify 关闭服务器**之前**的钩子，用来结束 SSE 长连接 ——
+ *   否则服务器会一直等这些 hijack 的连接，导致优雅停止超时被 KILL；
+ * - onClose：服务器关闭后收尾，把节流中的任务状态落盘（避免丢最后 500ms 的进度）。
+ */
+function registerShutdownHooks(app, { sseClients, manager }) {
+  app.addHook('preClose', async () => {
+    for (const response of sseClients) {
+      try {
+        response.end();
+      } catch {
+        /* 连接可能已断 */
+      }
+    }
+    sseClients.clear();
+  });
+
+  app.addHook('onClose', async () => {
+    await manager.flush();
+  });
+}
+
+/** 静态前端（可选）：web/dist 存在时同源提供，浏览器地址即 API 地址，无需代理或 CORS */
+async function registerFrontend(app, { projectRoot, logger }) {
+  const distDir = path.join(projectRoot, 'web', 'dist');
+  if (fs.existsSync(distDir)) {
+    await app.register(fastifyStatic, { root: distDir, prefix: '/', wildcard: false });
+    logger.info('static frontend enabled', { dir: path.relative(projectRoot, distDir) });
+    return;
+  }
+  logger.warn('web/dist 不存在，仅提供 API（如需同源 UI，先执行 npm run build）', {
+    dir: path.relative(projectRoot, distDir),
+  });
+}
+
+/**
+ * 构建 Fastify 应用（不监听端口，便于测试里直接 inject）。
+ * @param {{config: object, logger: object, projectRoot: string}} options
+ */
+export async function buildApp(options) {
+  const { config, logger, projectRoot } = options;
+
+  const app = createFastifyInstance(config);
+  await app.register(cookie);
+
+  // 顺序有讲究：请求日志 → 错误处理 → 认证 → 路径白名单 → 任务/压缩层 → 路由
+  registerRequestLogger(app, { logger });
+  registerErrorHandling(app, { logger });
+
+  const authStore = await registerSecurityLayer(app, { config, logger });
+  const taskLayer = await createTaskLayer({ config, logger });
+  const compressLayer = await createCompressLayer({
+    config,
+    logger,
+    projectRoot,
+    manager: taskLayer.manager,
+  });
+
   app.decorate('m2', {
-    registry,
-    manager: taskManager,
-    orchestrator,
-    deleteService,
+    registry: compressLayer.registry,
+    manager: taskLayer.manager,
+    orchestrator: compressLayer.orchestrator,
+    deleteService: compressLayer.deleteService,
     config,
   });
+
+  // M3 的任务三件套（路由与 /health 都从这里取；store/events 不进 API 响应）
+  // sseClients：活跃的 SSE 响应集合，关停时统一 end()，否则长连接会让优雅停止超时
+  const sseClients = new Set();
+  app.decorate('tasks', {
+    store: taskLayer.store,
+    events: taskLayer.events,
+    manager: taskLayer.manager,
+    sseClients,
+  });
+  registerShutdownHooks(app, { sseClients, manager: taskLayer.manager });
 
   const meta = {
     version: APP_VERSION,
     startedAt: Date.now(),
-    bootId: crypto.randomUUID(),
+    bootId: taskLayer.manager.bootId,
     rootWritable: true,
   };
   app.decorate('meta', meta);
@@ -126,18 +214,7 @@ export async function buildApp(options) {
     verifyPassword: createPasswordVerifier(config.auth),
   });
 
-  // ===== 静态前端（可选）=====
-  // web/dist 存在时同源提供，这样"浏览器访问的地址 = API 地址"，不需要代理或 CORS。
-  // 前端是 hash 路由，因此只需要 '/' 与静态资源，不需要 SPA fallback。
-  const distDir = path.join(projectRoot, 'web', 'dist');
-  if (fs.existsSync(distDir)) {
-    await app.register(fastifyStatic, { root: distDir, prefix: '/', wildcard: false });
-    logger.info('static frontend enabled', { dir: path.relative(projectRoot, distDir) });
-  } else {
-    logger.warn('web/dist 不存在，仅提供 API（如需同源 UI，先执行 npm run build）', {
-      dir: path.relative(projectRoot, distDir),
-    });
-  }
+  await registerFrontend(app, { projectRoot, logger });
 
   return { app, authStore, meta };
 }

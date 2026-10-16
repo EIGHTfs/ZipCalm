@@ -51,7 +51,7 @@ async function handleCompressTaskCreate(app, request, reply) {
     fileCount: preflight.items[index] ? preflight.items[index].fileCount : 0,
   }));
 
-  const task = manager.create({
+  const task = await manager.create({
     kind: 'compress',
     mode: parsed.mode,
     format: parsed.format,
@@ -90,7 +90,7 @@ async function handleExtractTaskCreate(app, request, reply) {
     throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, `格式 ${parsed.plugin.id} 当前不可用`);
   }
 
-  const task = manager.create({
+  const task = await manager.create({
     kind: 'extract',
     mode: 'bundle',
     format: parsed.plugin.id,
@@ -109,64 +109,7 @@ async function handleExtractTaskCreate(app, request, reply) {
   reply.ok({ task: manager.get(task.id) }, 201);
 }
 
-/** GET /tasks —— 任务列表（活动 + 历史） */
-async function handleTaskList(app, request, reply) {
-  const rawStatus = request.query.status;
-  const status = typeof rawStatus === 'string' && rawStatus.length > 0
-    ? rawStatus.split(',').map((item) => item.trim())
-    : null;
-  const limit = Number.parseInt(request.query.limit, 10);
-  reply.ok(app.m2.manager.list({ status, limit: Number.isInteger(limit) ? limit : 50 }));
-}
-
-/** GET /tasks/{id} —— 单任务查询（别名 /compress/tasks/{id} 复用同一 handler） */
-async function handleTaskGet(app, request, reply) {
-  const task = app.m2.manager.get(request.params.id);
-  if (!task) throw apiError(ERROR_CODES.TASK_NOT_FOUND, '任务不存在', { taskId: request.params.id });
-  reply.ok({ task });
-}
-
-/** POST /tasks/{id}/cancel —— 取消任务 */
-async function handleTaskCancel(app, request, reply) {
-  reply.ok({ task: app.m2.manager.cancel(request.params.id) });
-}
-
-/** POST /tasks/{id}/confirm-delete —— 二次确认删除（压缩删原文件 / 解压删压缩包共用） */
-async function handleTaskConfirmDelete(app, request, reply) {
-  const { manager } = app.m2;
-  const id = request.params.id;
-
-  const task = manager.get(id);
-  if (!task) throw apiError(ERROR_CODES.TASK_NOT_FOUND, '任务不存在', { taskId: id });
-  if (!task.delete) throw apiError(ERROR_CODES.INVALID_STATE, '该任务没有待删除目标', { taskId: id });
-  if (task.phase !== 'waiting_confirm') {
-    throw apiError(ERROR_CODES.INVALID_STATE, '当前不是待确认状态', { phase: task.phase });
-  }
-
-  const body = request.body || {};
-  if (body.confirm === false) {
-    manager.resolveConfirm(id, { confirmed: false });
-    reply.ok({ task: manager.get(id) });
-    return;
-  }
-
-  // 数量/字节比对（INV-03：弹窗数字与实际不一致就拒绝删除）
-  const expectedFiles = Number.isInteger(body.expectedFiles) ? body.expectedFiles : null;
-  const expectedBytes = Number.isFinite(body.expectedBytes) ? body.expectedBytes : null;
-  const actualFiles = task.delete.targets.length;
-  const actualBytes = task.delete.targets.reduce((sum, target) => sum + (Number(target.sizeBytes) || 0), 0);
-  if (expectedFiles !== null && expectedFiles !== actualFiles) {
-    throw apiError(ERROR_CODES.VALIDATION_FAILED, '待删除数量与弹窗不一致，已拒绝删除', { expectedFiles, actualFiles });
-  }
-  if (expectedBytes !== null && Math.abs(expectedBytes - actualBytes) > 1) {
-    throw apiError(ERROR_CODES.VALIDATION_FAILED, '待删除字节数与弹窗不一致，已拒绝删除', { expectedBytes, actualBytes });
-  }
-
-  manager.resolveConfirm(id, { confirmed: true, expectedFiles, expectedBytes });
-  reply.ok({ task: manager.get(id) });
-}
-
-// ===== 路由注册（只做接线）=====
+// ===== 路由注册（只做接线；任务类端点统一在 routes/tasks.js）=====
 
 export default async function compressRoutes(app) {
   const auth = { preHandler: [app.requireAuth] };
@@ -179,16 +122,6 @@ export default async function compressRoutes(app) {
 
   app.post('/extract/preflight', auth, bind(handleExtractPreflight));
   app.post('/extract/tasks', auth, bind(handleExtractTaskCreate));
-
-  app.get('/tasks', auth, bind(handleTaskList));
-  app.get('/tasks/:id', auth, bind(handleTaskGet));
-  app.get('/compress/tasks/:id', auth, bind(handleTaskGet)); // 契约别名：同一实现
-
-  app.post('/tasks/:id/cancel', auth, bind(handleTaskCancel));
-  app.post('/compress/tasks/:id/cancel', auth, bind(handleTaskCancel));
-
-  app.post('/tasks/:id/confirm-delete', auth, bind(handleTaskConfirmDelete));
-  app.post('/compress/tasks/:id/confirm-delete', auth, bind(handleTaskConfirmDelete));
 }
 
 // ===== 参数解析与内部工具（保持路由层"薄"：解析入参 + 调 core）=====

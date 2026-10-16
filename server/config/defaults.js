@@ -78,6 +78,14 @@ export const DEFAULT_CONFIG = {
     maxSourcesPerTask: 200,
     /** 前端默认分页大小 */
     defaultPageSize: 200,
+    /**
+     * 任务历史保留条数（task-history.jsonl 的裁剪上限，数据模型 §六）
+     */
+    taskHistoryMax: 200,
+    /** SSE 环形缓冲保留的事件条数（`since` 超出窗口即改用快照兜底，API 规范 §五 规则 2） */
+    sseRetention: 1000,
+    /** SSE 心跳间隔（防中间设备把长连接当空闲连接掐掉） */
+    sseHeartbeatMs: 15000,
   },
 
   log: {

@@ -1,0 +1,474 @@
+#!/usr/bin/env node
+//
+// M3 验收脚本：任务落盘与恢复 + 串行队列 + SSE（首帧快照/seq 续传）+ 取消 + 原子写
+//
+// 用法：
+//   bash scripts/start.sh start
+//   node scripts/test-m3-tasks.mjs
+//
+// 三条硬证据（本脚本会打印可核对的原始值）：
+// 1. **关掉浏览器任务继续跑**：全程不建立/随后断开 SSE → 任务照常完成，且 /health 的 subscribers=0；
+// 2. **kill -9 后重启**：非终态 → interrupted + error.code=INTERRUPTED + `.part` 保留 + 可重试成功；
+// 3. **SSE 首帧即快照 + seq/since 续传**：无 since 连接首帧是 snapshot；断开后用 since 重连首帧仍是 snapshot。
+//
+// 注意：本脚本会 `kill -9` 本服务并重启（这是恢复语义的验收方式），请勿在有业务任务时手动运行。
+
+import { execFile } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import path from 'node:path';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+
+const execFileAsync = promisify(execFile);
+const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+const runtimeConfig = await (async () => {
+  try {
+    return JSON.parse(await fsp.readFile(path.join(PROJECT_ROOT, 'storage', 'config.json'), 'utf8'));
+  } catch {
+    return {};
+  }
+})();
+
+const PORT = process.env.ZIPCALM_PORT || (runtimeConfig.server && runtimeConfig.server.port) || 3010;
+const BASE = process.env.ZIPCALM_BASE || `http://127.0.0.1:${PORT}/api/v1`;
+const ROOT = path.resolve(PROJECT_ROOT, (runtimeConfig.storage && runtimeConfig.storage.root) || './storage/fs-root');
+const DATA_DIR = path.resolve(PROJECT_ROOT, (runtimeConfig.storage && runtimeConfig.storage.dataDir) || './storage');
+const TASKS_FILE = path.join(DATA_DIR, 'tasks.json');
+const HISTORY_FILE = path.join(DATA_DIR, 'task-history.jsonl');
+const PID_FILE = path.join(PROJECT_ROOT, 'ZipCalm.pid');
+const LOGIN = { username: process.env.ZIPCALM_TEST_USER || 'admin', password: process.env.ZIPCALM_TEST_PASSWORD || 'zipcalm' };
+
+const API_BIG = '/m3-test/big';
+const BIG_DIR = path.join(ROOT, 'm3-test', 'big');
+
+let passCount = 0;
+let failCount = 0;
+const failures = [];
+
+function check(name, ok, detail = '') {
+  if (ok) {
+    passCount += 1;
+    console.log(`PASS | ${name}${detail ? ` | ${detail}` : ''}`);
+  } else {
+    failCount += 1;
+    failures.push(name);
+    console.log(`FAIL | ${name}${detail ? ` | ${detail}` : ''}`);
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ===== HTTP =====
+
+let TOKEN = null;
+
+async function api(method, urlPath, body) {
+  const response = await fetch(`${BASE}${urlPath}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', ...(TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {}) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await response.text();
+  try {
+    return { status: response.status, json: JSON.parse(text) };
+  } catch {
+    return { status: response.status, json: { ok: false, error: { code: 'NO_ENVELOPE', message: text.slice(0, 120) } } };
+  }
+}
+
+const TERMINAL = new Set(['done', 'failed', 'aborted', 'interrupted']);
+
+async function waitTask(id, timeoutMs = 120000, wanted = null) {
+  const startedAt = Date.now();
+  let last = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    const { json } = await api('GET', `/tasks/${id}`);
+    last = json && json.data && json.data.task;
+    if (!last) return null;
+    if (TERMINAL.has(last.status)) return last;
+    if (wanted && wanted(last)) return last;
+    await sleep(120);
+  }
+  return last;
+}
+
+// ===== SSE =====
+
+/** 极简 SSE 客户端：用于断言"首帧是快照"和 seq 续传 */
+async function sseConnect(since) {
+  const controller = new AbortController();
+  const url = `${BASE}/tasks/events?channels=tasks${since ? `&since=${since}` : ''}`;
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${TOKEN}`, Accept: 'text/event-stream' },
+    signal: controller.signal,
+  });
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const frames = [];
+  let buffer = '';
+
+  (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let index = buffer.indexOf('\n\n');
+        while (index >= 0) {
+          const raw = buffer.slice(0, index);
+          buffer = buffer.slice(index + 2);
+          const frame = parseFrame(raw);
+          if (frame) frames.push(frame);
+          index = buffer.indexOf('\n\n');
+        }
+      }
+    } catch {
+      /* 主动断开或服务被杀：正常路径 */
+    }
+  })();
+
+  return {
+    frames,
+    headers: { contentType: response.headers.get('content-type'), xAccel: response.headers.get('x-accel-buffering') },
+    close: () => controller.abort(),
+    async waitFor(predicate, timeoutMs = 5000) {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < timeoutMs) {
+        const hit = frames.find(predicate);
+        if (hit) return hit;
+        await sleep(50);
+      }
+      return null;
+    },
+  };
+}
+
+function parseFrame(raw) {
+  const lines = raw.split('\n');
+  let event = 'message';
+  let id = null;
+  const dataLines = [];
+  for (const line of lines) {
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('id:')) id = Number.parseInt(line.slice(3).trim(), 10);
+    else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+  }
+  if (dataLines.length === 0) return null;
+  try {
+    return { event, id, data: JSON.parse(dataLines.join('\n')) };
+  } catch {
+    return { event, id, data: null };
+  }
+}
+
+// ===== 夹具 =====
+
+/** 造一个"压缩耗时足够长"的夹具（随机数据不可压缩，压缩耗时可预期） */
+async function ensureBigFixture(totalMb = 90) {
+  await fsp.mkdir(BIG_DIR, { recursive: true });
+  const existing = (await fsp.readdir(BIG_DIR)).filter((name) => name.endsWith('.bin'));
+  if (existing.length >= 3) {
+    const stat = await fsp.stat(path.join(BIG_DIR, existing[0]));
+    if (stat.size >= 20 * 1024 * 1024 && existing.length >= 3) return { reused: true };
+  }
+  const perFile = Math.floor((totalMb * 1024 * 1024) / 3);
+  for (const name of ['a.bin', 'b.bin', 'c.bin']) {
+    const filePath = path.join(BIG_DIR, name);
+    await fsp.writeFile(filePath, crypto.randomBytes(perFile));
+  }
+  return { reused: false };
+}
+
+/** 列出"部分写入的产物"（`.part` 及其归档名 `.part.interrupted-*`） */
+async function listPartArtifacts() {
+  const dirents = await fsp.readdir(path.join(ROOT, 'm3-test'), { withFileTypes: true });
+  return dirents.filter((item) => item.isFile() && item.name.includes('.part')).map((item) => item.name);
+}
+
+/**
+ * 清理本脚本自己产生的测试产物（历史运行积累的 zip 与遗留 part）。
+ * 为什么必须清：残留产物会让"新任务选中的输出名/遗留 .part"每次都不同，
+ * 断言会变成依赖历史状态（曾导致 .part 断言假失败）。
+ */
+async function cleanupTestArtifacts() {
+  let removed = 0;
+  const dirs = [path.join(ROOT, 'm3-test'), BIG_DIR];
+  for (const dir of dirs) {
+    let dirents = [];
+    try {
+      dirents = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const item of dirents) {
+      if (!item.isFile()) continue;
+      const isProduct = /^big( \(\d+\))?\.zip(\.part.*)?$/.test(item.name);
+      if (!isProduct) continue;
+      await fsp.rm(path.join(dir, item.name), { force: true });
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+function readPid() {
+  try {
+    return Number.parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
+  } catch {
+    return null;
+  }
+}
+
+async function startService() {
+  await execFileAsync('bash', ['scripts/start.sh', 'start'], { cwd: PROJECT_ROOT, timeout: 60000 });
+  // 等健康检查通过
+  for (let i = 0; i < 40; i += 1) {
+    try {
+      const response = await fetch(`${BASE}/health`);
+      if (response.ok) return true;
+    } catch {
+      /* 还没起来 */
+    }
+    await sleep(250);
+  }
+  return false;
+}
+
+/** 断言一个响应体不含绝对路径（存储根）与 absPath 字段 */
+function assertNoAbsolutePath(label, payload) {
+  const text = JSON.stringify(payload);
+  const problems = [];
+  if (text.includes(ROOT)) problems.push('含存储根绝对路径');
+  if (text.includes('absPath')) problems.push('含 absPath 字段');
+  check(`响应不含绝对路径：${label}`, problems.length === 0, problems.join('；'));
+}
+
+// ===== 主流程 =====
+
+async function main() {
+  console.log('ZipCalm M3 验收（落盘/恢复 + 串行队列 + SSE 首帧快照与续传 + 取消 + 原子写）');
+  console.log(`API：${BASE}\n存储根：${ROOT}\n数据目录：${DATA_DIR}\n`);
+
+  const login = await api('POST', '/auth/login', LOGIN);
+  TOKEN = login.json && login.json.data && login.json.data.token;
+  check('登录拿到 Bearer Token', Boolean(TOKEN));
+
+  const fixture = await ensureBigFixture();
+  const cleaned = await cleanupTestArtifacts();
+  console.log(`    夹具：${API_BIG}（${fixture.reused ? '复用已有' : '新建'}，3×50MB 随机数据）；清理历史测试产物 ${cleaned} 个`);
+
+  // ===== 一、创建即落盘 + 串行队列 =====
+  const first = await api('POST', '/compress/tasks', { sources: [API_BIG], mode: 'bundle', format: 'zip', options: { outputDir: '/m3-test' } });
+  const firstId = first.json && first.json.data && first.json.data.task && first.json.data.task.id;
+  check('创建压缩任务', Boolean(firstId), `HTTP ${first.status}`);
+
+  const diskRightAfterCreate = JSON.parse(await fsp.readFile(TASKS_FILE, 'utf8'));
+  check(
+    '创建即落盘（tasks.json 立刻含该任务，不等 500ms 节流）',
+    diskRightAfterCreate.some((entry) => entry.info && entry.info.id === firstId),
+    `tasks.json 条数 ${diskRightAfterCreate.length}`,
+  );
+
+  const second = await api('POST', '/compress/tasks', { sources: [API_BIG], mode: 'bundle', format: 'zip', options: { outputDir: '/m3-test' } });
+  const secondId = second.json && second.json.data && second.json.data.task && second.json.data.task.id;
+  await sleep(300);
+  const runningState = await waitTask(firstId, 5000, (task) => task.status === 'running');
+  const secondState = await waitTask(secondId, 5000, (task) => task.status === 'queued' || TERMINAL.has(task.status));
+  check(
+    '串行队列：同一时刻只有一个 running，后续排队',
+    Boolean(runningState && runningState.status === 'running' && secondState && secondState.status === 'queued'),
+    `first=${runningState && runningState.status} second=${secondState && secondState.status}`,
+  );
+
+  // ===== 二、SSE：首帧快照 =====
+  const sse1 = await sseConnect();
+  const firstFrame = await sse1.waitFor(() => true, 5000);
+  check('SSE 首帧是 snapshot（INV-05 连接即发状态）', Boolean(firstFrame && firstFrame.event === 'snapshot'), `首帧 event=${firstFrame && firstFrame.event}`);
+  check('SSE 响应头正确（text/event-stream + X-Accel-Buffering: no）', Boolean(sse1.headers.contentType && sse1.headers.contentType.includes('text/event-stream') && sse1.headers.xAccel === 'no'), JSON.stringify(sse1.headers));
+  const snapshotSeq = firstFrame && firstFrame.data && firstFrame.data.seq;
+  check(
+    '快照内容含进行中的任务与队列状态',
+    Boolean(firstFrame && firstFrame.data && Array.isArray(firstFrame.data.tasks) && firstFrame.data.tasks.some((task) => task.id === firstId) && firstFrame.data.queue),
+    `tasks=${firstFrame && firstFrame.data && firstFrame.data.tasks.length} seq=${snapshotSeq}`,
+  );
+
+  // ===== 三、SSE 增量 + seq 单调 + 断开 =====
+  const progressFrame = await sse1.waitFor((frame) => frame.event === 'task' && frame.data && frame.data.task && frame.data.task.id === firstId, 20000);
+  check(
+    'SSE 增量：收到 task 事件（进度节流 ≤10/s）',
+    Boolean(progressFrame),
+    progressFrame ? `seq=${progressFrame.data.seq} status=${progressFrame.data.task.status} percent=${progressFrame.data.task.progress.percent}` : '超时未收到',
+  );
+  const lastSeqBeforeDrop = progressFrame ? progressFrame.data.seq : snapshotSeq;
+  sse1.close();
+  await sleep(300);
+
+  // 断开期间任务继续跑（INV-04）：同时用 /health 证明零订阅者
+  const healthWhileDetached = await api('GET', '/health');
+  check(
+    '断开 SSE 后任务照常执行（subscribers=0 仍在跑）',
+    Boolean(healthWhileDetached.json && healthWhileDetached.json.data.tasks.subscribers === 0),
+    `subscribers=${healthWhileDetached.json && healthWhileDetached.json.data.tasks.subscribers}`,
+  );
+
+  // ===== 四、since 续传：首帧仍是快照 =====
+  const sse2 = await sseConnect(lastSeqBeforeDrop);
+  const resumeFirst = await sse2.waitFor(() => true, 5000);
+  check('重连带 since 时首帧仍是 snapshot（丢事件不丢状态）', Boolean(resumeFirst && resumeFirst.event === 'snapshot'), `event=${resumeFirst && resumeFirst.event}`);
+  check(
+    'since 续传：快照 seq 不早于断线前 seq',
+    Boolean(resumeFirst && resumeFirst.data && resumeFirst.data.seq >= lastSeqBeforeDrop),
+    `since=${lastSeqBeforeDrop} snapshotSeq=${resumeFirst && resumeFirst.data && resumeFirst.data.seq}`,
+  );
+  sse2.close();
+
+  // ===== 五、取消：cancelling → aborted + .part 清理 =====
+  const cancelTarget = secondId || firstId;
+  const cancelResult = await api('POST', `/tasks/${cancelTarget}/cancel`, {});
+  const cancelStatus = cancelResult.json && cancelResult.json.data && cancelResult.json.data.task && cancelResult.json.data.task.status;
+  check('取消请求受理（queued/running → cancelling）', cancelStatus === 'cancelling' || cancelStatus === 'aborted', `status=${cancelStatus}`);
+  const cancelled = await waitTask(cancelTarget);
+  check(
+    '取消终态：aborted + error=null + percent=0',
+    Boolean(cancelled && cancelled.status === 'aborted' && cancelled.error === null && cancelled.progress.percent === 0),
+    cancelled ? `status=${cancelled.status} error=${cancelled.error} percent=${cancelled.progress.percent}` : 'timeout',
+  );
+
+  // ===== 六、原子写：运行期反复解析 tasks.json，且无 .tmp 残留 =====
+  let parseOk = 0;
+  const parseSamples = 25;
+  for (let i = 0; i < parseSamples; i += 1) {
+    try {
+      const text = await fsp.readFile(TASKS_FILE, 'utf8');
+      JSON.parse(text);
+      parseOk += 1;
+    } catch {
+      /* 半截文件会在这里暴露 */
+    }
+    await sleep(40);
+  }
+  check('原子写：tasks.json 任意时刻都可被 JSON 解析', parseOk === parseSamples, `${parseOk}/${parseSamples} 次成功`);
+  check('无 .tmp 残留（rename 后不留下临时文件）', !fs.existsSync(`${TASKS_FILE}.tmp`));
+
+  // ===== 七、kill -9 + 重启恢复（硬证据 2）=====
+  const killTask = await api('POST', '/compress/tasks', { sources: [API_BIG], mode: 'bundle', format: 'zip', options: { outputDir: '/m3-test' } });
+  const killId = killTask.json && killTask.json.data && killTask.json.data.task && killTask.json.data.task.id;
+  const running = await waitTask(killId, 20000, (task) => task.status === 'running' && task.phase === 'compressing');
+  check('大任务进入 running/compressing（用于 kill 测试）', Boolean(running && running.status === 'running'), running ? `phase=${running.phase}` : 'timeout');
+
+  // 轮询等待本次任务真正开始写 .part（瞬时文件，直接读一次可能刚好错过）
+  let partsBeforeKill = [];
+  const partDeadline = Date.now() + 10000;
+  while (Date.now() < partDeadline) {
+    partsBeforeKill = await listPartArtifacts();
+    if (partsBeforeKill.length > 0) break;
+    await sleep(150);
+  }
+  check('中断前存在正在写入的 .part', partsBeforeKill.length > 0, partsBeforeKill.join(', ') || '10s 内未出现');
+
+  const pid = readPid();
+  check('读到服务 PID（用于 kill -9）', Number.isInteger(pid), `pid=${pid}`);
+  if (pid) process.kill(pid, 'SIGKILL');
+  await sleep(800);
+  let portClosed = false;
+  try {
+    await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(1500) });
+  } catch {
+    portClosed = true;
+  }
+  check('kill -9 后端口关闭（进程确实死了）', portClosed);
+
+  const restarted = await startService();
+  check('服务可重新启动（start.sh start）', restarted);
+
+  const afterBoot = await waitTask(killId, 10000);
+  check(
+    '恢复语义：状态 interrupted + error.code=INTERRUPTED',
+    Boolean(afterBoot && afterBoot.status === 'interrupted' && afterBoot.error && afterBoot.error.code === 'INTERRUPTED'),
+    afterBoot ? `status=${afterBoot.status} code=${afterBoot.error && afterBoot.error.code}` : 'timeout',
+  );
+  check(
+    '恢复原因标记为 SERVER_RESTART',
+    Boolean(afterBoot && afterBoot.error && afterBoot.error.details && afterBoot.error.details.reason === 'SERVER_RESTART'),
+    JSON.stringify(afterBoot && afterBoot.error && afterBoot.error.details),
+  );
+
+  const partsAfterBoot = await listPartArtifacts();
+  check('恢复后 .part 保留（INV-10，供重试/诊断）', partsAfterBoot.length > 0, partsAfterBoot.join(', ') || '未找到');
+
+  const persisted = JSON.parse(await fsp.readFile(TASKS_FILE, 'utf8'));
+  const interruptedEntry = persisted.find((entry) => entry.info && entry.info.id === killId);
+  check(
+    'tasks.json 里保留 interrupted 任务（可重试）',
+    Boolean(interruptedEntry && interruptedEntry.info.status === 'interrupted'),
+    interruptedEntry ? `status=${interruptedEntry.info.status}` : '未找到',
+  );
+
+  // ===== 八、重试 = 新任务（硬证据 2 的收尾）=====
+  const retryResult = await api('POST', `/tasks/${killId}/retry`, {});
+  const retryTask = retryResult.json && retryResult.json.data && retryResult.json.data.task;
+  check(
+    '重试生成新任务（新 UUID + retryOf 指向原任务）',
+    Boolean(retryTask && retryTask.id !== killId && retryTask.retryOf === killId),
+    retryTask ? `new=${retryTask.id.slice(0, 8)} retryOf=${String(retryTask.retryOf).slice(0, 8)}` : JSON.stringify(retryResult.json.error),
+  );
+  const retryDone = await waitTask(retryTask ? retryTask.id : killId, 180000);
+  check(
+    '重试任务成功完成（证明"保留 .part"与"可重试"同时成立）',
+    Boolean(retryDone && retryDone.status === 'done'),
+    retryDone ? `status=${retryDone.status} error=${retryDone.error && retryDone.error.code}` : 'timeout',
+  );
+
+  // ===== 九、关掉浏览器任务继续跑（硬证据 1）=====
+  const bgTask = await api('POST', '/compress/tasks', { sources: [API_BIG], mode: 'bundle', format: 'zip', options: { outputDir: '/m3-test' } });
+  const bgId = bgTask.json && bgTask.json.data && bgTask.json.data.task && bgTask.json.data.task.id;
+  // 全程不建立 SSE（模拟"关掉浏览器"）；只等服务端自己跑完
+  const bgDone = await waitTask(bgId, 180000);
+  const healthAfterBg = await api('GET', '/health');
+  check(
+    '关掉浏览器（零 SSE 订阅）任务继续跑到 done',
+    Boolean(bgDone && bgDone.status === 'done'),
+    bgDone ? `status=${bgDone.status} subscribers=${healthAfterBg.json.data.tasks.subscribers}` : 'timeout',
+  );
+  check(
+    '全程 subscribers=0（执行与订阅零耦合，INV-02/INV-04）',
+    healthAfterBg.json.data.tasks.subscribers === 0,
+    `subscribers=${healthAfterBg.json.data.tasks.subscribers}`,
+  );
+
+  // ===== 十、历史查询 + 文件上限 =====
+  const history = await api('GET', '/tasks/history?limit=5');
+  check('历史查询端点可用', Boolean(history.json && history.json.data && Array.isArray(history.json.data.items)), `HTTP ${history.status} 条数=${history.json.data && history.json.data.items.length} max=${history.json.data && history.json.data.max}`);
+  const historyLines = (await fsp.readFile(HISTORY_FILE, 'utf8')).split('\n').filter((line) => line.trim().length > 0);
+  let historyParseOk = true;
+  for (const line of historyLines) {
+    try {
+      JSON.parse(line);
+    } catch {
+      historyParseOk = false;
+    }
+  }
+  check('task-history.jsonl 每行可解析且不超上限', historyParseOk && historyLines.length <= 200, `${historyLines.length} 行（上限 200）`);
+
+  // ===== 十一、任务 API 不泄漏绝对路径 =====
+  const detail = await api('GET', `/tasks/${bgId}`);
+  assertNoAbsolutePath('任务详情', detail.json);
+  const list = await api('GET', '/tasks?limit=20');
+  assertNoAbsolutePath('任务列表', list.json);
+
+  console.log(`\n── 汇总 ──\nPASS ${passCount} / FAIL ${failCount}`);
+  if (failures.length > 0) {
+    console.log(`失败项：${failures.join('；')}`);
+    process.exitCode = 1;
+  }
+}
+
+main().catch((error) => {
+  console.error(`脚本异常：${error && error.stack ? error.stack : error}`);
+  process.exitCode = 1;
+});

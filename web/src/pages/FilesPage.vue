@@ -16,6 +16,7 @@ import Icon from '../components/common/Icon.vue';
 import CompressDrawer from '../components/compress/CompressDrawer.vue';
 import ExtractDialog from '../components/compress/ExtractDialog.vue';
 import TaskProgress from '../components/task/TaskProgress.vue';
+import { useTasksStore } from '../stores/tasks.js';
 import { ROUTES } from '../constants/index.js';
 import { formatBytes, formatDateTime } from '../utils/format.js';
 import { breadcrumbsOf, parentPath } from '../utils/path.js';
@@ -35,7 +36,10 @@ const order = ref('asc');
 const selected = ref(new Map()); // path -> entry
 const showCompress = ref(false);
 const showExtract = ref(false);
-const activeTaskId = ref(null);
+/** 页面内展示的任务：优先最近提交的；否则跟随 store 里当前活动任务（刷新/重开页面也能看到进度） */
+const submittedTaskId = ref(null);
+const tasks = useTasksStore();
+const activeTaskId = computed(() => submittedTaskId.value || (tasks.activeTask ? tasks.activeTask.id : null));
 
 const currentPath = computed(() => {
   const value = route.query.path;
@@ -127,7 +131,12 @@ function isSelected(entry) {
 function onSubmitted(taskId) {
   showCompress.value = false;
   showExtract.value = false;
-  activeTaskId.value = taskId;
+  submittedTaskId.value = taskId;
+}
+
+/** 收起面板后回到"跟随当前活动任务" */
+function dismissTaskPanel() {
+  submittedTaskId.value = null;
 }
 
 /** 任务终态：刷新目录（新产物/新解压目录要立刻可见） */
@@ -244,7 +253,7 @@ function rowIcon(entry) {
     </p>
   </section>
 
-  <TaskProgress :task-id="activeTaskId" @finished="onTaskFinished" @dismiss="activeTaskId = null" />
+  <TaskProgress :task-id="activeTaskId" @finished="onTaskFinished" @dismiss="dismissTaskPanel" />
 
   <CompressDrawer
     :open="showCompress"

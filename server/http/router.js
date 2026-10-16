@@ -6,6 +6,7 @@ import authRoutes from './routes/auth.js';
 import compressRoutes from './routes/compress.js';
 import fsRoutes from './routes/fs.js';
 import healthRoutes from './routes/health.js';
+import taskRoutes from './routes/tasks.js';
 
 export default async function router(app, options) {
   const { config, logger, store, meta, verifyPassword } = options;
@@ -15,5 +16,6 @@ export default async function router(app, options) {
   await app.register(authRoutes, { config: config.auth, store, verifyPassword });
   await app.register(fsRoutes, {});
   await app.register(compressRoutes, {});
+  await app.register(taskRoutes, {});
   await app.register(healthRoutes, { meta });
 }

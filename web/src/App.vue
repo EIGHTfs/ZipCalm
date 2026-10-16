@@ -11,10 +11,20 @@
 //
 // 四区都是「布局容器」，只负责位置与骨架，不含业务；业务页面通过 MainArea 的默认插槽渲染。
 
+import { onBeforeUnmount, onMounted } from 'vue';
+
 import TopBar from './components/layout/TopBar.vue';
 import Sidebar from './components/layout/Sidebar.vue';
 import MainArea from './components/layout/MainArea.vue';
 import BottomTaskBar from './components/layout/BottomTaskBar.vue';
+import TaskDrawer from './components/task/TaskDrawer.vue';
+import { useTasksStore } from './stores/tasks.js';
+
+// SSE 连接在根组件建立：**全局只连一条**，页面切换不影响任务状态展示，
+// 也保证"关掉浏览器任务继续跑、回来还能看到进度"（连接与执行解耦，INV-04）。
+const tasks = useTasksStore();
+onMounted(() => tasks.connect());
+onBeforeUnmount(() => tasks.disconnect());
 </script>
 
 <template>
@@ -26,5 +36,6 @@ import BottomTaskBar from './components/layout/BottomTaskBar.vue';
       <router-view />
     </MainArea>
     <BottomTaskBar />
+    <TaskDrawer />
   </div>
 </template>

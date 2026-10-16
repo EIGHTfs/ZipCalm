@@ -1,32 +1,67 @@
 <script setup>
-// 底部任务条（docs/08 第八节布局图第三行 + §「任务进度要常驻可见」）
-// 内容：任务摘要（活跃/排队）| 当前任务摘要 | 微型指标占位 | 操作按钮
+// 底部任务条（M3：真实数据 + 常驻进度 + 取消）
 //
-// F1 阶段：数字全部来自 pinia 的 taskSummary（默认 0），指标显示「—」并标注 M7 接入；
-// 「展开/清空」按钮 disabled，因为任务抽屉属于 M3 范围。
+// 数据全部来自 `stores/tasks.js`（SSE 单一数据源），**不再自己轮询**。
+// 内容：活跃/排队摘要 | 当前任务与进度 | 微型指标占位 | 操作（展开抽屉 / 取消）
+// 契约：docs/08 第八节「任务进度要常驻可见」+ docs/11 M3「底部任务条 + 任务抽屉」
 
 import { computed } from 'vue';
 
-import { useUiStore } from '../../stores/ui.js';
+import { useTasksStore } from '../../stores/tasks.js';
+import { formatBytes, formatPercent } from '../../utils/format.js';
+import { taskStatusLabel, taskStatusTone } from '../../constants/index.js';
 
-const ui = useUiStore();
+const tasks = useTasksStore();
 
-const summary = computed(() => ui.taskSummary);
-const currentText = computed(() =>
-  summary.value.active > 0 ? '有任务正在压缩（M3 接入实时进度）' : '暂无进行中的任务',
-);
-const parallelText = computed(() => (summary.value.parallel ? '并行已开启' : '串行执行'));
+const active = computed(() => tasks.activeTask);
+const progress = computed(() => (active.value && active.value.progress) || {});
+const summaryText = computed(() => {
+  const task = active.value;
+  if (!task) return '暂无进行中的任务';
+  const label = task.kind === 'extract' ? '解压' : '压缩';
+  const name = task.sources && task.sources[0] ? task.sources[0].name : (task.archivePath || '');
+  return `${label}中 · ${name}`;
+});
+const connectionLabel = computed(() => {
+  if (tasks.connectionMode === 'connected') return 'SSE 已连接';
+  if (tasks.connectionMode === 'polling') return '轮询降级';
+  return '连接中…';
+});
+
+async function cancelActive() {
+  if (!active.value) return;
+  await tasks.cancel(active.value.id);
+}
 </script>
 
 <template>
-  <footer class="bottom-task-bar" data-region="bottom-task-bar">
+  <footer class="bottom-task-bar" data-region="bottom-task-bar" data-testid="task-bar">
     <div class="bottom-task-bar__summary">
-      <span class="badge badge--active">活跃 {{ summary.active }}</span>
-      <span class="badge">排队 {{ summary.queued }}</span>
-      <span class="badge" :title="'v1 契约：压缩串行执行；并行开关为占位'">{{ parallelText }}</span>
+      <span class="badge" :class="{ 'badge--active': tasks.runningCount > 0 }" data-testid="task-bar-running">
+        活跃 {{ tasks.runningCount }}
+      </span>
+      <span class="badge" data-testid="task-bar-queued">排队 {{ tasks.queuedCount }}</span>
+      <span class="badge" title="v1 契约：压缩串行执行；并行开关为占位">串行执行</span>
+      <span class="badge" data-testid="task-bar-connection">{{ connectionLabel }}</span>
     </div>
 
-    <div class="bottom-task-bar__current">{{ currentText }}</div>
+    <div class="bottom-task-bar__current" data-testid="task-bar-current">
+      <template v-if="active">
+        <span class="badge" :class="`badge--${taskStatusTone(active.status)}`">{{ taskStatusLabel(active.status) }}</span>
+        <span>{{ summaryText }}</span>
+        <span class="bottom-task-bar__progress" role="progressbar" :aria-valuenow="progress.percent || 0" aria-valuemin="0" aria-valuemax="100">
+          <span class="progress__bar" data-testid="task-bar-progress-bar" :style="{ width: `${progress.percent || 0}%` }"></span>
+        </span>
+        <span data-testid="task-bar-percent">
+          {{ formatPercent(progress.percent || 0) }} · {{ progress.processedFiles || 0 }}/{{ progress.totalFiles || 0 }} ·
+          {{ formatBytes(progress.processedBytes || 0) }}/{{ formatBytes(progress.totalBytes || 0) }}
+        </span>
+        <span v-if="progress.currentFile" class="bottom-task-bar__file" data-testid="task-bar-current-file">{{ progress.currentFile }}</span>
+      </template>
+      <template v-else>
+        <span>暂无进行中的任务</span>
+      </template>
+    </div>
 
     <div class="bottom-task-bar__metrics" aria-label="微型指标">
       <span>CPU —</span>
@@ -36,8 +71,8 @@ const parallelText = computed(() => (summary.value.parallel ? '并行已开启' 
     </div>
 
     <div class="bottom-task-bar__actions">
-      <button type="button" disabled title="任务抽屉将在 M3 实现">展开</button>
-      <button type="button" disabled title="清理历史将在 M8 实现">清空</button>
+      <button type="button" :disabled="!active" data-testid="task-bar-cancel" @click="cancelActive">取消</button>
+      <button type="button" data-testid="task-bar-open-drawer" @click="tasks.drawerOpen = true">任务</button>
     </div>
   </footer>
 </template>

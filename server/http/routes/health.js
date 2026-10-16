@@ -9,15 +9,23 @@ export default async function healthRoutes(app, options) {
 
   app.get('/health', async (request, reply) => {
     const authStats = app.authStore ? app.authStore.stats() : { sessions: 0, tokens: 0 };
+    const taskStats = app.tasks ? app.tasks.manager.stats() : { total: 0, active: null, waiting: 0, subscribers: 0, seq: 0 };
     reply.ok({
       version: meta.version,
       startedAt: meta.startedAt,
       uptimeMs: Date.now() - meta.startedAt,
-      bootId: meta.bootId,
+      bootId: app.tasks ? app.tasks.manager.bootId : meta.bootId,
       auth: { sessions: authStats.sessions, tokens: authStats.tokens },
       storage: { configured: true, readable: true, writable: meta.rootWritable === true },
-      // M1 只实现文件浏览，格式/任务/指标在各自里程碑补齐
-      features: { fs: true, auth: true, compress: false, tasks: false, metrics: false },
+      tasks: {
+        total: taskStats.total,
+        active: taskStats.active,
+        waiting: taskStats.waiting,
+        subscribers: taskStats.subscribers,
+        seq: taskStats.seq,
+      },
+      // M2 已实现压缩/解压；M3 补齐任务系统；指标看板在 M7
+      features: { fs: true, auth: true, compress: true, tasks: true, metrics: false },
     });
   });
 }

@@ -158,14 +158,22 @@ function packageBaseName(group) {
 
 /** 压缩一个包：写 .part → 原子 rename → 记账到 result.packages */
 async function compressOnePackage(record, deps, plugin, group, groupIndex, outputDirAbs) {
-  const { manager, rootAbs } = deps;
+  const { manager, rootAbs, logger } = deps;
   const info = record.info;
 
   const outputAbsPath = await uniqueTargetPath(outputDirAbs, packageBaseName(group), plugin.ext);
   const tempPath = `${outputAbsPath}.part`;
 
+  // 上次中断遗留的 .part 必须让路：改名保留（INV-10 留证据）而不是沿用或直接删，
+  // 否则本次 create() 会因 TARGET_EXISTS 失败 —— "保留 .part" 与 "可重试" 才能同时成立。
+  if (fs.existsSync(tempPath)) {
+    const archived = `${tempPath}.interrupted-${Date.now()}`;
+    await fsp.rename(tempPath, archived);
+    logger.warn('发现遗留 .part，已改名保留以便重试', { taskId: info.id, archived: path.basename(archived) });
+  }
+
   // 进度分母：本组待压字节数/文件数（来自预检统计）
-  const groupBytes = group.reduce((sum, source) => sum + (Number(source.size) || 0), 0);
+  const groupBytes = group.reduce((sum, source) => sum + (Number(source.sizeBytes) || 0), 0);
   const groupFiles = group.reduce((sum, source) => sum + (Number(source.fileCount) || 0), 0);
   manager.updateProgress(info.id, { totalBytes: groupBytes, totalFiles: groupFiles, processedBytes: 0, processedFiles: 0 });
 
@@ -185,7 +193,7 @@ async function compressOnePackage(record, deps, plugin, group, groupIndex, outpu
 
   info.result.packages.push({
     sourceIndex: groupIndex,
-    sourcePath: group[0].userPath,
+    sourcePath: group[0].path,
     outputPath: toUserPath(rootAbs, outputAbsPath),
     bytesOut: Number(created.bytesOut) || 0,
     entries: created.entries,
@@ -254,10 +262,10 @@ async function runCompressTask(record, deps) {
   // 删除原文件：仅当 keepOriginal=false（管理器已据此建好 delete 状态）
   if (info.delete) {
     const targets = info.sources.map((source) => ({
-      userPath: source.userPath,
+      userPath: source.path,
       absPath: source.absPath,
       kind: source.kind,
-      size: Number(source.size) || 0,
+      size: Number(source.sizeBytes) || 0,
     }));
     await stageDelete(record, {
       targets,

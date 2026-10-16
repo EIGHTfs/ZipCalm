@@ -637,3 +637,82 @@
   border-radius: var(--radius-md);
   background: var(--color-surface-muted);
 }
+
+/* ===== M3：底部任务条进度 + 任务抽屉 ===== */
+
+.bottom-task-bar__progress {
+  display: inline-block;
+  width: 120px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--color-surface-muted);
+  border: 1px solid var(--color-border);
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+.bottom-task-bar__file {
+  color: var(--color-text-muted);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawer--wide {
+  width: min(760px, 100%);
+}
+
+.task-drawer__body {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(280px, 1.4fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.task-drawer__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-height: 70vh;
+  overflow: auto;
+}
+
+.task-drawer__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  justify-content: flex-start;
+  text-align: left;
+  width: 100%;
+}
+
+.task-drawer__row--active {
+  outline: 2px solid var(--color-primary);
+}
+
+.task-drawer__detail {
+  border-left: 1px solid var(--color-border);
+  padding-left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.task-drawer__kv {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: var(--space-1) var(--space-2);
+  font-size: var(--font-size-sm);
+}
+
+.task-drawer__kv dt {
+  color: var(--color-text-muted);
+}
+
+.task-drawer__actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-2);
+}
