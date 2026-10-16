@@ -6,6 +6,7 @@
 node_modules
 storage/
 web/dist/
+ZipCalm.pid
 *.log
 *.tmp
 .DS_Store
