@@ -280,6 +280,14 @@ function rowIcon(entry) {
             <span class="file-table__name">
               <Icon :name="rowIcon(entry)" :size="15" />
               <span>{{ entry.name }}</span>
+              <!-- 黑名单角标：服务端已返回 blacklisted/blacklistLayer（契约 §4.2），这里只是把它显示出来，
+                   让用户一眼看出"压了也几乎不省空间"，不用等选中后在抽屉里才发现被跳过 -->
+              <span
+                v-if="entry.blacklisted"
+                class="badge"
+                data-testid="blacklist-badge"
+                :title="`命中黑名单（${entry.blacklistLayer} 层）：压缩时会跳过，不会进包也不会被删除`"
+              >已压缩格式</span>
             </span>
           </td>
           <td class="file-table__col-type">{{ typeLabel(entry) }}</td>

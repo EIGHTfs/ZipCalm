@@ -17,6 +17,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import { compressPreflight } from '../server/core/compress/preflight.js';
+import { matchEntry, resolveLayers } from '../server/core/compress/blacklist.js';
 import { PROJECT_ROOT, execFileAsync, pathExists } from './helpers/script-env.mjs';
 import { loadRuntimeConfig } from './helpers/test-config.mjs';
 import { createReporter } from './helpers/test-report.mjs';
@@ -210,6 +211,40 @@ async function main() {
   const deleteTargets = (deleteInfo.targets || []).map((target) => target.path);
   check('⑥ 删除集合不含被跳过的 jpg', deleteTargets.every((p) => !p.toLowerCase().endsWith('.jpg')), `targets=${JSON.stringify(deleteTargets)}`);
   check('⑥ 删除集合含进包的 txt（说明删除阶段确实跑过）', deleteTargets.some((p) => p.endsWith('.txt')), `targets=${JSON.stringify(deleteTargets)}`);
+
+  // ===== 层独立性：关 global 只关 global、关 user 只关 user（最容易回归的地方）=====
+  // 这两条只在单元层可测：service 恒以 global.enabled=true 组装层（全局层按契约不可经 API 关闭），
+  // 所以"关 global"的语义落在 resolveLayers 上 —— 若有人把它改成"关全局=关全部"，这里立刻红。
+  // 注意 matchEntry(layers, { name }) 的参数顺序：layers 在前、条目在后（传反会恒返回 null，别误判成配置失效）。
+  const globalOffLayers = resolveLayers({
+    user: { enabled: true, patterns: ['*.txt'] },
+    global: { enabled: false },
+  });
+  const jpgWhenGlobalOff = matchEntry(globalOffLayers, { name: 'photo-a.jpg' });
+  const txtWhenGlobalOff = matchEntry(globalOffLayers, { name: 'note.txt' });
+  check('只关 global：jpg 不再命中（全局层确实关了）', jpgWhenGlobalOff === null, JSON.stringify(jpgWhenGlobalOff));
+  check('只关 global：user 层的 *.txt 仍然命中（关的是层，不是全部）',
+    Boolean(txtWhenGlobalOff && txtWhenGlobalOff.layer === 'user' && txtWhenGlobalOff.pattern === '*.txt'),
+    JSON.stringify(txtWhenGlobalOff));
+
+  const userOffLayers = resolveLayers({
+    user: { enabled: false, patterns: ['*.txt'] },
+    global: { enabled: true },
+  });
+  const jpgWhenUserOff = matchEntry(userOffLayers, { name: 'photo-a.jpg' });
+  const txtWhenUserOff = matchEntry(userOffLayers, { name: 'note.txt' });
+  check('只关 user：jpg 仍被全局层命中（层之间互相独立）',
+    Boolean(jpgWhenUserOff && jpgWhenUserOff.layer === 'global'), JSON.stringify(jpgWhenUserOff));
+  check('只关 user：*.txt 不再命中（用户层确实关了）', txtWhenUserOff === null, JSON.stringify(txtWhenUserOff));
+
+  // API 层再验一遍"关 user"：PUT enabled=false 后，preview 里 *.txt 不再被跳过、jpg 仍被跳过
+  await api('PUT', '/blacklist/user', { patterns: ['*.txt'], enabled: false });
+  const previewUserOff = await api('POST', '/blacklist/preview', { paths: [`${FIXTURE_API}/mixed`], extraPatterns: [] });
+  const skippedUserOff = (previewUserOff.json.data && previewUserOff.json.data.skipped) || [];
+  const patternsUserOff = skippedUserOff.map((item) => item.pattern);
+  check('API：用户层关闭后 *.txt 不再被跳过', !patternsUserOff.includes('*.txt'), `patterns=${JSON.stringify([...new Set(patternsUserOff)])}`);
+  check('API：用户层关闭后 jpg 仍被全局层跳过', skippedUserOff.filter((item) => item.layer === 'global').length === 2, `skipped=${skippedUserOff.length}`);
+  await api('PUT', '/blacklist/user', { patterns: [], enabled: true }); // 还原
 
   // ===== 开关语义：blacklist.enabled=false → 三层全部不生效（jpg 也会被打包）=====
   const offTask = await api('POST', '/compress/tasks', {
