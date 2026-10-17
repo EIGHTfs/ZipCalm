@@ -126,6 +126,22 @@ function toPublicSource(source) {
   return rest;
 }
 
+/**
+ * 对外删除目标条目：**白名单式**只保留契约形状（docs/M0/数据模型.md §2.2：{path, kind, sizeBytes}）。
+ *
+ * 红线（契约 v2 §2.2）：absPath 等内部字段只允许存在于 record.internal.deleteTargets，绝不进 API。
+ * 当前上游 buildDeleteTargets（orchestrator）已映射好契约形状，这里不漏；
+ * 白名单是**防御纵深**——将来任何调用方绕过映射直接塞进 targets，也会在此被剥离，
+ * 而不是靠"上游恰好映射对了"。
+ */
+function toPublicDeleteTarget(target) {
+  return {
+    path: target.path,
+    kind: target.kind,
+    sizeBytes: Number.isFinite(target.sizeBytes) ? target.sizeBytes : null,
+  };
+}
+
 /** 是否需要删除子状态：压缩侧 keepOriginal=false / 解压侧 deleteArchiveAfterExtract=true */
 function needsDeleteState(input) {
   if (input.kind === 'extract') return Boolean(input.options && input.options.deleteArchiveAfterExtract);
@@ -140,7 +156,7 @@ function publicTask(info) {
     options: { ...info.options },
     progress: { ...info.progress },
     result: info.result ? { ...info.result, packages: info.result.packages.map((pkg) => ({ ...pkg })) } : null,
-    delete: info.delete ? { ...info.delete, targets: info.delete.targets.map((target) => ({ ...target })) } : null,
+    delete: info.delete ? { ...info.delete, targets: info.delete.targets.map(toPublicDeleteTarget) } : null,
     error: info.error ? { ...info.error } : null,
   };
 }
