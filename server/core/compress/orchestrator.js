@@ -282,6 +282,10 @@ async function stageDelete(record, input, deps) {
     }
   }
 
+  // deleting 是真正的执行相位（rename/移入回收站），必须与后续任务的压缩互斥：
+  // 让位后 activeId 可能属于 B；source 重叠时 B 正在读的文件不能被 A 移走。
+  // 等待发生在 runner 内部（确认 HTTP 请求不挂起）；拿到槽位后才进入 deleting。
+  await manager.waitForExecutionSlot(info.id);
   manager.setPhase(info.id, 'deleting');
   info.delete.status = 'deleting';
   const deleteOutcome = await deleteService.deleteTargets({

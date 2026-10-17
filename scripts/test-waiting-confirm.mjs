@@ -139,6 +139,29 @@ assertCase('5. 定时器清理：确认后无残留 confirmTimer（防泄漏）'
   if (rec.confirmResolver !== null) throw new Error('确认后 confirmResolver 未清理');
 });
 
+assertCase('6. deleting 独占：A 确认后进入执行相位前必须抢到槽位（activeId 空闲或自己）', async () => {
+  const mgr = createTaskManager(makeDeps(0));
+  // A：挂起确认
+  const { id: idA } = await enqueueHangingConfirm(mgr);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  // B：占用 activeId
+  const taskB = await mgr.create({
+    kind: 'compress', mode: 'single', format: 'zip',
+    sources: [{ path: '/b', name: 'b', kind: 'file' }],
+  });
+  let slotDuringB = 'not-acquired';
+  mgr.enqueue(taskB.id, async () => { await new Promise((resolve) => setTimeout(resolve, 120)); });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  // A 确认后，模拟 orchestrator 的 deleting 前抢位：此时 B 在跑，waitForExecutionSlot 必须等到 B 完
+  const recA = mgr.requireTask(idA);
+  mgr.resolveConfirm(idA, { confirmed: true });
+  const slotPromise = mgr.waitForExecutionSlot(idA).then(() => { slotDuringB = 'acquired'; });
+  await new Promise((resolve) => setTimeout(resolve, 50)); // B 还在跑
+  if (slotDuringB === 'acquired') throw new Error('deleting 在 B 执行期间抢到槽位（独占被破坏）');
+  await slotPromise; // B 完成后必须能拿到
+  if (slotDuringB !== 'acquired') throw new Error('B 完成后 A 未能拿到槽位');
+});
+
 let pass = 0; let fail = 0;
 for (const { name, fn } of cases) {
   try { await fn(); pass += 1; console.log(`PASS ${name}`); }

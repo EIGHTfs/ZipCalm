@@ -443,6 +443,31 @@ function setPhase(ctx, id, phase) {
   void persistNow(ctx);
 }
 
+/**
+ * 等待执行槽位（deleting 独占性，P-03 让位机制的回收侧）。
+ *
+ * 背景：markWaitingConfirm 让位后 activeId 可能属于后续任务 B；A 被确认后进入 deleting——
+ * 这是真正的执行相位（rename/移入回收站），**必须与 B 的压缩（读源）互斥**，否则 source
+ * 重叠时 B 正在读的文件会被 A 移走（ENOENT / 残缺包）。删除不可逆，该窗口必须封死。
+ *
+ * 语义：A 的 runner 在进入 deleting 前调用本函数，直到 activeId 空闲（或又是自己）才返回；
+ * orchestrator 拿到槽位后立即 setPhase('deleting') 并执行删除。确认 HTTP 请求**不挂起**
+ * （确认只做 gate resolve；等待发生在 runner 内部，与方案 2 的差异点）。
+ */
+function waitForExecutionSlot(ctx, id) {
+  return new Promise((resolve) => {
+    const acquire = () => {
+      if (ctx.activeId === null || ctx.activeId === id) {
+        ctx.activeId = id;
+        resolve();
+        return;
+      }
+      setTimeout(acquire, 50);
+    };
+    acquire();
+  });
+}
+
 /** 滑动窗口速率（最近 5s）+ ETA：样本不足时给 0 / null（不编数） */
 function computeSpeed(ctx, record, processedBytes) {
   const samples = ctx.speedSamples.get(record.info.id) || [];
@@ -861,6 +886,7 @@ export function createTaskManager(deps) {
     waitConfirm: (id) => waitConfirm(ctx, id),
     resolveConfirm: (id, payload) => resolveConfirm(ctx, id, payload),
     markWaitingConfirm: (id) => markWaitingConfirm(ctx, id),
+    waitForExecutionSlot: (id) => waitForExecutionSlot(ctx, id),
     requireTask: (id) => requireRecord(ctx, id),
     getAbortSignal: (id) => requireRecord(ctx, id).abortController.signal,
     toSummary,
