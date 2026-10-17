@@ -64,6 +64,35 @@ function buildDeleteTargets(input) {
   }));
 }
 
+/** 字节比对容差（与路由层 parseExpectedCounts 同口径）：目录 size 估算与磁盘块对齐允许 ±1 */
+const EXPECTED_BYTES_TOLERANCE = 1;
+
+/**
+ * 确认数字复核（INV-03：expectedFiles 与 expectedBytes 双维度）。
+ *
+ * 双层防线设计（M5-fix-plan F-02）：路由层 parseExpectedCounts 已做同步 fast-fail（给 4xx 体验）；
+ * 这里是**权威防线**——在删除执行前的最后一刻再比一次，覆盖"路由校验通过后、执行前"窗口内
+ * 待删集合发生变化（如 stat 复核剔除条目）的情况。两层口径一致，不冗余。
+ */
+export function assertExpectedCountsMatch(gate, targets) {
+  const actualFiles = targets.length;
+  if (Number.isInteger(gate.expectedFiles) && gate.expectedFiles !== actualFiles) {
+    throw apiError(ERROR_CODES.VALIDATION_FAILED, '确认弹窗与实际待删数量不一致，已中止删除', {
+      expectedFiles: gate.expectedFiles,
+      actualFiles,
+    });
+  }
+  if (Number.isFinite(gate.expectedBytes)) {
+    const actualBytes = targets.reduce((sum, target) => sum + (Number(target.sizeBytes) || 0), 0);
+    if (Math.abs(gate.expectedBytes - actualBytes) > EXPECTED_BYTES_TOLERANCE) {
+      throw apiError(ERROR_CODES.VALIDATION_FAILED, '确认弹窗与实际待删字节数不一致，已中止删除', {
+        expectedBytes: gate.expectedBytes,
+        actualBytes,
+      });
+    }
+  }
+}
+
 /**
  * 等二次确认（创建时已确认则直接放行）。
  * @returns {Promise<boolean>} true = 可以删；false = 用户放弃（调用方据此跳过删除，原文件不动）
@@ -84,12 +113,7 @@ async function awaitDeleteConfirm(manager, logger, info, skipConfirm) {
     logger.info('用户放弃删除，原文件/压缩包保持不动', { taskId: info.id });
     return false;
   }
-  if (Number.isInteger(gate.expectedFiles) && gate.expectedFiles !== info.delete.targets.length) {
-    throw apiError(ERROR_CODES.VALIDATION_FAILED, '确认弹窗与实际待删数量不一致，已中止删除', {
-      expectedFiles: gate.expectedFiles,
-      actualFiles: info.delete.targets.length,
-    });
-  }
+  assertExpectedCountsMatch(gate, info.delete.targets);
   info.delete.confirmed = true;
   info.delete.confirmedAt = gate.at || Date.now();
   return true;
