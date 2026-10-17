@@ -29,6 +29,11 @@ const DATA_DIR = path.resolve(PROJECT_ROOT, (runtimeConfig.storage && runtimeCon
 const LOGIN = { username: process.env.ZIPCALM_TEST_USER || 'admin', password: process.env.ZIPCALM_TEST_PASSWORD || 'zipcalm' };
 const USER_BLACKLIST_FILE = path.join(DATA_DIR, 'blacklist-user.json');
 
+/** 信封异常时回传的消息片段长度 / 7z 列条目超时 / 任务列表一次取多少 / 故意超长的 pattern 字符数 */
+const ERROR_SNIPPET_CHARS = 120;
+const ARCHIVE_LIST_TIMEOUT_MS = 30000;
+const TASK_LIST_LIMIT = 100;
+const OVERLONG_PATTERN_LENGTH = 200; // 超过契约上限 128，用来验证服务端确实拒绝
 const HTTP_TIMEOUT_MS = 15000;
 const DEFAULT_TASK_TIMEOUT_MS = 120000;
 const TASK_POLL_INTERVAL_MS = 200;
@@ -54,7 +59,7 @@ async function api(method, urlPath, body) {
   try {
     json = JSON.parse(text);
   } catch {
-    json = { ok: false, error: { code: 'NO_ENVELOPE', message: text.slice(0, 120) } };
+    json = { ok: false, error: { code: 'NO_ENVELOPE', message: text.slice(0, ERROR_SNIPPET_CHARS) } };
   }
   return { status: response.status, json };
 }
@@ -90,7 +95,7 @@ async function prepareFixture() {
 
 /** 归档里的条目名（7z l 解析；tar 系列也用 7z l） */
 async function archiveEntries(archiveAbsPath) {
-  const { stdout } = await execFileAsync('7z', ['l', archiveAbsPath], { timeout: 30000 });
+  const { stdout } = await execFileAsync('7z', ['l', archiveAbsPath], { timeout: ARCHIVE_LIST_TIMEOUT_MS });
   return stdout.split('\n')
     .map((line) => line.trim())
     .filter((line) => /\d{4}-\d{2}-\d{2}/.test(line))
@@ -122,7 +127,7 @@ async function main() {
 
   const badPattern = await api('PUT', '/blacklist/user', { patterns: ['/etc/passwd'] });
   check('非法 pattern（绝对路径）被拒 → VALIDATION_FAILED', badPattern.json && badPattern.json.error && badPattern.json.error.code === 'VALIDATION_FAILED', `code=${badPattern.json && badPattern.json.error && badPattern.json.error.code}`);
-  const tooLong = await api('PUT', '/blacklist/user', { patterns: [`*.${'x'.repeat(200)}`] });
+  const tooLong = await api('PUT', '/blacklist/user', { patterns: [`*.${'x'.repeat(OVERLONG_PATTERN_LENGTH)}`] });
   check('单条超过 128 字符被拒', tooLong.json && tooLong.json.error && tooLong.json.error.code === 'VALIDATION_FAILED');
 
   const removed = await api('PUT', '/blacklist/user', { patterns: ['*.tmp'], enabled: true });
@@ -155,9 +160,9 @@ async function main() {
   check('fs/list：txt 不标黑名单', Boolean(txtEntry && txtEntry.blacklisted === false && txtEntry.blacklistLayer === null), JSON.stringify(txtEntry || null));
 
   // ===== ① 全 jpg → 创建任务被拦（不建任务）=====
-  const beforeCount = (await api('GET', '/tasks?limit=100')).json.data.items.length;
+  const beforeCount = (await api('GET', `/tasks?limit=${TASK_LIST_LIMIT}`)).json.data.items.length;
   const allSkipped = await api('POST', '/compress/tasks', { sources: [`${FIXTURE_API}/alljpg`], mode: 'single', format: 'zip' });
-  const afterCount = (await api('GET', '/tasks?limit=100')).json.data.items.length;
+  const afterCount = (await api('GET', `/tasks?limit=${TASK_LIST_LIMIT}`)).json.data.items.length;
   check('① 全 jpg 建任务 → 422 ALL_SOURCES_SKIPPED', allSkipped.status === 422 && allSkipped.json.error.code === 'ALL_SOURCES_SKIPPED', `HTTP ${allSkipped.status} code=${allSkipped.json && allSkipped.json.error && allSkipped.json.error.code}`);
   check('① 被拦时未创建任务（任务数不变）', afterCount === beforeCount, `${beforeCount} → ${afterCount}`);
 
@@ -205,6 +210,23 @@ async function main() {
   const deleteTargets = (deleteInfo.targets || []).map((target) => target.path);
   check('⑥ 删除集合不含被跳过的 jpg', deleteTargets.every((p) => !p.toLowerCase().endsWith('.jpg')), `targets=${JSON.stringify(deleteTargets)}`);
   check('⑥ 删除集合含进包的 txt（说明删除阶段确实跑过）', deleteTargets.some((p) => p.endsWith('.txt')), `targets=${JSON.stringify(deleteTargets)}`);
+
+  // ===== 开关语义：blacklist.enabled=false → 三层全部不生效（jpg 也会被打包）=====
+  const offTask = await api('POST', '/compress/tasks', {
+    sources: [`${FIXTURE_API}/mixed`], mode: 'bundle', format: 'zip',
+    options: { outputDir: FIXTURE_API, blacklist: { enabled: false } },
+  });
+  const offId = offTask.json && offTask.json.data && offTask.json.data.task && offTask.json.data.task.id;
+  const offDone = offId ? await waitTask(offId) : null;
+  const offOut = offDone && offDone.result && offDone.result.packages && offDone.result.packages[0] && offDone.result.packages[0].outputPath;
+  const offSkipped = (offDone && offDone.result && offDone.result.skipped) || [];
+  check('开关关闭：任务 done 且 skipped 为空', Boolean(offDone && offDone.status === 'done') && offSkipped.length === 0, `status=${offDone && offDone.status} skipped=${offSkipped.length}`);
+  if (offOut) {
+    const offEntries = await archiveEntries(path.join(ROOT, ...offOut.split('/').filter(Boolean)));
+    check('开关关闭：包内含 jpg（黑名单确实不生效）', offEntries.some((name) => /mixed\/.*\.jpg$/i.test(name)), `entries=${JSON.stringify(offEntries)}`);
+  } else {
+    check('开关关闭：产出压缩包路径存在', false, 'no outputPath');
+  }
 
   // ===== ⑤ 磁盘预检（纯函数层注入，不碰真实配置、不重启）=====
   const unitSources = [{

@@ -64,7 +64,7 @@ function archiveAbsOf(rootAbs, userPath) {
  * **禁止**用包内路径反推源路径（lead 确认的第一手事实原则：collectEntries 收集时 absPath 就在手上）。
  *
  * @param {string[]} entryPaths 格式包返回的实际进包 absPath 清单
- * @param {string[]} skippedAbsPaths 被跳过条目的 absPath（黑名单等；当前 M6 未接，恒空，用桩驱动测试）
+ * @param {string[]} skippedAbsPaths 被跳过条目的 absPath（M6 起由黑名单命中项填充；打包阶段就不进包，本参数是删除集合的第二道防线）
  * @param {Map<string,{sizeBytes:number,mtimeMs:number,ino:number}>} [entryStats] 批次④ stat 复核快照（同一次 walk 顺手记录；缺省按 null sizeBytes）
  * @param {(absPath: string) => string} toUserPathOf absPath → userPath 单向转换（orchestrator 持有 root）
  * @returns {{targets: Array<{userPath,absPath,kind,size}>, excluded: number}} 命中集合与被差集排除数

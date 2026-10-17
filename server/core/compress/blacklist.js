@@ -63,20 +63,27 @@ function emptyUserLayer() {
  * 另外这里把"空串/纯空白"也拒掉（否则会变成"什么都不匹配"的死条目，用户看不出为什么没生效）。
  * @returns {{ok: true, patterns: string[]} | {ok: false, message: string}}
  */
+/** 单条校验（返回规范化后的字符串，或错误消息） */
+function validateOnePattern(raw) {
+  if (typeof raw !== 'string') return { ok: false, message: 'patterns 里每一项都必须是字符串' };
+  const pattern = raw.trim();
+  if (pattern.length === 0) return { ok: false, message: 'patterns 里不允许空字符串' };
+  if (pattern.length > MAX_PATTERN_LENGTH) return { ok: false, message: `单条 pattern 最多 ${MAX_PATTERN_LENGTH} 字符` };
+  // 绝对路径与分隔符：黑名单只描述"名字/扩展名"，不是路径规则（否则会误以为支持目录前缀）
+  if (pattern.includes('/') || pattern.includes('\\')) return { ok: false, message: `pattern 不允许包含路径分隔符：${pattern}` };
+  if (path.isAbsolute(pattern)) return { ok: false, message: `pattern 不允许是绝对路径：${pattern}` };
+  return { ok: true, pattern };
+}
+
 export function validatePatterns(rawPatterns) {
   if (!Array.isArray(rawPatterns)) return { ok: false, message: 'patterns 必须是字符串数组' };
   if (rawPatterns.length > MAX_PATTERNS) return { ok: false, message: `patterns 最多 ${MAX_PATTERNS} 条` };
 
   const patterns = [];
   for (const raw of rawPatterns) {
-    if (typeof raw !== 'string') return { ok: false, message: 'patterns 里每一项都必须是字符串' };
-    const pattern = raw.trim();
-    if (pattern.length === 0) return { ok: false, message: 'patterns 里不允许空字符串' };
-    if (pattern.length > MAX_PATTERN_LENGTH) return { ok: false, message: `单条 pattern 最多 ${MAX_PATTERN_LENGTH} 字符` };
-    // 绝对路径与分隔符：黑名单只描述"名字/扩展名"，不是路径规则（否则会误以为支持目录前缀）
-    if (pattern.includes('/') || pattern.includes('\\')) return { ok: false, message: `pattern 不允许包含路径分隔符：${pattern}` };
-    if (path.isAbsolute(pattern)) return { ok: false, message: `pattern 不允许是绝对路径：${pattern}` };
-    if (!patterns.includes(pattern)) patterns.push(pattern);
+    const checked = validateOnePattern(raw);
+    if (!checked.ok) return checked;
+    if (!patterns.includes(checked.pattern)) patterns.push(checked.pattern);
   }
   return { ok: true, patterns };
 }

@@ -22,13 +22,44 @@ const formats = ref([]);
 const formatId = ref('zip');
 const mode = ref(COMPRESS_MODE.SINGLE);
 const keepOriginal = ref(true);
+// 黑名单开关（docs/11 §九、docs/04 §五）：默认开；关掉=本次压缩不做任何跳过
+// 注意「重启后恢复默认」：全局层的开关不落盘（安全默认），这里只是本次任务级开关
+const blacklistEnabled = ref(true);
+const skipInfo = ref({ count: 0, patterns: [], layers: [] });
+const previewToken = ref(0);
 const submitting = ref(false);
 const errorText = ref('');
 
 const modeOptions = [COMPRESS_MODE.SINGLE, COMPRESS_MODE.BUNDLE];
 const canSubmit = computed(() => props.sources.length > 0 && !submitting.value);
 
-// 打开时拉一次格式列表（可用性由服务端判定，前端不猜）
+/**
+ * 命中预览（POST /blacklist/preview）：告诉用户"这次会有几个文件被跳过"。
+ * 为什么用 token：打开抽屉后用户可能连续改选择，慢请求返回晚就会覆盖新结果。
+ * 预览失败不阻断压缩（它只是提示），所以这里静默降级为"没有跳过项"。
+ */
+async function runPreview() {
+  const token = previewToken.value + 1;
+  previewToken.value = token;
+  if (!blacklistEnabled.value || props.sources.length === 0) {
+    skipInfo.value = { count: 0, patterns: [], layers: [] };
+    return;
+  }
+  try {
+    const previewDoc = await api.post('/blacklist/preview', { paths: props.sources.map((source) => source.path), extraPatterns: [] });
+    if (token !== previewToken.value) return; // 已有更新的请求，丢弃旧结果
+    const skipped = (previewDoc && previewDoc.skipped) || [];
+    skipInfo.value = {
+      count: skipped.length,
+      patterns: [...new Set(skipped.map((item) => item.pattern))],
+      layers: [...new Set(skipped.map((item) => item.layer))],
+    };
+  } catch {
+    if (token === previewToken.value) skipInfo.value = { count: 0, patterns: [], layers: [] };
+  }
+}
+
+// 打开时拉一次格式列表（可用性由服务端判定，前端不猜）+ 跑一次命中预览
 watch(
   () => props.open,
   async (open) => {
@@ -42,8 +73,13 @@ watch(
     } catch (error) {
       errorText.value = `[${error.code || 'ERROR'}] ${error.message}`;
     }
+    await runPreview();
   },
 );
+
+// 选择变化/开关切换 → 重算提示（关掉黑名单时提示必须消失，否则会误导）
+watch(() => props.sources, () => { void runPreview(); });
+watch(blacklistEnabled, () => { void runPreview(); });
 
 async function submit() {
   if (!canSubmit.value) return;
@@ -54,7 +90,11 @@ async function submit() {
       sources: props.sources.map((source) => source.path),
       mode: mode.value,
       format: formatId.value,
-      options: { keepOriginal: keepOriginal.value },
+      options: {
+        keepOriginal: keepOriginal.value,
+        // 任务级开关：false = 本次不做任何黑名单跳过（三层全部不生效）
+        blacklist: { enabled: blacklistEnabled.value },
+      },
     });
     emit('submitted', created.task.id);
   } catch (error) {
@@ -111,6 +151,27 @@ async function submit() {
           <input v-model="keepOriginal" type="checkbox" data-testid="keep-original" />
           <span>保留原文件（推荐；不勾选则在**校验通过后**按 delete.mode 处理）</span>
         </label>
+
+        <fieldset class="field">
+          <legend>黑名单</legend>
+          <label class="field__option">
+            <input v-model="blacklistEnabled" type="checkbox" data-testid="blacklist-enabled" />
+            <span>启用黑名单（跳过已压缩格式，如 jpg/mp4/zip/docx）</span>
+          </label>
+          <!-- 全局层的开关不落盘：这是安全默认，必须让用户知道，别以为是 bug -->
+          <p class="field__hint">
+            默认开启；<b>重启服务后恢复默认</b>（关掉全局保护是临时决定，不该被静默记住）。
+          </p>
+          <p
+            v-if="blacklistEnabled && skipInfo.count > 0"
+            class="field__hint"
+            data-testid="blacklist-skip-hint"
+            :title="`命中规则：${skipInfo.patterns.join('、')}（层：${skipInfo.layers.join('、')}）`"
+          >
+            <span class="badge">{{ skipInfo.count }} 个文件已跳过（已压缩格式）</span>
+            这些文件不会进压缩包，也不会被「删除原文件」删掉。
+          </p>
+        </fieldset>
 
         <p v-if="errorText" class="login-form__error" data-testid="compress-error" role="alert">{{ errorText }}</p>
       </div>

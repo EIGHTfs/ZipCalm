@@ -36,6 +36,26 @@ export default async function blacklistRoutes(app) {
    * 契约：data.skipped[] = { path, pattern, layer }（**userPath**，绝不带 absPath）；data.kept[] 只给路径。
    * 路径校验逐个走 fsGuard.resolveReal（与 fs 路由同一套白名单 + 符号链接复核）。
    */
+  /**
+   * 单个源的预览：返回该源命中的文件与"是否还有可压的文件"。
+   * 抽出来是为了让路由本体只做"解析参数 → 逐个源调用 → 拼响应"（单函数不超 50 行）。
+   */
+  async function previewOneSource(app, rawPath, layers) {
+    if (typeof rawPath !== 'string' || rawPath.length === 0) {
+      throw apiError(ERROR_CODES.VALIDATION_FAILED, 'paths 里每一项都必须是非空字符串');
+    }
+    const resolved = await app.fsGuard.resolveReal(rawPath);
+    const files = await collectFilesUnder(resolved.absPath);
+    const skipped = [];
+    let keptFiles = 0;
+    for (const file of files) {
+      const hit = matchEntry(layers, { name: file.name, segments: file.segments });
+      if (hit) skipped.push({ path: joinUserPath(resolved.userPath, file.relative), pattern: hit.pattern, layer: hit.layer });
+      else keptFiles += 1;
+    }
+    return { skipped, keptFiles, userPath: resolved.userPath, fileCount: files.length };
+  }
+
   app.post('/blacklist/preview', { preHandler: [app.requireAuth] }, async (request, reply) => {
     const body = request.body || {};
     const rawPaths = body.paths;
@@ -49,27 +69,11 @@ export default async function blacklistRoutes(app) {
     const kept = [];
 
     for (const rawPath of rawPaths) {
-      if (typeof rawPath !== 'string' || rawPath.length === 0) {
-        throw apiError(ERROR_CODES.VALIDATION_FAILED, 'paths 里每一项都必须是非空字符串');
-      }
-      const resolved = await app.fsGuard.resolveReal(rawPath);
-      const files = await collectFilesUnder(resolved.absPath);
-      if (files.length === 0) {
-        // 空目录/不可读：不算"跳过"，如实放进 kept（真正原因由压缩预检去报）
-        kept.push(resolved.userPath);
-        continue;
-      }
-      let keptFiles = 0;
-      for (const file of files) {
-        const hit = matchEntry(layers, { name: file.name, segments: file.segments });
-        if (hit) {
-          skipped.push({ path: joinUserPath(resolved.userPath, file.relative), pattern: hit.pattern, layer: hit.layer });
-        } else {
-          keptFiles += 1;
-        }
-      }
-      // 有文件留下就算 kept；整源都被跳过时不放进 kept（前端据此提示"该目录没有可压缩文件"）
-      if (keptFiles > 0) kept.push(resolved.userPath);
+      const one = await previewOneSource(app, rawPath, layers);
+      skipped.push(...one.skipped);
+      // 空目录/不可读：不算"跳过"，如实放进 kept（真正原因由压缩预检去报）；
+      // 有文件留下也算 kept；整源都被跳过时不放进 kept（前端据此提示"该目录没有可压缩文件"）
+      if (one.fileCount === 0 || one.keptFiles > 0) kept.push(one.userPath);
     }
 
     reply.ok({ skipped, kept });
