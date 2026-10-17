@@ -121,6 +121,10 @@ async function createTaskLayer({ config, logger }) {
     },
     // waiting_confirm 最长等待（数据模型 §八：默认 30 分钟，0=不限；非法值已在 config 层告警）
     confirmTimeoutMs: config.delete.confirmTimeoutMs,
+    // M5-F09 启动对账所需路径（trash 孤儿补记 + deleting 中断收敛）
+    trashDir: config.storage.trashDir,
+    logDir: config.storage.logDir,
+    rootAbs: config.storage.root,
   });
   const recovery = await manager.recover();
   logger.info('任务状态已加载', { ...recovery, bootId: manager.bootId });

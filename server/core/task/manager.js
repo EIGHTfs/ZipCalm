@@ -20,6 +20,7 @@
 import crypto from 'node:crypto';
 
 import { ERROR_CODES, apiError } from '../../lib/errors.js';
+import { reconcileAfterBoot } from './recovery.js';
 
 const TERMINAL_STATUSES = new Set(['done', 'failed', 'aborted', 'interrupted']);
 /** 终态中要留在 tasks.json 的（可重试）；done/aborted 写历史后移除（§六.2） */
@@ -58,6 +59,13 @@ function buildContext(deps) {
     confirmTimeoutMs: Number.isInteger(deps.confirmTimeoutMs) && deps.confirmTimeoutMs >= 0
       ? deps.confirmTimeoutMs
       : (deps.confirmTimeoutMs === 0 ? 0 : DEFAULT_CONFIRM_TIMEOUT_MS),
+    /**
+     * 启动对账所需路径（M5-F09：trash 孤儿补记 + deleting 中断收敛）。
+     * 未提供时对账跳过（单测/最小装配不受影响）。
+     */
+    recoveryPaths: deps.trashDir && deps.logDir && deps.rootAbs
+      ? { trashDir: deps.trashDir, logDir: deps.logDir, rootAbs: deps.rootAbs }
+      : null,
     /** Map<id, record>：record = {info（契约任务）、internal（绝对路径等）、runner、abortController、…} */
     tasks: new Map(),
     /** FIFO 队列（只存 id；按 createdAt 升序，§五） */
