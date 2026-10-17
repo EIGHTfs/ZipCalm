@@ -17,8 +17,15 @@ export async function writeJsonAtomic(filePath, data) {
   await fs.mkdir(dir, { recursive: true });
   const tmpPath = `${filePath}.tmp`;
   const text = `${JSON.stringify(data, null, 2)}\n`;
-  await fs.writeFile(tmpPath, text, 'utf8');
-  await fs.rename(tmpPath, filePath);
+  try {
+    await fs.writeFile(tmpPath, text, 'utf8');
+    await fs.rename(tmpPath, filePath);
+  } catch (error) {
+    // 写失败路径清理：.tmp 残留会一直存在到下次成功写，且会让「无 .tmp 残留」类
+    // 断言/体检误报产品泄漏。只清本次创建的临时文件，目标文件（旧完整版）不动。
+    await fs.rm(tmpPath, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 /**

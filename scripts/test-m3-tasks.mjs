@@ -421,7 +421,15 @@ async function main() {
     await sleep(40);
   }
   check('原子写：tasks.json 任意时刻都可被 JSON 解析', parseOk === parseSamples, `${parseOk}/${parseSamples} 次成功`);
-  check('无 .tmp 残留（rename 后不留下临时文件）', !(await pathExists(`${TASKS_FILE}.tmp`)));
+  // 轮询到稳定再断言（不能查一次就判）：节流写（500ms）+ 串行写链进行中时 .tmp 处于
+  // 「已创建、未 rename」的合法中间态，立即断言会撞上窗口误报（实测间歇失败）。
+  // 超时（3s）仍存在才 FAIL——那才可能是真正的产品侧 .tmp 泄漏（如写失败路径未清理）。
+  let tmpResidual = true;
+  for (let i = 0; i < 60 && tmpResidual; i += 1) {
+    tmpResidual = await pathExists(`${TASKS_FILE}.tmp`);
+    if (tmpResidual) await sleep(50);
+  }
+  check('无 .tmp 残留（rename 后不留下临时文件；轮询到稳定，排除节流写中间态）', !tmpResidual);
 
   // ===== 七、kill -9 + 重启恢复（硬证据 2）=====
   const killTask = await api('POST', '/compress/tasks', { sources: [API_BIG], mode: 'bundle', format: 'zip', options: { outputDir: '/m3-test' } });
