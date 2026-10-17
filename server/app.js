@@ -119,6 +119,8 @@ async function createTaskLayer({ config, logger }) {
       max: config.limits.taskRetentionMax,
       days: config.limits.taskRetentionDays,
     },
+    // waiting_confirm 最长等待（数据模型 §八：默认 30 分钟，0=不限；非法值已在 config 层告警）
+    confirmTimeoutMs: config.delete.confirmTimeoutMs,
   });
   const recovery = await manager.recover();
   logger.info('任务状态已加载', { ...recovery, bootId: manager.bootId });

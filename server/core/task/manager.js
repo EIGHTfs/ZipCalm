@@ -25,7 +25,10 @@ const TERMINAL_STATUSES = new Set(['done', 'failed', 'aborted', 'interrupted']);
 /** 终态中要留在 tasks.json 的（可重试）；done/aborted 写历史后移除（§六.2） */
 const PERSISTED_TERMINAL_STATUSES = new Set(['failed', 'interrupted']);
 /** 允许取消的 phase（§3.2 迁移表守卫条件） */
-const CANCELLABLE_PHASES = new Set(['precheck', 'scanning', 'compressing', 'extracting', 'verifying']);
+/** 允许取消的 phase（§3.2 迁移表守卫条件；契约 v2 已把 waiting_confirm 纳入——取消=放弃删除） */
+const CANCELLABLE_PHASES = new Set(['precheck', 'scanning', 'compressing', 'extracting', 'verifying', 'waiting_confirm']);
+/** waiting_confirm 默认超时（数据模型 §八：默认 1800000=30 分钟，0=不限） */
+const DEFAULT_CONFIRM_TIMEOUT_MS = 1800000;
 const PROGRESS_PUBLISH_INTERVAL_MS = 100;
 const SPEED_WINDOW_MS = 5000;
 
@@ -47,6 +50,14 @@ function buildContext(deps) {
       max: Number.isInteger(deps.retention && deps.retention.max) ? deps.retention.max : 100,
       days: Number.isFinite(deps.retention && deps.retention.days) ? deps.retention.days : 7,
     },
+    /**
+     * waiting_confirm 最长等待（数据模型 §八 / §3.3 硬要求 1）。
+     * 0 = 不超时；非法值回落默认 30 分钟（与 schema 告警口径一致）。
+     * 超时按放弃删除结算——超时绝不等于确认。
+     */
+    confirmTimeoutMs: Number.isInteger(deps.confirmTimeoutMs) && deps.confirmTimeoutMs >= 0
+      ? deps.confirmTimeoutMs
+      : (deps.confirmTimeoutMs === 0 ? 0 : DEFAULT_CONFIRM_TIMEOUT_MS),
     /** Map<id, record>：record = {info（契约任务）、internal（绝对路径等）、runner、abortController、…} */
     tasks: new Map(),
     /** FIFO 队列（只存 id；按 createdAt 升序，§五） */
@@ -283,6 +294,7 @@ function buildTaskRecord(info, input) {
     abortController: new AbortController(),
     confirmResolver: null,
     confirmPromise: null,
+    confirmTimer: null,
   };
 }
 
@@ -413,7 +425,9 @@ async function pump(ctx) {
   } catch (error) {
     if (!TERMINAL_STATUSES.has(record.info.status)) handleTaskError(ctx, nextId, error, record);
   } finally {
-    ctx.activeId = null;
+    // waiting_confirm 期间 activeId 已被让位给后续任务（见 markWaitingConfirm）；
+    // 此处只在仍是自己时才清空，避免误清新任务的 activeId。
+    if (ctx.activeId === nextId) ctx.activeId = null;
     void pump(ctx);
   }
 }
@@ -519,7 +533,9 @@ function finalizeTask(ctx, id, status, extra = {}) {
 
   if (record.confirmResolver) {
     record.confirmResolver.reject(apiError(ERROR_CODES.ABORTED, '任务已结束'));
-    record.confirmResolver = null;
+    clearConfirmState(record);
+  } else if (record.confirmTimer) {
+    clearConfirmState(record);
   }
   ctx.speedSamples.delete(id);
   ctx.lastPublishAt.delete(id);
@@ -556,12 +572,22 @@ function cancelTask(ctx, id) {
     return finalizeTask(ctx, id, 'aborted');
   }
 
+  // waiting_confirm 的取消 = 放弃删除（契约 §3.2：不回滚压缩结果，delete.status='skipped'，
+  // reason=user_cancelled，任务终态 done）。resolveConfirm 走「放弃」分支唤醒 runner，
+  // 由 orchestrator 正常收尾为 done——不经 abort（abort 会把任务错误地打成 aborted）。
+  if (info.phase === 'waiting_confirm') {
+    ctx.logger.info('waiting_confirm 任务取消 = 放弃删除', { taskId: id });
+    return resolveConfirm(ctx, id, { confirmed: false, reason: 'user_cancelled' });
+  }
+
   info.status = 'cancelling';
   info.updatedAt = now();
   record.abortController.abort();
   if (record.confirmResolver) {
     record.confirmResolver.reject(apiError(ERROR_CODES.ABORTED, '任务已取消'));
-    record.confirmResolver = null;
+    clearConfirmState(record);
+  } else if (record.confirmTimer) {
+    clearConfirmState(record);
   }
   ctx.logger.info('task cancelling', { taskId: id, phase: info.phase });
   publishTask(ctx, record, { immediate: true });
@@ -611,14 +637,42 @@ async function retryTask(ctx, id) {
 
 // ===== 二次确认删除门闩（M2 已有，保持签名） =====
 
+/**
+ * 等待二次确认（M2 门闩 + 契约 §3.3 硬要求 1/3：等待有界且不阻塞队列）。
+ *
+ * 超时语义（confirmTimeoutMs，0=不限）：到点按**放弃删除**结算（gate.confirmed=false +
+ * reason=confirm_timeout）——超时绝不等于确认。定时器在确认/放弃/超时任一出口清理，
+ * 不留泄漏（runner 返回后队列立即恢复，后续任务不再被挂起）。
+ */
 function waitConfirm(ctx, id) {
   const record = requireRecord(ctx, id);
   if (!record.confirmPromise) {
     record.confirmPromise = new Promise((resolve, reject) => {
       record.confirmResolver = { resolve, reject };
+      const timeoutMs = ctx.confirmTimeoutMs;
+      if (Number.isInteger(timeoutMs) && timeoutMs > 0) {
+        record.confirmTimer = setTimeout(() => {
+          if (record.confirmResolver !== null) {
+            record.confirmResolver = null;
+            record.confirmPromise = null;
+            ctx.logger.warn('二次确认超时，按放弃删除结算（超时不等于确认）', { taskId: id, timeoutMs });
+            resolve({ confirmed: false, at: now(), reason: 'confirm_timeout' });
+          }
+        }, timeoutMs);
+      }
     });
   }
   return record.confirmPromise;
+}
+
+/** 清理确认门闩的挂起状态（定时器 + resolver），防定时器泄漏与迟到结算 */
+function clearConfirmState(record) {
+  if (record.confirmTimer) {
+    clearTimeout(record.confirmTimer);
+    record.confirmTimer = null;
+  }
+  record.confirmResolver = null;
+  record.confirmPromise = null;
 }
 
 function resolveConfirm(ctx, id, payload = {}) {
@@ -627,10 +681,9 @@ function resolveConfirm(ctx, id, payload = {}) {
     throw apiError(ERROR_CODES.INVALID_STATE, '当前不是待确认状态', { phase: record.info.phase });
   }
   const resolver = record.confirmResolver;
-  record.confirmResolver = null;
-  record.confirmPromise = null;
+  clearConfirmState(record);
   if (payload.confirmed === false) {
-    if (resolver) resolver.resolve({ confirmed: false, at: now() });
+    if (resolver) resolver.resolve({ confirmed: false, at: now(), reason: payload.reason || 'user_cancelled' });
     return toApiTask(record);
   }
   if (resolver) {
@@ -650,6 +703,11 @@ function markWaitingConfirm(ctx, id) {
   // 该阶段任务整体仍是 running，但进度显示 100%（§3.3）
   record.info.progress.percent = 100;
   record.info.updatedAt = now();
+  // 契约 §3.3 硬要求 3「不得阻塞串行队列」：确认等待期间**让位**——释放 activeId，
+  // 队列里的下一个任务照常被 pump 执行。runner 仍挂在 waitConfirm 上，确认/取消/超时
+  // 唤醒后直接走 finalize 收尾（不再依赖 activeId）。串行语义不破坏：waiting_confirm
+  // 不是执行相位，是业务等待相位。
+  if (ctx.activeId === id) ctx.activeId = null;
   publishTask(ctx, record, { immediate: true });
   void persistNow(ctx);
   return toApiTask(record);
@@ -740,6 +798,7 @@ function restoreRecord(entry) {
     abortController: new AbortController(),
     confirmResolver: null,
     confirmPromise: null,
+    confirmTimer: null,
   };
 }
 

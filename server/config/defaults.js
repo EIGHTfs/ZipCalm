@@ -65,6 +65,12 @@ export const DEFAULT_CONFIG = {
      * 未知值 → 告警并回落 log-only（安全默认：绝不因配置写错而真删数据）。
      */
     mode: 'log-only',
+    /**
+     * waiting_confirm 最长等待（数据模型 §八 / §3.3 硬要求 1）：
+     * 默认 30 分钟；0 = 不超时；非法值（负数/非数字）→ 告警并回落默认。
+     * 超时按放弃删除结算（delete.status='skipped'，reason=confirm_timeout）——超时绝不等于确认。
+     */
+    confirmTimeoutMs: 1800000,
   },
 
   limits: {

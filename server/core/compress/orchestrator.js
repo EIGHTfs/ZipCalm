@@ -180,7 +180,11 @@ async function awaitDeleteConfirm(manager, logger, info, skipConfirm) {
     info.delete.status = 'skipped';
     info.delete.confirmed = false;
     info.delete.deletedAt = Date.now();
-    logger.info('用户放弃删除，原文件/压缩包保持不动', { taskId: info.id });
+    // 契约 §3.2/§3.3：放弃原因区分 user_cancelled（用户取消）/ confirm_timeout（超时）；
+    // 两者任务终态都是 done（不回滚压缩结果）——runner 正常返回，由调用方 finalize('done')。
+    const reason = gate.reason === 'confirm_timeout' ? 'confirm_timeout' : 'user_cancelled';
+    info.delete.skipReason = reason;
+    logger.info('删除确认未达成，原文件/压缩包保持不动', { taskId: info.id, reason });
     return false;
   }
   assertExpectedCountsMatch(gate, info.delete.targets);

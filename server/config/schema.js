@@ -143,10 +143,14 @@ function validateCompress(config, errors) {
 
 function validateDelete(config, warnings) {
   if (!requireSection(config, 'delete', [])) return;
-  const { mode } = config.delete;
+  const { mode, confirmTimeoutMs } = config.delete;
   // 契约：未知值只告警并回落 log-only（回落动作由删除服务执行），这里不拦
   if (!['log-only', 'trash'].includes(mode)) {
     warnings.push(`delete.mode 只能是 log-only 或 trash，当前 "${String(mode)}" 将回落为 log-only`);
+  }
+  // 契约 §八：confirmTimeoutMs 非法值 → 告警并回落默认（回落动作由消费方执行），这里不拦
+  if (confirmTimeoutMs !== undefined && (typeof confirmTimeoutMs !== 'number' || !Number.isInteger(confirmTimeoutMs) || confirmTimeoutMs < 0)) {
+    warnings.push(`delete.confirmTimeoutMs 必须是非负整数毫秒，当前 "${String(confirmTimeoutMs)}" 将回落为默认值 1800000`);
   }
 }
 
