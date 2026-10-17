@@ -13,9 +13,11 @@
 //
 // 退出码：0 = 通过；1 = 发现越界 import 或规则表失效（收口文件不存在）。
 
-import fs from 'node:fs';
+import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { pathExists } from './helpers/script-env.mjs';
 
 // ===== 路径（全部由脚本自身位置推导，不写死绝对路径）=====
 
@@ -68,12 +70,12 @@ const IMPORT_PATTERNS = [
 
 // ===== 工具函数 =====
 
-/** 递归收集待扫描文件（返回绝对路径数组） */
-function collectFiles(dir) {
+/** 递归收集待扫描文件（返回绝对路径数组）；目录读不到直接抛错（门禁不能静默放过） */
+async function collectFiles(dir) {
   const collected = [];
   let entries;
   try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
+    entries = await fsp.readdir(dir, { withFileTypes: true });
   } catch (error) {
     throw new Error(`无法读取目录 ${dir}：${error.message}`);
   }
@@ -81,7 +83,7 @@ function collectFiles(dir) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       if (IGNORED_DIRS.has(entry.name)) continue;
-      collected.push(...collectFiles(full));
+      collected.push(...(await collectFiles(full)));
     } else if (entry.isFile() && SCAN_EXTENSIONS.has(path.extname(entry.name))) {
       collected.push(full);
     }
@@ -117,9 +119,12 @@ function toProjectRelative(absPath) {
 
 // ===== 主流程 =====
 
-function main() {
+async function main() {
   // 0) 规则表自检：收口文件必须存在，否则规则已失效（换了文件名却没更新门禁 = 静默失去保护）
-  const staleRules = RULES.filter((rule) => !fs.existsSync(path.join(PROJECT_ROOT, rule.allowed)));
+  const staleRules = [];
+  for (const rule of RULES) {
+    if (!(await pathExists(path.join(PROJECT_ROOT, rule.allowed)))) staleRules.push(rule);
+  }
   if (staleRules.length > 0) {
     console.error('❌ 规则表失效：以下收口文件不存在，门禁无法生效（请更新 scripts/check-drift.js 的 RULES）');
     for (const rule of staleRules) {
@@ -129,13 +134,13 @@ function main() {
     return;
   }
 
-  const files = collectFiles(SCAN_ROOT);
+  const files = await collectFiles(SCAN_ROOT);
   const violations = [];
   let scannedImports = 0;
 
   for (const file of files) {
     const relative = toProjectRelative(file);
-    const source = stripComments(fs.readFileSync(file, 'utf8'));
+    const source = stripComments(await fsp.readFile(file, 'utf8'));
     const lines = source.split('\n');
 
     lines.forEach((line, index) => {
@@ -189,9 +194,7 @@ function main() {
   process.exitCode = 0;
 }
 
-try {
-  main();
-} catch (error) {
+main().catch((error) => {
   console.error(`❌ 库收口检查执行失败：${error.message}`);
   process.exitCode = 1;
-}
+});

@@ -164,6 +164,10 @@ function dosTimestamp(date) {
   return { time, day };
 }
 
+/** 中央目录项里这两个偏移单独具名：对象属性里的裸数字仍会被判为魔数（其余字段带 Size/Length 后缀已被豁免） */
+const ZIP_CENTRAL_EXTERNAL_ATTRS_OFFSET = 38;
+const ZIP_CENTRAL_LOCAL_HEADER_OFFSET = 42;
+
 /** ZIP 本地文件头字段偏移（ZIP APPNOTE 4.3.7） */
 const ZIP_LOCAL_FIELD = {
   signature: 0,
@@ -189,8 +193,8 @@ const ZIP_CENTRAL_FIELD = {
   compressedSize: 20,
   uncompressedSize: 24,
   nameLength: 28,
-  externalAttrs: 38,
-  localHeaderOffset: 42,
+  externalAttrs: ZIP_CENTRAL_EXTERNAL_ATTRS_OFFSET,
+  localHeaderOffset: ZIP_CENTRAL_LOCAL_HEADER_OFFSET,
 };
 
 /** ZIP 结尾记录（EOCD）字段偏移（ZIP APPNOTE 4.3.16） */

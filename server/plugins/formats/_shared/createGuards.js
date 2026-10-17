@@ -4,9 +4,8 @@
 // `tempPath`（`outputPath + '.part'`）与 `outputPath` 任一已存在就必须直接抛 TARGET_EXISTS，
 // 由总入口负责命名唯一化；格式包不许自作主张覆盖或改名。
 
-import fs from 'node:fs';
-
 import { ERROR_CODES, apiError } from '../../../lib/errors.js';
+import { pathExists } from '../../../lib/fs-probe.js';
 import { safeName } from './entrySafety.js';
 
 /**
@@ -18,10 +17,10 @@ export async function assertCreatable(ctx, isAvailable, formatId) {
   if (!(await isAvailable())) {
     throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, `${formatId} 格式当前不可用`);
   }
-  if (fs.existsSync(ctx.tempPath)) {
+  if (await pathExists(ctx.tempPath)) {
     throw apiError(ERROR_CODES.TARGET_EXISTS, '临时产物已存在', { file: safeName(ctx.tempPath) });
   }
-  if (fs.existsSync(ctx.outputPath)) {
+  if (await pathExists(ctx.outputPath)) {
     throw apiError(ERROR_CODES.TARGET_EXISTS, '目标压缩包已存在（绝不覆盖）', { file: safeName(ctx.outputPath) });
   }
 }

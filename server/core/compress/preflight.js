@@ -12,6 +12,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import { ERROR_CODES, apiError } from '../../lib/errors.js';
+import { pathExists } from '../../lib/fs-probe.js';
 
 /** 压缩估算的粗比值（M2 只用于给前端一个量级；真实压缩比由格式包 estimate 决定） */
 const ESTIMATED_OUTPUT_RATIO = 0.6;
@@ -115,7 +116,7 @@ export async function compressPreflight(deps, input) {
   const totalBytes = items.reduce((sum, item) => sum + item.size, 0);
 
   const outputDir = input.outputDir;
-  const outputExists = fs.existsSync(outputDir);
+  const outputExists = await pathExists(outputDir);
   const outputWritable = outputExists ? await isWritable(outputDir) : false;
   const freeBytes = await freeBytesOf(outputExists ? outputDir : path.dirname(outputDir));
   const requiredBytes = totalBytes * factor;
@@ -188,7 +189,7 @@ export async function extractPreflight(deps, input) {
     .reduce((sum, entry) => sum + entry.size, 0);
 
   const factor = deps.config.compress.preflightFactor;
-  const targetExists = fs.existsSync(input.targetAbsDir);
+  const targetExists = await pathExists(input.targetAbsDir);
   // 目标目录**可能尚不存在**（解压时才创建）：存在则检查它本身，否则检查其父目录。
   // 注意必须用**绝对路径**（input.targetAbsDir）做文件系统检查——早期版本误用了 API 用户路径，
   // 结果把 "/m2-test/out" 当成了文件系统根下的 /m2-test/out，误报 PERMISSION_DENIED（真实踩过）。

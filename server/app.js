@@ -7,13 +7,13 @@
 // buildApp 只按顺序把它们串起来 —— 顺序本身有讲究（见各步骤注释）。
 
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 
+import { pathExists } from './lib/fs-probe.js';
 import { createAuthStore } from './core/auth/store.js';
 import { verifyPassword } from './core/auth/password.js';
 import { createDeleteService } from './core/compress/deleter.js';
@@ -178,7 +178,7 @@ function registerShutdownHooks(app, { sseClients, manager, authStore }) {
 /** 静态前端（可选）：web/dist 存在时同源提供，浏览器地址即 API 地址，无需代理或 CORS */
 async function registerFrontend(app, { projectRoot, logger }) {
   const distDir = path.join(projectRoot, 'web', 'dist');
-  if (fs.existsSync(distDir)) {
+  if (await pathExists(distDir)) {
     await app.register(fastifyStatic, { root: distDir, prefix: '/', wildcard: false });
     logger.info('static frontend enabled', { dir: path.relative(projectRoot, distDir) });
     return;

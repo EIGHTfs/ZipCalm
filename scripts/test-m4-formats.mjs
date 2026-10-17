@@ -13,14 +13,13 @@
 //   tar.zst 本机无 zstd 命令，故先用 Node 只做 zstd 解压、再用系统的 `tar -tf` 校验 tar 层；
 // - zip-slip：zip 用手写 ZIP 记录、tar 系列用 node-tar 直接写 `../evil` 条目名。
 
-import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
 import { hashTree, prepareFixture, writeRawTar, writeRawZip } from './helpers/archive-fixtures.mjs';
 import { verifyWithExternalTools } from './helpers/m4-verify.mjs';
-import { PROJECT_ROOT, execFileAsync } from './helpers/script-env.mjs';
+import { PROJECT_ROOT, execFileAsync, pathExists, taskIdOf } from './helpers/script-env.mjs';
 import { loadRuntimeConfig } from './helpers/test-config.mjs';
 import { createReporter } from './helpers/test-report.mjs';
 
@@ -53,6 +52,12 @@ let TOKEN = null;
 // 断言/跳过/汇总统一走共用报告器（输出格式与既有套件逐字一致，test-all.sh 靠它提取总结行）
 /** HTTP 调用超时（毫秒）：服务僵死/半开连接时脚本不能永久挂住 */
 const HTTP_TIMEOUT_MS = 15000;
+/** 各场景超时：默认任务等待 / zip-slip 用例 / 子进程语法检查 / 重启服务 / 状态静置 */
+const DEFAULT_TASK_TIMEOUT_MS = 180000;
+const SLIP_TASK_TIMEOUT_MS = 30000;
+const NODE_CHECK_TIMEOUT_MS = 20000;
+const SERVICE_RESTART_TIMEOUT_MS = 90000;
+const SETTLE_MS = 300;
 const reporter = createReporter();
 const { check, skip } = reporter;
 
@@ -80,7 +85,7 @@ async function api(method, urlPath, body) {
 
 const TERMINAL = new Set(['done', 'failed', 'aborted', 'interrupted']);
 
-async function waitTask(id, timeoutMs = 180000) {
+async function waitTask(id, timeoutMs = DEFAULT_TASK_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   let last = null;
   while (Date.now() < deadline) {
@@ -93,16 +98,22 @@ async function waitTask(id, timeoutMs = 180000) {
 }
 
 // ===== 夹具 / 外部校验 / 恶意样本：都在 scripts/helpers/ 下（主脚本只留流程与断言）=====
-//   m4-fixtures.mjs —— 确定性假数据、树 hash、手写 zip/tar 恶意样本
-//   m4-verify.mjs   —— 系统 tar/7z 的交叉验证
+//   archive-fixtures.mjs —— 确定性假数据、树 hash、手写 zip/tar 恶意样本
+//   m4-verify.mjs        —— 系统 tar/7z 的交叉验证
+
+/** 哨兵文件一个都不该被写出（zip-slip 的核心证据；并发探一次即可） */
+async function noMarkersWritten(markers) {
+  const states = await Promise.all(markers.map((marker) => pathExists(marker)));
+  return states.every((exists) => !exists);
+}
 
 async function zipSlipCase(format, label, archiveAbs, markers) {
   const archiveUser = archiveAbs.replace(ROOT, '').split(path.sep).join('/');
   const created = await api('POST', '/extract/tasks', { path: archiveUser, targetDir: `${archiveUser}-out` });
-  const taskId = created.json && created.json.data && created.json.data.task && created.json.data.task.id;
-  const task = taskId ? await waitTask(taskId, 30000) : null;
+  const taskId = taskIdOf(created);
+  const task = taskId ? await waitTask(taskId, SLIP_TASK_TIMEOUT_MS) : null;
   const code = (task && task.error && task.error.code) || (created.json && created.json.error && created.json.error.code) || null;
-  const outsideClean = markers.every((marker) => !fs.existsSync(marker));
+  const outsideClean = await noMarkersWritten(markers);
   check(`zip-slip 拒绝（${format} / ${label}）`, code === 'PATH_OUT_OF_ROOT', `code=${code || 'none'} status=${task ? task.status : created.status}`);
   check(`zip-slip 目标外无写入（${format} / ${label}）`, outsideClean, `${markers.length} 个哨兵文件均不存在=${outsideClean}`);
 }
@@ -136,14 +147,14 @@ async function formatIds() {
 async function casePluginByDirectory() {
   await fsp.mkdir(PROBE_DIR, { recursive: true });
   await fsp.writeFile(path.join(PROBE_DIR, 'index.js'), PROBE_SOURCE, 'utf8');
-  await sleep(300);
+  await sleep(SETTLE_MS);
   const withProbe = await formatIds();
   check('加目录即注册：放入新目录后 /formats 自动出现（未改注册代码、未重启）', withProbe.includes('probe'), `formats=${withProbe.join(',')}`);
   const probeDetail = (await api('GET', '/formats')).json.data.formats.find((item) => item.id === 'probe');
   check('新格式元数据正确（ext/mime 均来自该目录）', Boolean(probeDetail && probeDetail.ext === '.probe' && probeDetail.mime === 'application/x-probe'), JSON.stringify(probeDetail && { ext: probeDetail.ext, mime: probeDetail.mime }));
 
   await fsp.rm(PROBE_DIR, { recursive: true, force: true });
-  await sleep(300);
+  await sleep(SETTLE_MS);
   const withoutProbe = await formatIds();
   check('删掉目录后 /formats 自动消失', !withoutProbe.includes('probe'), `formats=${withoutProbe.join(',')}`);
 }
@@ -183,7 +194,7 @@ async function caseNodeVersionGuard() {
   // 端到端：覆盖 process.versions.node 后启动 boot.js，应退出码 1 且 stderr 说清原因
   const script = "Object.defineProperty(process.versions,'node',{value:'22.10.0'});import('" + path.join(PROJECT_ROOT, 'server/boot.js').replace(/\\/g, '/') + "');";
   try {
-    await execFileAsync(process.execPath, ['-e', script], { cwd: PROJECT_ROOT, timeout: 20000 });
+    await execFileAsync(process.execPath, ['-e', script], { cwd: PROJECT_ROOT, timeout: NODE_CHECK_TIMEOUT_MS });
     check('低版本端到端：拒绝启动（预期非 0 退出）', false, '居然正常退出了');
   } catch (error) {
     const stderr = String(error.stderr || '');
@@ -195,7 +206,7 @@ async function caseNodeVersionGuard() {
 
 async function restartService(env = {}) {
   const envPrefix = Object.entries(env).map(([key, value]) => `${key}=${JSON.stringify(value)}`).join(' ');
-  await execFileAsync('bash', ['-c', `${envPrefix} bash scripts/start.sh restart`], { cwd: PROJECT_ROOT, timeout: 90000 }).catch(() => {});
+  await execFileAsync('bash', ['-c', `${envPrefix} bash scripts/start.sh restart`], { cwd: PROJECT_ROOT, timeout: SERVICE_RESTART_TIMEOUT_MS }).catch(() => {});
   for (let i = 0; i < 40; i += 1) {
     try {
       const response = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(1500) });
@@ -262,7 +273,7 @@ async function roundTrip(formatId, options = {}) {
 
   const archiveUser = pkg.outputPath;
   const archiveAbs = path.join(ROOT, ...archiveUser.split('/').filter(Boolean));
-  const archiveOk = fs.existsSync(archiveAbs) && archiveAbs.endsWith(FORMATS.find((item) => item.id === formatId).ext);
+  const archiveOk = (await pathExists(archiveAbs)) && archiveAbs.endsWith(FORMATS.find((item) => item.id === formatId).ext);
 
   const targetUser = `${API_WORK}/out-${formatId}${suffix}`;
   const extracted = await api('POST', '/extract/tasks', { path: archiveUser, targetDir: targetUser });
@@ -360,6 +371,6 @@ async function cleanupArtefacts() {
 main().catch(async (error) => {
   console.error(`脚本异常：${error && error.stack ? error.stack : error}`);
   // 异常退出也要把服务恢复到默认环境，避免留下"禁用内置 zstd"的实例
-  await execFileAsync('bash', ['-c', 'bash scripts/start.sh restart'], { cwd: PROJECT_ROOT, timeout: 90000 }).catch(() => {});
+  await execFileAsync('bash', ['-c', 'bash scripts/start.sh restart'], { cwd: PROJECT_ROOT, timeout: SERVICE_RESTART_TIMEOUT_MS }).catch(() => {});
   process.exitCode = 1;
 });

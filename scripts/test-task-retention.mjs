@@ -12,11 +12,10 @@
 // - 非终态不被清理必须在**服务运行中**验证（重启会把非终态迁成 interrupted，那就不再是非终态）。
 
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
-import { PROJECT_ROOT, execFileAsync } from './helpers/script-env.mjs';
+import { PROJECT_ROOT, execFileAsync, pathExists, taskIdOf } from './helpers/script-env.mjs';
 import { loadRuntimeConfig } from './helpers/test-config.mjs';
 import { createReporter } from './helpers/test-report.mjs';
 
@@ -38,6 +37,17 @@ let TOKEN = null;
 // 断言与汇总走共用报告器（多套脚本同一份实现；输出格式与 test-all.sh 的提取正则一致）
 /** HTTP 调用超时（毫秒）：服务僵死/半开连接时脚本不能永久挂住 */
 const HTTP_TIMEOUT_MS = 15000;
+/** 起停与健康检查：健康等待上限 / 轮询间隔 / start.sh 与 stop.sh 的超时 / 停服后静置 */
+const HEALTH_WAIT_TIMEOUT_MS = 20000;
+const HEALTH_POLL_INTERVAL_MS = 200;
+const SERVICE_SCRIPT_TIMEOUT_MS = 60000;
+const STOP_SETTLE_MS = 400;
+/** 等"第二个任务进入 running"的轮询参数；以及取消任务后的静置 */
+const RUNNING_WAIT_TIMEOUT_MS = 180000;
+const RUNNING_POLL_INTERVAL_MS = 150;
+const CANCEL_SETTLE_MS = 500;
+/** 播种的终态任务条数（与阈值 max=3 对比用） */
+const SEED_TASK_COUNT = 6;
 const reporter = createReporter();
 const { check } = reporter;
 
@@ -66,7 +76,7 @@ async function api(method, urlPath, body) {
 
 // ===== 服务控制与状态读取 =====
 
-async function waitHealthy(timeoutMs = 20000) {
+async function waitHealthy(timeoutMs = HEALTH_WAIT_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -75,13 +85,13 @@ async function waitHealthy(timeoutMs = 20000) {
     } catch {
       /* 还没起来 */
     }
-    await sleep(200);
+    await sleep(HEALTH_POLL_INTERVAL_MS);
   }
   return false;
 }
 
 async function startService() {
-  await execFileAsync('bash', ['scripts/start.sh', 'start'], { cwd: PROJECT_ROOT, timeout: 60000 }).catch(() => {});
+  await execFileAsync('bash', ['scripts/start.sh', 'start'], { cwd: PROJECT_ROOT, timeout: SERVICE_SCRIPT_TIMEOUT_MS }).catch(() => {});
   const healthy = await waitHealthy();
   // 本脚本会反复停/起服务：重启后重新登录拿新 token，避免依赖"上一轮的凭据还能用"
   if (healthy && TOKEN) {
@@ -92,8 +102,8 @@ async function startService() {
 }
 
 async function stopService() {
-  await execFileAsync('bash', ['scripts/start.sh', 'stop'], { cwd: PROJECT_ROOT, timeout: 60000 }).catch(() => {});
-  await sleep(400);
+  await execFileAsync('bash', ['scripts/start.sh', 'stop'], { cwd: PROJECT_ROOT, timeout: SERVICE_SCRIPT_TIMEOUT_MS }).catch(() => {});
+  await sleep(STOP_SETTLE_MS);
 }
 
 async function readTasks() {
@@ -156,40 +166,48 @@ async function waitTerminal(id, timeoutMs = 120000) {
   return last;
 }
 
-/**
- * 用"能真正被 API 创建"的任务驱动清理时机：
- * 先压一个小目录拿到合法 zip，再反复解压到同一目标目录 —— 第一次成功（done），
- * 之后因 overwrite=false 命中同名文件而**确定性失败**（TARGET_EXISTS），
- * 这样 done 与 failed 两种终态各触发一次"每完成一个任务后"的清理。
- */
-async function drivePruneRounds(rounds) {
+/** 先压一个小目录拿到合法 zip 产物路径（解压用例要拿它当输入） */
+async function createRetentionZip() {
   const zipped = await api('POST', '/compress/tasks', {
     sources: ['/文档'],
     mode: 'bundle',
     format: 'zip',
     options: { outputDir: '/m3-test' },
   });
-  const zipTaskId = zipped.json && zipped.json.data && zipped.json.data.task && zipped.json.data.task.id;
+  const zipTaskId = taskIdOf(zipped);
   const zipTask = zipTaskId ? await waitTerminal(zipTaskId) : null;
-  const zipUserPath = zipTask && zipTask.result && zipTask.result.packages && zipTask.result.packages[0]
-    ? zipTask.result.packages[0].outputPath
-    : null;
+  const packages = zipTask && zipTask.result && zipTask.result.packages;
+  return (packages && packages[0] && packages[0].outputPath) || null;
+}
 
+/**
+ * 反复解压到**同一个**目标目录：第一次成功（done），之后因 overwrite=false 命中同名文件而
+ * **确定性失败**（TARGET_EXISTS）—— done 与 failed 两种终态各触发一次"每完成一个任务后"的清理。
+ */
+async function runPruneRounds(zipUserPath, targetDir, rounds) {
   let done = 0;
   let failed = 0;
+  for (let index = 0; index < rounds; index += 1) {
+    const extracted = await api('POST', '/extract/tasks', { path: zipUserPath, targetDir });
+    const taskId = taskIdOf(extracted);
+    if (!taskId) continue;
+    const task = await waitTerminal(taskId);
+    if (task && task.status === 'done') done += 1;
+    if (task && task.status === 'failed') failed += 1;
+  }
+  return { done, failed };
+}
+
+/**
+ * 用"能真正被 API 创建"的任务驱动清理时机（见 runPruneRounds 的说明）。
+ * @returns {Promise<{done: number, failed: number, zipUserPath: string|null}>}
+ */
+async function drivePruneRounds(rounds) {
+  const zipUserPath = await createRetentionZip();
   // 目标目录必须每次唯一：否则上一轮的残留会让"第一次解压"也失败，done 路径就测不到
   const targetDir = `/m3-retention-out-${Date.now()}`;
-  if (zipUserPath) {
-    for (let index = 0; index < rounds; index += 1) {
-      const extracted = await api('POST', '/extract/tasks', { path: zipUserPath, targetDir });
-      const taskId = extracted.json && extracted.json.data && extracted.json.data.task && extracted.json.data.task.id;
-      if (!taskId) continue;
-      const task = await waitTerminal(taskId);
-      if (task && task.status === 'done') done += 1;
-      if (task && task.status === 'failed') failed += 1;
-    }
-  }
-  return { done, failed, zipUserPath };
+  if (!zipUserPath) return { done: 0, failed: 0, zipUserPath: null };
+  return { ...(await runPruneRounds(zipUserPath, targetDir, rounds)), zipUserPath };
 }
 /** 写运行期配置（深合并在服务端进行；这里只覆盖 limits 里的保留策略键） */
 async function patchRetentionConfig(patch) {
@@ -284,7 +302,7 @@ async function createCompressTask(source, outputDir) {
     format: 'zip',
     options: outputDir ? { outputDir } : undefined,
   });
-  return created.json && created.json.data && created.json.data.task && created.json.data.task.id;
+  return taskIdOf(created);
 }
 
 /**
@@ -295,48 +313,54 @@ async function createCompressTask(source, outputDir) {
  * 所以：起 A（大任务，跑着）+ B（排队），A 完成会触发一次清理，此刻 B 必须还在 tasks.json 里。
  * 这比"造一堆终态再观察"更贴近真实触发路径。
  */
+/**
+ * 轮询直到第二个任务进入 running（那一刻第一个任务已完成 → 触发过一次清理时机）。
+ * 超时返回 null（由调用方判失败）。
+ */
+async function waitForSecondRunning(secondId, timeoutMs = RUNNING_WAIT_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const snapshot = await countByStatus().catch(() => null);
+    const second = snapshot && snapshot.tasks.find((entry) => entry.info.id === secondId);
+    if (second && second.info.status === 'running') return snapshot;
+    await sleep(RUNNING_POLL_INTERVAL_MS);
+  }
+  return null;
+}
+
+/** 断言"非终态不被清理 + 终态积压仍在阈值内"（两条都基于同一份快照） */
+function checkNonTerminalKept(observed, secondId) {
+  const stillThere = observed.tasks.some((entry) => entry.info.id === secondId && entry.info.status === 'running');
+  check('非终态任务（running）在清理后仍在 tasks.json 中', stillThere, `failed=${observed.by.failed || 0} 总条数=${observed.total}`);
+  check('同一时刻终态积压仍被压在阈值内（failed ≤ 3）', (observed.by.failed || 0) <= 3, `failed=${observed.by.failed || 0}`);
+}
+
 async function caseNonTerminalSurvives() {
   await stopService();
   const now = Date.now();
   const records = [];
-  for (let index = 0; index < 6; index += 1) records.push(makeRecord('failed', now - index * 1000));
+  for (let index = 0; index < SEED_TASK_COUNT; index += 1) records.push(makeRecord('failed', now - index * 1000));
   await seedTasks(records);
   await patchRetentionConfig({ taskRetentionMax: 3, taskRetentionDays: 7 });
   await startService();
 
   const atBoot = await countByStatus();
-  check('启动清理把 6 条终态压到 3 条（阈值 max=3）', (atBoot.by.failed || 0) === 3, `failed=${atBoot.by.failed}`);
+  check(`启动清理把 ${SEED_TASK_COUNT} 条终态压到 3 条（阈值 max=3）`, (atBoot.by.failed || 0) === 3, `failed=${atBoot.by.failed}`);
 
   const bigDir = path.join(ROOT, 'm3-test', 'big');
-  const hasBig = fs.existsSync(bigDir);
+  const hasBig = await pathExists(bigDir);
   const source = hasBig ? '/m3-test/big' : '/文档';
   const outputDir = hasBig ? '/m3-test' : undefined;
   const firstId = await createCompressTask(source, outputDir);
   const secondId = await createCompressTask(source, outputDir);
   check('起了两个任务（A 运行 / B 排队）', Boolean(firstId && secondId), `A=${String(firstId).slice(0, 8)} B=${String(secondId).slice(0, 8)}`);
 
-  // 轮询等 B 进入 running：那一刻 A 已完成 —— A 的 finalize 正好触发过一次清理
-  const deadline = Date.now() + 180000;
-  let observed = null;
-  while (Date.now() < deadline) {
-    const snapshot = await countByStatus().catch(() => null);
-    const second = snapshot && snapshot.tasks.find((entry) => entry.info.id === secondId);
-    if (second && second.info.status === 'running') {
-      observed = snapshot;
-      break;
-    }
-    await sleep(150);
-  }
+  const observed = await waitForSecondRunning(secondId);
   check('B 进入 running（说明 A 已完成并触发过清理时机）', Boolean(observed), observed ? '' : '超时未观察到 B 运行');
-
-  if (observed) {
-    const stillThere = observed.tasks.some((entry) => entry.info.id === secondId && entry.info.status === 'running');
-    check('非终态任务（running）在清理后仍在 tasks.json 中', stillThere, `failed=${observed.by.failed || 0} 总条数=${observed.total}`);
-    check('同一时刻终态积压仍被压在阈值内（failed ≤ 3）', (observed.by.failed || 0) <= 3, `failed=${observed.by.failed || 0}`);
-  }
+  if (observed) checkNonTerminalKept(observed, secondId);
 
   if (secondId) await api('POST', `/tasks/${secondId}/cancel`, {}).catch(() => {});
-  await sleep(500);
+  await sleep(CANCEL_SETTLE_MS);
 }
 
 /** "每完成一个任务后"确实会清理：done 与 failed 两种终态各驱动一次 */
@@ -373,13 +397,14 @@ async function caseDeleteSemantics() {
 
   // 非终态 → INVALID_STATE（用长任务，确保删除时它还没结束）
   const bigDirForDelete = path.join(ROOT, 'm3-test', 'big');
+  const useBigFixture = await pathExists(bigDirForDelete); // 探一次即可，避免在对象字面量里写两遍同步探测
   const longTask = await api('POST', '/compress/tasks', {
-    sources: [fs.existsSync(bigDirForDelete) ? '/m3-test/big' : '/文档'],
+    sources: [useBigFixture ? '/m3-test/big' : '/文档'],
     mode: 'bundle',
     format: 'zip',
-    options: { outputDir: fs.existsSync(bigDirForDelete) ? '/m3-test' : undefined },
+    options: { outputDir: useBigFixture ? '/m3-test' : undefined },
   });
-  const pendingId = longTask.json && longTask.json.data && longTask.json.data.task && longTask.json.data.task.id;
+  const pendingId = taskIdOf(longTask);
   if (pendingId) {
     const pendingState = (await readTasks()).find((entry) => entry.info.id === pendingId);
     check('用于 DELETE 非终态的目标确实是活任务', Boolean(pendingState && ['queued', 'running'].includes(pendingState.info.status)), pendingState ? `status=${pendingState.info.status}` : '未在 tasks.json 中');

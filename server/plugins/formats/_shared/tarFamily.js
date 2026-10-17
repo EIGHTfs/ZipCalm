@@ -154,7 +154,7 @@ async function pluginExtract(spec, ctx) {
   const overwrite = Boolean(ctx.options && ctx.options.overwrite);
 
   const meta = await collectEntryMeta(spec, ctx.archivePath);
-  const planned = planTargets(meta.map((entryMeta, index) => ({ ...entryMeta, index })), targetDir, overwrite);
+  const planned = await planTargets(meta.map((entryMeta, index) => ({ ...entryMeta, index })), targetDir, overwrite);
   await prepareTargetDirs(planned.plan);
 
   // 第二遍：按顺序把每个条目的数据写到判定好的目标路径

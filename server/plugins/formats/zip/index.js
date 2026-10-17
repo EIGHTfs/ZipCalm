@@ -25,6 +25,8 @@ import unzipper from 'unzipper';
 
 import { ERROR_CODES, apiError } from '../../../lib/errors.js';
 import { createThrottledReporter } from '../../../lib/throttle.js';
+// 创建前置守卫（库可用 + 绝不覆盖）**各格式共用一套**——本格式不再自带一份实现
+import { assertCreatable as assertSharedCreatable } from '../_shared/createGuards.js';
 // 条目安全判定与写出**各格式共用一套**（zip-slip 防护不各写一份，见 _shared/entrySafety.js）
 import { planTargets, writePlan } from '../_shared/entrySafety.js';
 
@@ -185,17 +187,9 @@ async function collectEntries(ctx) {
 
 // ===== create（压缩）=====
 
-/** create 前置检查：库可用 + 绝不覆盖（.part 与最终产物都不许已存在，契约第 7 条） */
+/** create 前置检查：直接复用共用守卫（库可用 + 绝不覆盖），本格式不再自带一份 */
 async function assertCreatable(ctx) {
-  if (!(await available())) {
-    throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, 'zip 格式当前不可用');
-  }
-  if (fs.existsSync(ctx.tempPath)) {
-    throw apiError(ERROR_CODES.TARGET_EXISTS, '临时产物已存在', { file: safeName(ctx.tempPath) });
-  }
-  if (fs.existsSync(ctx.outputPath)) {
-    throw apiError(ERROR_CODES.TARGET_EXISTS, '目标压缩包已存在（绝不覆盖）', { file: safeName(ctx.outputPath) });
-  }
+  await assertSharedCreatable(ctx, available, 'zip');
 }
 
 /** 汇总待压总量，并建"条目名 → 大小"索引（进度需要按条目累加字节） */
@@ -217,10 +211,16 @@ function openArchivePipeline(tempPath, level) {
   return { output, archive };
 }
 
-/** 删除半成品临时文件（清理失败不掩盖原始错误） */
+/**
+ * 删除半成品临时文件。
+ * `rmSync(..., { force: true })` 对不存在的路径不算错，因此不必先 `existsSync` 探一次；
+ * 这里刻意保持**同步**语义：调用点都在事件回调（`finish(() => …)`）里，无法 await，
+ * 而"清理必须在 reject 之前完成"是调用方可依赖的性质（测试会在任务结束后立刻检查没有 .part 残留）。
+ * 清理失败不掩盖原始错误。
+ */
 function removeTempFile(tempPath) {
   try {
-    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
+    fs.rmSync(tempPath, { force: true });
   } catch {
     // 清理失败不掩盖原始错误
   }
@@ -412,7 +412,7 @@ async function extract(ctx) {
   const directory = await openArchive(ctx.archivePath);
 
   // ① 判定（写盘之前）：zip-slip + 覆盖检查，全部通过才开始写 —— 与 tar 系列共用同一套代码
-  const planned = planTargets(toSharedEntries(directory), targetDir, overwrite);
+  const planned = await planTargets(toSharedEntries(directory), targetDir, overwrite);
 
   // ② 写出
   const written = await writePlan(planned, targetDir, {

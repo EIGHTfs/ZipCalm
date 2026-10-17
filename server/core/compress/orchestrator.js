@@ -20,6 +20,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import { ERROR_CODES, apiError } from '../../lib/errors.js';
+import { pathExists } from '../../lib/fs-probe.js';
 import { toUserPath } from '../fs/safePath.js';
 import { compressPreflight, extractPreflight } from './preflight.js';
 import { assertVerified, verifyArchive } from './verify.js';
@@ -29,7 +30,7 @@ async function uniqueTargetPath(dirAbs, baseName, ext) {
   for (let attempt = 0; attempt < 1000; attempt += 1) {
     const suffix = attempt === 0 ? '' : ` (${attempt})`;
     const candidate = path.join(dirAbs, `${baseName}${suffix}${ext}`);
-    if (!fs.existsSync(candidate)) return candidate;
+    if (!(await pathExists(candidate))) return candidate;
   }
   throw apiError(ERROR_CODES.TARGET_EXISTS, '同名产物过多，无法生成不冲突的文件名', { file: `${baseName}${ext}` });
 }
@@ -42,7 +43,7 @@ export async function defaultExtractDir(archiveAbsPath) {
   for (let attempt = 0; attempt < 1000; attempt += 1) {
     const suffix = attempt === 0 ? '' : ` (${attempt})`;
     const candidate = path.join(dir, `${base}${suffix}`);
-    if (!fs.existsSync(candidate)) return candidate;
+    if (!(await pathExists(candidate))) return candidate;
   }
   throw apiError(ERROR_CODES.TARGET_EXISTS, '无法生成不冲突的解压目录', { base });
 }
@@ -187,7 +188,7 @@ async function compressOnePackage(record, deps, plugin, group, groupIndex, outpu
 
   // 上次中断遗留的 .part 必须让路：改名保留（INV-10 留证据）而不是沿用或直接删，
   // 否则本次 create() 会因 TARGET_EXISTS 失败 —— "保留 .part" 与 "可重试" 才能同时成立。
-  if (fs.existsSync(tempPath)) {
+  if (await pathExists(tempPath)) {
     const archived = `${tempPath}.interrupted-${Date.now()}`;
     await fsp.rename(tempPath, archived);
     logger.warn('发现遗留 .part，已改名保留以便重试', { taskId: info.id, archived: path.basename(archived) });

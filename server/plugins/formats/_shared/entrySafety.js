@@ -14,6 +14,7 @@ import path from 'node:path';
 import { pipelineWith } from './streams.js';
 
 import { ERROR_CODES, apiError } from '../../../lib/errors.js';
+import { pathExists } from '../../../lib/fs-probe.js';
 import { createThrottledReporter } from '../../../lib/throttle.js';
 import { normalizeUserPath } from '../../../core/fs/safePath.js';
 
@@ -74,7 +75,7 @@ export function rejectSymlink(entryName) {
  * @param {string} targetDir 目标目录（绝对路径）
  * @param {boolean} overwrite 是否允许覆盖已有同名文件
  */
-export function planTargets(entries, targetDir, overwrite) {
+export async function planTargets(entries, targetDir, overwrite) {
   const plan = [];
   let totalBytes = 0;
   let totalFiles = 0;
@@ -104,7 +105,7 @@ export function planTargets(entries, targetDir, overwrite) {
   if (!overwrite) {
     for (const plannedEntry of plan) {
       if (plannedEntry.isDir) continue;
-      if (fs.existsSync(plannedEntry.targetPath)) {
+      if (await pathExists(plannedEntry.targetPath)) {
         throw apiError(ERROR_CODES.TARGET_EXISTS, '目标目录已存在同名文件（overwrite=false）', { entry: plannedEntry.displayName });
       }
     }
@@ -141,7 +142,8 @@ export async function writePlan(planned, targetDir, options = {}) {
       await pipelineWith([plannedEntry.open(), fs.createWriteStream(plannedEntry.targetPath)], signal);
     } catch (error) {
       try {
-        if (fs.existsSync(plannedEntry.targetPath)) await fsp.unlink(plannedEntry.targetPath);
+        // force: true = 不存在也不算错（因此不需要先探一次是否存在）
+        await fsp.rm(plannedEntry.targetPath, { force: true });
       } catch {
         /* 清理失败不掩盖原始错误 */
       }

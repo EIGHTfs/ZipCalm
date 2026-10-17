@@ -75,6 +75,47 @@ export function createRegistry(options = {}) {
     }
   }
 
+  /**
+   * 单个目录 → 注册所需信息。
+   * 加载失败 / 校验不过 / id 或扩展名冲突都只记原因并返回 null（**不影响其他格式包**）。
+   * @returns {Promise<{plugin: object, exts: string[]}|null>}
+   */
+  async function registerPluginFrom(dirent) {
+    const source = `plugins/formats/${dirent.name}`;
+    const entryFile = path.join(pluginsDir, dirent.name, 'index.js');
+    let plugin;
+    try {
+      const module = await import(pathToFileURL(entryFile).href);
+      plugin = module.default || module.plugin || module;
+    } catch (error) {
+      loadFailures.push(`${source}: 加载失败 ${error.message}`);
+      logger.warn('format plugin import failed', { source, error: error.message });
+      return null;
+    }
+
+    const valid = validatePlugin(plugin, source);
+    if (!valid.ok) {
+      loadFailures.push(valid.reason);
+      logger.warn(REJECTED_LOG, { source, reason: valid.reason });
+      return null;
+    }
+
+    // id / ext 全局唯一：冲突时禁用后来者（不影响已注册的包）
+    if (byId.has(plugin.id)) {
+      loadFailures.push(`${source}: id 与已注册格式冲突（${plugin.id}）`);
+      logger.warn(REJECTED_LOG, { source, reason: `id 冲突 ${plugin.id}` });
+      return null;
+    }
+    const exts = [plugin.ext, ...(Array.isArray(plugin.extAliases) ? plugin.extAliases : [])].map((ext) => ext.toLowerCase());
+    const extConflict = exts.find((ext) => byExt.has(ext));
+    if (extConflict) {
+      loadFailures.push(`${source}: 扩展名与已注册格式冲突（${extConflict}）`);
+      logger.warn(REJECTED_LOG, { source, reason: `扩展名冲突 ${extConflict}` });
+      return null;
+    }
+    return { plugin, exts };
+  }
+
   /** 扫描插件目录并注册 */
   async function discover() {
     byId.clear();
@@ -94,41 +135,10 @@ export function createRegistry(options = {}) {
       if (!dirent.isDirectory()) continue;
       // `_shared` 之类的下划线目录是内部共享代码目录，不是格式包（约定：格式包 id 不用下划线打头）
       if (dirent.name.startsWith('_')) continue;
-      const source = `plugins/formats/${dirent.name}`;
-      const entryFile = path.join(pluginsDir, dirent.name, 'index.js');
-      let plugin;
-      try {
-        const module = await import(pathToFileURL(entryFile).href);
-        plugin = module.default || module.plugin || module;
-      } catch (error) {
-        loadFailures.push(`${source}: 加载失败 ${error.message}`);
-        logger.warn('format plugin import failed', { source, error: error.message });
-        continue;
-      }
-
-      const valid = validatePlugin(plugin, source);
-      if (!valid.ok) {
-        loadFailures.push(valid.reason);
-        logger.warn(REJECTED_LOG, { source, reason: valid.reason });
-        continue;
-      }
-
-      // id / ext 全局唯一：冲突时禁用后来者（不影响已注册的包）
-      if (byId.has(plugin.id)) {
-        loadFailures.push(`${source}: id 与已注册格式冲突（${plugin.id}）`);
-        logger.warn(REJECTED_LOG, { source, reason: `id 冲突 ${plugin.id}` });
-        continue;
-      }
-      const exts = [plugin.ext, ...(Array.isArray(plugin.extAliases) ? plugin.extAliases : [])].map((ext) => ext.toLowerCase());
-      const extConflict = exts.find((ext) => byExt.has(ext));
-      if (extConflict) {
-        loadFailures.push(`${source}: 扩展名与已注册格式冲突（${extConflict}）`);
-        logger.warn(REJECTED_LOG, { source, reason: `扩展名冲突 ${extConflict}` });
-        continue;
-      }
-
-      byId.set(plugin.id, plugin);
-      for (const ext of exts) byExt.set(ext, plugin);
+      const registered = await registerPluginFrom(dirent);
+      if (!registered) continue;
+      byId.set(registered.plugin.id, registered.plugin);
+      for (const ext of registered.exts) byExt.set(ext, registered.plugin);
     }
 
     extKeysDesc = [...byExt.keys()].sort((a, b) => b.length - a.length);
@@ -208,10 +218,9 @@ export function createRegistry(options = {}) {
   function byExtension(ext) {
     if (typeof ext !== 'string' || ext === '') return null;
     const lower = ext.toLowerCase();
-    for (const candidate of extKeysDesc) {
-      if (lower === candidate || lower.endsWith(candidate)) return byExt.get(candidate);
-    }
-    return null;
+    // extKeysDesc 已按长度降序排好：find 取到的就是最长匹配（与"逐个 endsWith 提前返回"等价）
+    const matched = extKeysDesc.find((candidate) => lower === candidate || lower.endsWith(candidate));
+    return matched ? byExt.get(matched) : null;
   }
 
   return {

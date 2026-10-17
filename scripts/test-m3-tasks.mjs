@@ -17,11 +17,10 @@
 // 注意：本脚本会 `kill -9` 本服务并重启（这是恢复语义的验收方式），请勿在有业务任务时手动运行。
 
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
-import { PROJECT_ROOT, execFileAsync } from './helpers/script-env.mjs';
+import { PROJECT_ROOT, execFileAsync, pathExists, taskIdOf } from './helpers/script-env.mjs';
 import { loadRuntimeConfig } from './helpers/test-config.mjs';
 import { createReporter } from './helpers/test-report.mjs';
 
@@ -43,6 +42,33 @@ const BIG_DIR = path.join(ROOT, 'm3-test', 'big');
 // 断言与汇总走共用报告器（多套脚本同一份实现；输出格式与 test-all.sh 的提取正则一致）
 /** HTTP 调用超时（毫秒）：服务僵死/半开连接时脚本不能永久挂住 */
 const HTTP_TIMEOUT_MS = 15000;
+
+/** 任务等待类默认值：单任务最长等多久、轮询间隔（任务状态是服务端串行队列驱动的） */
+const DEFAULT_TASK_TIMEOUT_MS = 120000;
+const TASK_POLL_INTERVAL_MS = 120;
+/** SSE 帧等待：等一帧最多多久、帧轮询间隔（帧在内存里，轮询可以更密） */
+const FRAME_WAIT_TIMEOUT_MS = 5000;
+const FRAME_POLL_INTERVAL_MS = 50;
+/** 信封异常时回传给断言的消息片段长度 */
+const ERROR_SNIPPET_CHARS = 120;
+/** 大夹具：总量（MB）与"够不够大"的判定（单文件 ≥20MB 且至少 3 个，保证任务能跑到被 kill） */
+const BIG_FIXTURE_TOTAL_MB = 90;
+const BIG_FILE_MIN_BYTES = 20 * 1024 * 1024;
+const BIG_FILE_COUNT = 3;
+/** 历史条数上限默认值（服务端配置项 limits.taskHistoryMax 的默认值） */
+const HISTORY_MAX_DEFAULT = 200;
+/** 历史文件"收敛到上限"的轮询参数 */
+const HISTORY_CONVERGE_ATTEMPTS = 10;
+const HISTORY_CONVERGE_POLL_MS = 300;
+/** 起服务：start.sh 最长跑多久、健康检查轮询多久一次/最多几次 */
+const SERVICE_START_TIMEOUT_MS = 60000;
+const HEALTH_WAIT_ATTEMPTS = 40;
+const HEALTH_POLL_INTERVAL_MS = 250;
+/** 建任务后的短暂等待（等服务端把落盘/广播做完） */
+const POST_CREATE_SETTLE_MS = 300;
+/** 重启类用例的等待：kill -9 后等进程退出、恢复历史文件后等重启就绪 */
+const KILL_SETTLE_MS = 800;
+const RESTORE_SETTLE_MS = 600;
 const reporter = createReporter();
 const { check } = reporter;
 
@@ -75,13 +101,13 @@ async function api(method, urlPath, body) {
   try {
     return { status: response.status, json: JSON.parse(text) };
   } catch {
-    return { status: response.status, json: { ok: false, error: { code: 'NO_ENVELOPE', message: text.slice(0, 120) } } };
+    return { status: response.status, json: { ok: false, error: { code: 'NO_ENVELOPE', message: text.slice(0, ERROR_SNIPPET_CHARS) } } };
   }
 }
 
 const TERMINAL = new Set(['done', 'failed', 'aborted', 'interrupted']);
 
-async function waitTask(id, timeoutMs = 120000, wanted = null) {
+async function waitTask(id, timeoutMs = DEFAULT_TASK_TIMEOUT_MS, wanted = null) {
   const startedAt = Date.now();
   let last = null;
   while (Date.now() - startedAt < timeoutMs) {
@@ -90,12 +116,31 @@ async function waitTask(id, timeoutMs = 120000, wanted = null) {
     if (!last) return null;
     if (TERMINAL.has(last.status)) return last;
     if (wanted && wanted(last)) return last;
-    await sleep(120);
+    await sleep(TASK_POLL_INTERVAL_MS);
   }
   return last;
 }
 
 // ===== SSE =====
+
+/** SSE 帧分隔符（空行）；抽成常量是为了 drainFrames 的读写一致 */
+const FRAME_SEPARATOR = '\n\n';
+
+/**
+ * 从缓冲区里取出所有**已完整**的帧并写入 frames，返回剩余的不完整缓冲。
+ * 抽出来是为了把"读流 + 拆帧"两层循环分开：嵌套少一层，两件事各自看得清。
+ */
+function drainFrames(buffer, frames) {
+  let rest = buffer;
+  let index = rest.indexOf(FRAME_SEPARATOR);
+  while (index >= 0) {
+    const frame = parseFrame(rest.slice(0, index));
+    if (frame) frames.push(frame);
+    rest = rest.slice(index + FRAME_SEPARATOR.length);
+    index = rest.indexOf(FRAME_SEPARATOR);
+  }
+  return rest;
+}
 
 /** 极简 SSE 客户端：用于断言"首帧是快照"和 seq 续传 */
 async function sseConnect(since) {
@@ -115,15 +160,7 @@ async function sseConnect(since) {
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let index = buffer.indexOf('\n\n');
-        while (index >= 0) {
-          const raw = buffer.slice(0, index);
-          buffer = buffer.slice(index + 2);
-          const frame = parseFrame(raw);
-          if (frame) frames.push(frame);
-          index = buffer.indexOf('\n\n');
-        }
+        buffer = drainFrames(buffer + decoder.decode(value, { stream: true }), frames);
       }
     } catch {
       /* 主动断开或服务被杀：正常路径 */
@@ -134,12 +171,12 @@ async function sseConnect(since) {
     frames,
     headers: { contentType: response.headers.get('content-type'), xAccel: response.headers.get('x-accel-buffering') },
     close: () => controller.abort(),
-    async waitFor(predicate, timeoutMs = 5000) {
+    async waitFor(predicate, timeoutMs = FRAME_WAIT_TIMEOUT_MS) {
       const startedAt = Date.now();
       while (Date.now() - startedAt < timeoutMs) {
         const hit = frames.find(predicate);
         if (hit) return hit;
-        await sleep(50);
+        await sleep(FRAME_POLL_INTERVAL_MS);
       }
       return null;
     },
@@ -167,14 +204,14 @@ function parseFrame(raw) {
 // ===== 夹具 =====
 
 /** 造一个"压缩耗时足够长"的夹具（随机数据不可压缩，压缩耗时可预期） */
-async function ensureBigFixture(totalMb = 90) {
+async function ensureBigFixture(totalMb = BIG_FIXTURE_TOTAL_MB) {
   await fsp.mkdir(BIG_DIR, { recursive: true });
   const existing = (await fsp.readdir(BIG_DIR)).filter((name) => name.endsWith('.bin'));
-  if (existing.length >= 3) {
+  if (existing.length >= BIG_FILE_COUNT) {
     const stat = await fsp.stat(path.join(BIG_DIR, existing[0]));
-    if (stat.size >= 20 * 1024 * 1024 && existing.length >= 3) return { reused: true };
+    if (stat.size >= BIG_FILE_MIN_BYTES && existing.length >= BIG_FILE_COUNT) return { reused: true };
   }
-  const perFile = Math.floor((totalMb * 1024 * 1024) / 3);
+  const perFile = Math.floor((totalMb * 1024 * 1024) / BIG_FILE_COUNT);
   for (const name of ['a.bin', 'b.bin', 'c.bin']) {
     const filePath = path.join(BIG_DIR, name);
     await fsp.writeFile(filePath, crypto.randomBytes(perFile));
@@ -214,9 +251,10 @@ async function cleanupTestArtifacts() {
   return removed;
 }
 
-function readPid() {
+/** 读服务 PID（异步读：脚本里大量 await 在跑，不该用同步 fs 卡事件循环） */
+async function readPid() {
   try {
-    return Number.parseInt(fs.readFileSync(PID_FILE, 'utf8').trim(), 10);
+    return Number.parseInt((await fsp.readFile(PID_FILE, 'utf8')).trim(), 10);
   } catch {
     return null;
   }
@@ -242,26 +280,26 @@ function buildProbeHistoryLine(seedLines, index) {
 }
 
 /** 轮询历史文件直到行数收敛到上限内；超时仍超标就返回超标行数（由调用方判 FAIL） */
-async function readHistoryLinesConverged(maxLines, attempts = 10) {
+async function readHistoryLinesConverged(maxLines, attempts = HISTORY_CONVERGE_ATTEMPTS) {
   let lines = await readHistoryLines();
   for (let attempt = 0; lines.length > maxLines && attempt < attempts; attempt += 1) {
-    await sleep(300);
+    await sleep(HISTORY_CONVERGE_POLL_MS);
     lines = await readHistoryLines();
   }
   return lines;
 }
 
 async function startService() {
-  await execFileAsync('bash', ['scripts/start.sh', 'start'], { cwd: PROJECT_ROOT, timeout: 60000 });
+  await execFileAsync('bash', ['scripts/start.sh', 'start'], { cwd: PROJECT_ROOT, timeout: SERVICE_START_TIMEOUT_MS });
   // 等健康检查通过
-  for (let i = 0; i < 40; i += 1) {
+  for (let i = 0; i < HEALTH_WAIT_ATTEMPTS; i += 1) {
     try {
       const response = await fetch(`${BASE}/health`);
       if (response.ok) return true;
     } catch {
       /* 还没起来 */
     }
-    await sleep(250);
+    await sleep(HEALTH_POLL_INTERVAL_MS);
   }
   return false;
 }
@@ -287,11 +325,11 @@ async function main() {
 
   const fixture = await ensureBigFixture();
   const cleaned = await cleanupTestArtifacts();
-  console.log(`    夹具：${API_BIG}（${fixture.reused ? '复用已有' : '新建'}，3×50MB 随机数据）；清理历史测试产物 ${cleaned} 个`);
+  console.log(`    夹具：${API_BIG}（${fixture.reused ? '复用已有' : '新建'}，${BIG_FILE_COUNT}×${Math.round(BIG_FIXTURE_TOTAL_MB / BIG_FILE_COUNT)}MB 随机数据）；清理历史测试产物 ${cleaned} 个`);
 
   // ===== 一、创建即落盘 + 串行队列 =====
   const first = await api('POST', '/compress/tasks', { sources: [API_BIG], mode: 'bundle', format: 'zip', options: { outputDir: '/m3-test' } });
-  const firstId = first.json && first.json.data && first.json.data.task && first.json.data.task.id;
+  const firstId = taskIdOf(first);
   check('创建压缩任务', Boolean(firstId), `HTTP ${first.status}`);
 
   const diskRightAfterCreate = JSON.parse(await fsp.readFile(TASKS_FILE, 'utf8'));
@@ -302,8 +340,8 @@ async function main() {
   );
 
   const second = await api('POST', '/compress/tasks', { sources: [API_BIG], mode: 'bundle', format: 'zip', options: { outputDir: '/m3-test' } });
-  const secondId = second.json && second.json.data && second.json.data.task && second.json.data.task.id;
-  await sleep(300);
+  const secondId = taskIdOf(second);
+  await sleep(POST_CREATE_SETTLE_MS);
   const runningState = await waitTask(firstId, 5000, (task) => task.status === 'running');
   const secondState = await waitTask(secondId, 5000, (task) => task.status === 'queued' || TERMINAL.has(task.status));
   check(
@@ -335,7 +373,7 @@ async function main() {
   );
   const lastSeqBeforeDrop = progressFrame ? progressFrame.data.seq : snapshotSeq;
   sse1.close();
-  await sleep(300);
+  await sleep(POST_CREATE_SETTLE_MS);
 
   // 断开期间任务继续跑（INV-04）：同时用 /health 证明本脚本的订阅已释放
   const healthWhileDetached = await api('GET', '/health');
@@ -383,11 +421,11 @@ async function main() {
     await sleep(40);
   }
   check('原子写：tasks.json 任意时刻都可被 JSON 解析', parseOk === parseSamples, `${parseOk}/${parseSamples} 次成功`);
-  check('无 .tmp 残留（rename 后不留下临时文件）', !fs.existsSync(`${TASKS_FILE}.tmp`));
+  check('无 .tmp 残留（rename 后不留下临时文件）', !(await pathExists(`${TASKS_FILE}.tmp`)));
 
   // ===== 七、kill -9 + 重启恢复（硬证据 2）=====
   const killTask = await api('POST', '/compress/tasks', { sources: [API_BIG], mode: 'bundle', format: 'zip', options: { outputDir: '/m3-test' } });
-  const killId = killTask.json && killTask.json.data && killTask.json.data.task && killTask.json.data.task.id;
+  const killId = taskIdOf(killTask);
   const running = await waitTask(killId, 20000, (task) => task.status === 'running' && task.phase === 'compressing');
   check('大任务进入 running/compressing（用于 kill 测试）', Boolean(running && running.status === 'running'), running ? `phase=${running.phase}` : 'timeout');
 
@@ -401,10 +439,10 @@ async function main() {
   }
   check('中断前存在正在写入的 .part', partsBeforeKill.length > 0, partsBeforeKill.join(', ') || '10s 内未出现');
 
-  const pid = readPid();
+  const pid = await readPid();
   check('读到服务 PID（用于 kill -9）', Number.isInteger(pid), `pid=${pid}`);
   if (pid) process.kill(pid, 'SIGKILL');
-  await sleep(800);
+  await sleep(KILL_SETTLE_MS);
   let portClosed = false;
   try {
     await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(1500) });
@@ -456,7 +494,7 @@ async function main() {
 
   // ===== 九、关掉浏览器任务继续跑（硬证据 1）=====
   const bgTask = await api('POST', '/compress/tasks', { sources: [API_BIG], mode: 'bundle', format: 'zip', options: { outputDir: '/m3-test' } });
-  const bgId = bgTask.json && bgTask.json.data && bgTask.json.data.task && bgTask.json.data.task.id;
+  const bgId = taskIdOf(bgTask);
   // 全程不建立 SSE（模拟"关掉浏览器"）；只等服务端自己跑完
   const bgDone = await waitTask(bgId, 180000);
   const healthAfterBg = await api('GET', '/health');
@@ -486,7 +524,7 @@ async function main() {
   check(
     'task-history.jsonl 每行可解析且收敛在上限内',
     historyParseOk && historyLines.length <= 200,
-    `${historyLines.length} 行（上限 200）`,
+    `${historyLines.length} 行（上限 ${HISTORY_MAX_DEFAULT}）`,
   );
 
   // ===== 十.1 启动即收敛（回归锁死）=====
@@ -494,7 +532,7 @@ async function main() {
   // 文件就停在上限 +1 行。旧实现只在内存里 slice 而不重写文件 → 文件要等"下一次 append"才顺带收敛，
   // 空闲实例会**永久停在 201 行**（验收方独立跑就是在这里抓到 31/1 的）。所以这里直接构造"上限+1 行"
   // 的落盘状态，再杀进程重启，断言启动过程本身就把文件收敛掉。
-  const historyMax = (runtimeConfig.limits && runtimeConfig.limits.taskHistoryMax) || 200;
+  const historyMax = (runtimeConfig.limits && runtimeConfig.limits.taskHistoryMax) || HISTORY_MAX_DEFAULT;
   const historyBackup = await fsp.readFile(HISTORY_FILE, 'utf8').catch(() => '');
   const backupLines = historyBackup.split('\n').filter((line) => line.trim().length > 0);
   const overflowLines = [];
@@ -509,9 +547,9 @@ async function main() {
     `${overflowCount} 行（上限 ${historyMax}）`,
   );
 
-  const trimPid = readPid();
+  const trimPid = await readPid();
   if (trimPid) process.kill(trimPid, 'SIGKILL');
-  await sleep(800);
+  await sleep(KILL_SETTLE_MS);
   const restartedForTrim = await startService();
   const trimmedLines = await readHistoryLinesConverged(historyMax, 6);
   check(
@@ -528,9 +566,9 @@ async function main() {
   // 只还原文件而不重启的话，内存缓存里仍是探针行，后续 append 触发收敛时会把它写回文件
   // —— "文件与缓存不一致"正是本 bug 的同类问题，测试自己不能留这个尾巴。
   if (historyBackup) await fsp.writeFile(HISTORY_FILE, historyBackup, 'utf8');
-  const restorePid = readPid();
+  const restorePid = await readPid();
   if (restorePid) process.kill(restorePid, 'SIGKILL');
-  await sleep(600);
+  await sleep(RESTORE_SETTLE_MS);
   const restartedForRestore = await startService();
   const restoredLines = await readHistoryLines();
   check('还原真实历史文件后重启：缓存与文件一致且未触发无谓重写', restartedForRestore && restoredLines.length <= historyMax, `${restoredLines.length} 行（上限 ${historyMax}）`);

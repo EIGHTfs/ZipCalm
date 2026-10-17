@@ -13,12 +13,11 @@
 // - **zip-slip**：手工构造 `../`、绝对路径、symlink 三种恶意包，断言被拒且目标目录外无写入；
 // - **删除受 delete.mode 约束**：默认 log-only 只记日志不真删 —— 断言文件仍在 + 删除日志有记录。
 
-import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import { createRandom, hashTree, walkFiles, writeRawZip } from './helpers/archive-fixtures.mjs';
-import { PROJECT_ROOT, execFileAsync } from './helpers/script-env.mjs';
+import { PROJECT_ROOT, execFileAsync, fileSizeOrZero, pathExists } from './helpers/script-env.mjs';
 import { loadRuntimeConfig } from './helpers/test-config.mjs';
 import { createReporter } from './helpers/test-report.mjs';
 
@@ -38,6 +37,9 @@ const LOGIN = { username: process.env.ZIPCALM_TEST_USER || 'admin', password: pr
 // 断言/跳过/汇总走共用报告器（多套脚本同一份实现；输出格式与 test-all.sh 的提取正则一致）
 /** HTTP 调用超时（毫秒）：服务僵死/半开连接时脚本不能永久挂住 */
 const HTTP_TIMEOUT_MS = 15000;
+/** 任务等待：单任务最长等多久、状态轮询间隔 */
+const DEFAULT_TASK_TIMEOUT_MS = 60000;
+const TASK_POLL_INTERVAL_MS = 250;
 const reporter = createReporter();
 const { check, skip } = reporter;
 
@@ -68,14 +70,14 @@ async function api(method, urlPath, body) {
 
 const TERMINAL = new Set(['done', 'failed', 'aborted', 'interrupted']);
 
-async function waitTask(id, timeoutMs = 60000) {
+async function waitTask(id, timeoutMs = DEFAULT_TASK_TIMEOUT_MS) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
     const { json } = await api('GET', `/tasks/${id}`);
     const task = json && json.data && json.data.task;
     if (!task) return null;
     if (TERMINAL.has(task.status)) return task;
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await new Promise((resolve) => setTimeout(resolve, TASK_POLL_INTERVAL_MS));
   }
   return null;
 }
@@ -165,8 +167,8 @@ async function main() {
 
   const archiveUserPath = pkg ? pkg.outputPath : `${API_WORK}/src.zip`;
   const archiveAbsPath = path.join(ROOT, ...archiveUserPath.split('/').filter(Boolean));
-  check('产物落在预期路径', fs.existsSync(archiveAbsPath), archiveUserPath);
-  check('无残留 .part 半成品', !fs.existsSync(`${archiveAbsPath}.part`));
+  check('产物落在预期路径', await pathExists(archiveAbsPath), archiveUserPath);
+  check('无残留 .part 半成品', !(await pathExists(`${archiveAbsPath}.part`)));
 
   // 3) 外部工具交叉验证（不靠自家代码自证）
   try {
@@ -253,8 +255,9 @@ async function main() {
     const evilTask = evilTaskId ? await waitTask(evilTaskId) : null;
     const rejectedCode = (evilTask && evilTask.error && evilTask.error.code) || (created.json && created.json.error && created.json.error.code) || null;
     const rejected = rejectedCode === 'PATH_OUT_OF_ROOT';
-    const outsideClean = evil.markers.every((marker) => !fs.existsSync(marker));
-    const outDirClean = !fs.existsSync(outDir) || (await fsp.readdir(outDir)).length === 0;
+    const markerStates = await Promise.all(evil.markers.map((marker) => pathExists(marker)));
+    const outsideClean = markerStates.every((exists) => !exists);
+    const outDirClean = !(await pathExists(outDir)) || (await fsp.readdir(outDir)).length === 0;
 
     check(`zip-slip 拒绝：${evil.id}`, rejected, `code=${rejectedCode || 'none'} status=${evilTask ? evilTask.status : created.status}`);
     check(`zip-slip 目标外无写入：${evil.id}`, outsideClean && outDirClean, `markers=${evil.markers.length} outDirEmpty=${outDirClean}`);
@@ -267,9 +270,11 @@ async function main() {
   const benignTaskId = benign.json && benign.json.data && benign.json.data.task && benign.json.data.task.id;
   const benignTask = benignTaskId ? await waitTask(benignTaskId) : null;
   const benignOkFile = path.join(evilRoot, 'benign-out', 'ok.txt');
+  const benignOkExists = await pathExists(benignOkFile);
   check(
     '对照：合法原始 zip 能正常解压（防假阳性）',
-    Boolean(benignTask && benignTask.status === 'done') && fs.existsSync(benignOkFile) && (await fsp.readFile(benignOkFile, 'utf8')) === 'benign-raw-zip-ok',
+    Boolean(benignTask && benignTask.status === 'done') && benignOkExists
+      && (await fsp.readFile(benignOkFile, 'utf8')) === 'benign-raw-zip-ok',
     benignTask ? `status=${benignTask.status}` : 'timeout',
   );
 
@@ -288,7 +293,7 @@ async function main() {
   const today = new Date();
   const stamp = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}`;
   const deleteLogPath = path.join(PROJECT_ROOT, 'storage', 'logs', `delete-${stamp}.jsonl`);
-  const logSizeBefore = fs.existsSync(deleteLogPath) ? (await fsp.stat(deleteLogPath)).size : 0;
+  const logSizeBefore = await fileSizeOrZero(deleteLogPath);
 
   // 输出目录必须**已存在**（服务端不会替用户静默建目录）——先建好再发任务
   const deleteOutputDir = path.join(WORK, 'del-test');
@@ -317,11 +322,11 @@ async function main() {
   const exDelTaskId = extractDelete.json && extractDelete.json.data && extractDelete.json.data.task && extractDelete.json.data.task.id;
   const exDelTask = exDelTaskId ? await waitTask(exDelTaskId) : null;
   check('解压后删除压缩包：删除阶段已执行', Boolean(exDelTask && exDelTask.delete && exDelTask.delete.status === 'logged'), exDelTask ? `delete.status=${exDelTask.delete && exDelTask.delete.status}` : 'timeout');
-  check('log-only：压缩包未被真删', fs.existsSync(archiveAbsPath), archiveUserPath);
+  check('log-only：压缩包未被真删', await pathExists(archiveAbsPath), archiveUserPath);
 
-  const logSizeAfter = fs.existsSync(deleteLogPath) ? (await fsp.stat(deleteLogPath)).size : 0;
+  const logSizeAfter = await fileSizeOrZero(deleteLogPath);
   let logLines = [];
-  if (fs.existsSync(deleteLogPath)) {
+  if (await pathExists(deleteLogPath)) {
     logLines = (await fsp.readFile(deleteLogPath, 'utf8')).trim().split('\n').filter(Boolean).slice(-4);
   }
   check('删除日志已写入（log-only 证据）', logSizeAfter > logSizeBefore && logLines.some((line) => line.includes('skipped-log-only')), `+${logSizeAfter - logSizeBefore} 字节`);
