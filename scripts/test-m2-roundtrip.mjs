@@ -311,7 +311,7 @@ async function main() {
   const delTaskId = compressDelete.json && compressDelete.json.data && compressDelete.json.data.task && compressDelete.json.data.task.id;
   const delTask = delTaskId ? await waitTask(delTaskId) : null;
   const srcStillThere = (await walkFiles(path.join(WORK, 'src'))).size === srcSnapshot;
-  check('keepOriginal=false + deleteConfirmed=true：删除阶段已执行', Boolean(delTask && delTask.delete && delTask.delete.status === 'logged'), delTask ? `delete.status=${delTask.delete && delTask.delete.status} mode=${delTask.delete && delTask.delete.mode}` : 'timeout');
+  check('keepOriginal=false + deleteConfirmed=true：删除阶段已执行', Boolean(delTask && delTask.delete && delTask.delete.status === 'skipped' && delTask.delete.mode === 'log-only'), delTask ? `delete.status=${delTask.delete && delTask.delete.status} mode=${delTask.delete && delTask.delete.mode}` : 'timeout');
   check('log-only：原文件未被真删', srcStillThere, `源文件数 ${srcSnapshot}`);
 
   const extractDelete = await api('POST', '/extract/tasks', {
@@ -321,7 +321,7 @@ async function main() {
   });
   const exDelTaskId = extractDelete.json && extractDelete.json.data && extractDelete.json.data.task && extractDelete.json.data.task.id;
   const exDelTask = exDelTaskId ? await waitTask(exDelTaskId) : null;
-  check('解压后删除压缩包：删除阶段已执行', Boolean(exDelTask && exDelTask.delete && exDelTask.delete.status === 'logged'), exDelTask ? `delete.status=${exDelTask.delete && exDelTask.delete.status}` : 'timeout');
+  check('解压后删除压缩包：删除阶段已执行', Boolean(exDelTask && exDelTask.delete && exDelTask.delete.status === 'skipped' && exDelTask.delete.mode === 'log-only'), exDelTask ? `delete.status=${exDelTask.delete && exDelTask.delete.status}` : 'timeout');
   check('log-only：压缩包未被真删', await pathExists(archiveAbsPath), archiveUserPath);
 
   const logSizeAfter = await fileSizeOrZero(deleteLogPath);

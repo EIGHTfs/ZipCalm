@@ -204,7 +204,9 @@ function applyDeleteOutcome(info, deleteOutcome) {
   info.delete.deletedAt = Date.now();
   info.delete.status = deleteOutcome.failed.length > 0
     ? 'failed'
-    : (deleteOutcome.mode === 'log-only' ? 'logged' : 'deleted');
+    // F-08（契约 §2.2 枚举收敛）：log-only 模式映射回 skipped（reason 标 log-only），
+    // 'logged' 是契约外枚举值，不再产出；log-only 的记账细节在删除日志（action=skipped-log-only）
+    : 'skipped';
   info.delete.error = deleteOutcome.failed.length > 0
     ? { code: deleteOutcome.failed[0].code, message: '删除失败' }
     : null;

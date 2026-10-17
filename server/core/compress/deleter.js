@@ -62,13 +62,49 @@ async function skipInLogOnly(ctx, input, target, deleteRecord, base) {
   ctx.logger.info('删除动作被 log-only 模式拦下（文件未动）', { taskId: input.taskId, source: target.userPath });
 }
 
-/** trash：移动到回收站（保留相对结构，可恢复） */
+/**
+ * EXDEV 回退（跨分区）：copyFile → size 校验 → 原件 rename 进回收站的 `.cross-device/`
+ * 暂存位（同分区，秒级）。**全程零 unlink**——复制校验失败时只清理本次新建的不完整副本，
+ * 原件原地不动，绝不走直接删除。
+ *
+ * 为什么原件也要再挪一步而不是 copy 后留在原地：trash 语义是"原件已入回收站可恢复"，
+ * 若 copy 成功但原件留在源目录，任务 delete.status=deleted 与磁盘状态不一致（文件还在）。
+ * `.cross-device/` 暂存位与 batchId 同区，恢复路径一致。
+ */
+async function moveCrossDevice(ctx, target, destination) {
+  const sourceStat = await fsp.stat(target.absPath);
+  await fsp.copyFile(target.absPath, destination);
+  const copiedStat = await fsp.stat(destination);
+  if (Number(copiedStat.size) !== Number(sourceStat.size)) {
+    // 校验失败：destination 是本次新建的副本，可安全移除；原件不动
+    await fsp.rm(destination, { force: true }).catch(() => {});
+    throw Object.assign(new Error('跨分区复制校验失败（size 不一致）'), { code: 'INTERNAL_ERROR' });
+  }
+  const stagingDir = path.join(ctx.trashDir, '.cross-device');
+  await fsp.mkdir(stagingDir, { recursive: true });
+  const stagedName = `${Date.now()}-${path.basename(destination)}`;
+  await fsp.rename(target.absPath, path.join(stagingDir, stagedName));
+  ctx.logger.info('跨分区删除走 copy+verify 回退，原件已移入 .cross-device 暂存', {
+    source: target.userPath,
+    staged: stagedName,
+  });
+}
+
+/** trash：移动到回收站（保留相对结构，可恢复；跨分区走 copy+verify 回退，零 unlink） */
 async function moveToTrash(ctx, input, target, deleteRecord, base, batchId) {
   try {
     const segments = String(target.userPath || '').split('/').filter(Boolean);
     const destination = path.join(ctx.trashDir, batchId, ...segments);
     await fsp.mkdir(path.dirname(destination), { recursive: true });
-    await fsp.rename(target.absPath, destination);
+    try {
+      await fsp.rename(target.absPath, destination);
+    } catch (error) {
+      if (error && error.code === 'EXDEV') {
+        await moveCrossDevice(ctx, target, destination);
+      } else {
+        throw error;
+      }
+    }
     const trashRel = ['trash', batchId, ...segments].join('/');
     deleteRecord.deleted.push({ path: target.userPath, trashPath: trashRel });
     await recordLog(ctx, { ...base, action: 'trashed', trashPath: trashRel });
