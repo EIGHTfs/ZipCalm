@@ -317,6 +317,8 @@ function runCreateStream(ctx, fileItems, summary, stats) {
           // 契约 v2 §3.4 条款 10：实际进包条目的**源绝对路径**（进程内使用，不进 API）。
           // INV-02 删除集合的第一手依据；禁止用包内路径（entryName）反推源路径。
           entryPaths: fileItems.map((item) => item.absPath),
+          // INV-03 ⑤ 进包时快照（size 基准）：collectEntries 已 stat 过，原样带出给删除前复核
+          entryStats: fileItems.map((item) => [item.absPath, { sizeBytes: item.size }]),
         }),
       );
     };

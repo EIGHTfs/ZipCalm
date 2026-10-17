@@ -88,6 +88,43 @@ export function buildDeleteTargetsFromEntries(entryPaths, skippedAbsPaths, entry
   return { targets, excluded };
 }
 
+/**
+ * 删除执行前的 stat 复核（契约 INV-03 ⑤）：确认后逐条 stat，与进包时记录的 size 比对；
+ * 变化条目跳过（不删），**全部变化 → 整批拒删**（目录被动过，保守处理）。
+ *
+ * 快照来源：进包清单建立时的 entryStats（sizeBytes），由 collectEntries 阶段记录；
+ * 快照缺失（size=null）的条目视为「无基准可查」→ 放行（当前 zip/tar 的 size 都有记录）。
+ *
+ * @param {Array<{userPath,absPath,kind,size}>} targets 内部形状删除集合
+ * @param {Map<string,{sizeBytes:number}>} [entryStats] 进包时快照
+ * @param {() => Promise<{sizeBytes: number|null, mtimeMs: number, ino: number}>} statOne 单条 stat（注入便于测试）
+ * @returns {Promise<{kept: Array, changed: Array<{userPath,absPath,reason}>}>}
+ */
+export async function filterStaleDeleteTargets(targets, entryStats, statOne) {
+  const kept = [];
+  const changed = [];
+  for (const target of targets || []) {
+    let current = null;
+    try {
+      current = await statOne(target.absPath);
+    } catch {
+      current = null; // ENOENT / 权限等：源已不在或不可读 → 视为已变化
+    }
+    const baseline = entryStats ? entryStats.get(target.absPath) : null;
+    // 无基准（快照缺失）→ 无法判定变化，放行（不虚构拦截）
+    if (!baseline || baseline.sizeBytes === null || baseline.sizeBytes === undefined) {
+      kept.push(target);
+      continue;
+    }
+    if (!current || Number(current.sizeBytes) !== Number(baseline.sizeBytes)) {
+      changed.push({ userPath: target.userPath, absPath: target.absPath, reason: current ? 'source_changed' : 'source_gone' });
+      continue;
+    }
+    kept.push(target);
+  }
+  return { kept, changed };
+}
+
 /** 把 API 用户路径的删除目标转成删除服务入参形状 */
 function buildDeleteTargets(input) {
   return input.targets.map((target) => ({
@@ -218,6 +255,26 @@ async function stageDelete(record, input, deps) {
 
   const confirmed = await awaitDeleteConfirm(manager, logger, info, input.confirmedAtCreate === true);
   if (!confirmed) return null;
+
+  // INV-03 ⑤：确认后、删除前的最后一道复核——逐条 stat 与进包时快照比对，
+  // 变化条目跳过（reason=source_changed/source_gone），全部变化 → 整批拒删（保守）。
+  if (input.entryStats) {
+    const statOne = async (absPath) => {
+      const stat = await fsp.stat(absPath);
+      return { sizeBytes: stat.size, mtimeMs: stat.mtimeMs, ino: stat.ino };
+    };
+    const { kept, changed } = await filterStaleDeleteTargets(input.targets, input.entryStats, statOne);
+    if (changed.length > 0) {
+      logger.warn('删除前 stat 复核发现源变动', { taskId: info.id, changed: changed.map((c) => ({ path: c.userPath, reason: c.reason })) });
+      if (kept.length === 0) {
+        throw apiError(ERROR_CODES.INVALID_STATE, '全部待删条目在确认后发生变动，已整批拒绝删除', {
+          changed: changed.slice(0, 5).map((c) => c.userPath),
+        });
+      }
+      info.delete.skipped = [...(info.delete.skipped || []), ...changed.map((c) => ({ path: c.userPath, reason: c.reason }))];
+      input.targets = kept;
+    }
+  }
 
   manager.setPhase(info.id, 'deleting');
   info.delete.status = 'deleting';
@@ -388,7 +445,10 @@ async function runCompressTask(record, deps) {
   if (info.delete) {
     const allEntryPaths = createdPackages.flatMap((pkg) => pkg.entryPaths || []);
     const skippedAbsPaths = (info.result.skipped || []).map((item) => item.absPath).filter(Boolean);
-    const { targets } = buildDeleteTargetsFromEntries(allEntryPaths, skippedAbsPaths, null, (absPath) => toUserPath(rootAbs, absPath));
+    // 进包时快照（INV-03 ⑤ 的基准）：collectEntries 已对每个文件 stat 过（size 记录在条目上），
+    // 这里原样带出作为删除前复核的比对基准，不做第二次 walk。
+    const entryStats = new Map(createdPackages.flatMap((pkg) => pkg.entryStats || []));
+    const { targets } = buildDeleteTargetsFromEntries(allEntryPaths, skippedAbsPaths, entryStats, (absPath) => toUserPath(rootAbs, absPath));
     await stageDelete(record, {
       targets,
       reason: 'compress_success_verified',
@@ -396,6 +456,7 @@ async function runCompressTask(record, deps) {
       // §9.5 复核依据：调用方声明的进包清单与 skipped（absPath 坐标系，与 targets 同源）
       entryAbsPaths: allEntryPaths,
       skippedAbsPaths,
+      entryStats,
     }, deps);
   }
 

@@ -16,7 +16,8 @@ import crypto from 'node:crypto';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
-import { toApiError } from '../../lib/errors.js';
+import { toApiError, apiError, ERROR_CODES } from '../../lib/errors.js';
+import { resolveWithinRoot } from '../fs/safePath.js';
 
 const VALID_MODES = new Set(['log-only', 'trash']);
 
@@ -82,7 +83,7 @@ async function moveToTrash(ctx, input, target, deleteRecord, base, batchId) {
 
 /**
  * 执行删除（或 log-only 记账）。
- * @param {object} ctx 服务上下文（mode/logger/logDir/trashDir/projectRoot）
+ * @param {object} ctx 服务上下文（mode/logger/logDir/trashDir/projectRoot/rootAbs）
  * @param {{taskId: string, kind: 'compress'|'extract', reason: string, targets: Array<{userPath: string, absPath: string, kind: string, size?: number}>}} input
  */
 async function deleteTargets(ctx, input) {
@@ -99,7 +100,31 @@ async function deleteTargets(ctx, input) {
     logFile: path.relative(ctx.projectRoot || process.cwd(), logFile).split(path.sep).join('/'),
   };
 
-  for (const target of input.targets) {
+  // INV-06：deleter 是独立模块，不信任调用方传入的 absPath——入口对每个 userPath 重跑
+  // 白名单校验并**自行推导** absPath；与调用方传入值交叉断言，不一致按单条失败隔离
+  // （单条不整批崩，其余条目照删，避免一个坏 target 阻断整批）。
+  let verifiedTargets = input.targets;
+  if (ctx.rootAbs) {
+    verifiedTargets = [];
+    for (const target of input.targets) {
+      try {
+        const { absPath: derived } = resolveWithinRoot(ctx.rootAbs, target.userPath);
+        if (target.absPath && derived !== target.absPath) {
+          throw apiError(ERROR_CODES.PATH_OUT_OF_ROOT, 'absPath 与 userPath 推导结果不一致', {
+            userPath: target.userPath,
+            callerAbsPath: target.absPath,
+          });
+        }
+        verifiedTargets.push({ ...target, absPath: derived });
+      } catch (error) {
+        const code = toApiError(error).code;
+        deleteRecord.failed.push({ path: target.userPath, code });
+        ctx.logger.error('删除目标未通过白名单校验，该条目被隔离', { taskId: input.taskId, source: target.userPath, code });
+      }
+    }
+  }
+
+  for (const target of verifiedTargets) {
     const base = logBaseOf(ctx, input, target, ts, batchId);
     if (ctx.mode === 'log-only') {
       await skipInLogOnly(ctx, input, target, deleteRecord, base);
@@ -124,6 +149,8 @@ export function createDeleteService(options) {
     logDir: options.logDir,
     trashDir: options.trashDir,
     projectRoot: options.projectRoot,
+    // 存储根（INV-06：入口白名单复核与 absPath 自推导的基准）；未传时跳过复核保持向后兼容
+    rootAbs: options.rootAbs,
   };
 
   return {

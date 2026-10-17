@@ -137,6 +137,7 @@ async function createCompressLayer({ config, logger, projectRoot, manager }) {
     logDir: config.storage.logDir,
     trashDir: config.storage.trashDir,
     projectRoot,
+    rootAbs: config.storage.root,
   });
   const orchestrator = createOrchestrator({
     config,
