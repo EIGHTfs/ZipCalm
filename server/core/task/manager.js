@@ -453,6 +453,11 @@ function setPhase(ctx, id, phase) {
  * 语义：A 的 runner 在进入 deleting 前调用本函数，直到 activeId 空闲（或又是自己）才返回；
  * orchestrator 拿到槽位后立即 setPhase('deleting') 并执行删除。确认 HTTP 请求**不挂起**
  * （确认只做 gate resolve；等待发生在 runner 内部，与方案 2 的差异点）。
+ *
+ * 前提（已知边界，将来排查从这里看起）：本函数是无上限轮询（50ms 间隔），**依赖
+ * activeId 一定会被释放**——pump 的 finally 保证正常/异常路径都清 activeId，但若某个
+ * runner 卡死在非异步阻塞上（activeId 永不释放），本函数会永久轮询且不响应取消。
+ * 该形态属于「runner 卡死」这一前置缺陷的放大，本函数不做超时兜底（谁卡死谁负责）。
  */
 function waitForExecutionSlot(ctx, id) {
   return new Promise((resolve) => {
@@ -855,10 +860,19 @@ async function recoverTasks(ctx) {
     }
     ctx.tasks.set(record.info.id, record);
   }
+  // M5-F09 启动对账：trash 孤儿批次补记 + deleting 中断的 delete.status 收敛。
+  // 依赖注入缺失（单测/旧装配）时跳过，不阻断恢复主流程。
+  let reconciliation = null;
+  if (ctx.recoveryPaths) {
+    reconciliation = await reconcileAfterBoot(
+      { ...ctx.recoveryPaths, logger: ctx.logger },
+      [...ctx.tasks.values()],
+    );
+  }
   await persistNow(ctx);
   // 启动时按保留策略清一次（非终态刚被迁为 interrupted，属于候选；活任务不受影响）
   const pruned = await pruneRetention(ctx);
-  return { loaded: persisted.length, recovered, pruned };
+  return { loaded: persisted.length, recovered, pruned, reconciliation };
 }
 
 /**
