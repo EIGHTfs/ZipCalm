@@ -55,6 +55,39 @@ function archiveAbsOf(rootAbs, userPath) {
 
 // ===== 阶段一：删除（压缩删原文件 / 解压删压缩包共用）=====
 
+/**
+ * 从格式包 create() 返回的 entryPaths（契约 v2 §3.4 条款 10：实际进包条目的**源绝对路径**，
+ * 进程内使用不进 API）构造删除集合。
+ *
+ * INV-02 语义：targets = 进包条目 − skipped。**禁止**用「全部源条目」当删除集合（P-01 定时炸弹），
+ * **禁止**用包内路径反推源路径（lead 确认的第一手事实原则：collectEntries 收集时 absPath 就在手上）。
+ *
+ * @param {string[]} entryPaths 格式包返回的实际进包 absPath 清单
+ * @param {string[]} skippedAbsPaths 被跳过条目的 absPath（黑名单等；当前 M6 未接，恒空，用桩驱动测试）
+ * @param {Map<string,{sizeBytes:number,mtimeMs:number,ino:number}>} [entryStats] 批次④ stat 复核快照（同一次 walk 顺手记录；缺省按 null sizeBytes）
+ * @param {(absPath: string) => string} toUserPathOf absPath → userPath 单向转换（orchestrator 持有 root）
+ * @returns {{targets: Array<{userPath,absPath,kind,size}>, excluded: number}} 命中集合与被差集排除数
+ */
+export function buildDeleteTargetsFromEntries(entryPaths, skippedAbsPaths, entryStats, toUserPathOf) {
+  const skipped = new Set(skippedAbsPaths || []);
+  const targets = [];
+  let excluded = 0;
+  for (const absPath of entryPaths || []) {
+    if (skipped.has(absPath)) {
+      excluded += 1;
+      continue;
+    }
+    const stat = entryStats ? entryStats.get(absPath) : null;
+    targets.push({
+      userPath: toUserPathOf(absPath),
+      absPath,
+      kind: 'file',
+      size: stat ? stat.sizeBytes : 0,
+    });
+  }
+  return { targets, excluded };
+}
+
 /** 把 API 用户路径的删除目标转成删除服务入参形状 */
 function buildDeleteTargets(input) {
   return input.targets.map((target) => ({
@@ -137,7 +170,28 @@ function applyDeleteOutcome(info, deleteOutcome) {
 }
 
 /**
- * 执行删除阶段：等二次确认（除非创建时已确认）→ 调删除服务 → 回填删除状态。
+ * 契约 §9.5 集合差异复核：targets ⊆ 进包条目 − skipped，差异非空 → 抛 INVALID_STATE（整批拒删）。
+ *
+ * 与构造侧（buildDeleteTargetsFromEntries）**独立实现**，互为对方漂移的检测线：
+ * 构造侧改坏（如被改回"全部 sources"）时，这里会拦住并拒绝删除——本函数导出供单元测试
+ * 做反例自证（禁用复核 → 污染集合不再被拦 → 测试红）。
+ *
+ * @param {Array<{userPath,absPath,kind,size}>} targets 待删集合
+ * @param {string[]} entryAbsPaths 调用方声明的进包清单（absPath 坐标系）
+ * @param {string[]} [skippedAbsPaths] 被跳过条目（同样不允许进删除集合）
+ * @returns {{violations: Array<{userPath,absPath}>}} 差异明细（空数组 = 通过）
+ */
+export function checkDeleteSetAgainstEntries(targets, entryAbsPaths, skippedAbsPaths = []) {
+  const allowed = new Set(entryAbsPaths);
+  const skippedAbs = new Set(skippedAbsPaths);
+  return {
+    violations: (targets || []).filter((t) => !allowed.has(t.absPath) || skippedAbs.has(t.absPath))
+      .map((t) => ({ userPath: t.userPath, absPath: t.absPath })),
+  };
+}
+
+/**
+ * 执行删除阶段：集合差异复核（契约 §9.5）→ 等二次确认 → 调删除服务 → 回填删除状态。
  * 前置条件：调用方**必须**已经通过校验（INV-01）。
  */
 async function stageDelete(record, input, deps) {
@@ -146,6 +200,22 @@ async function stageDelete(record, input, deps) {
   if (!info.delete) return null;
 
   info.delete.targets = buildDeleteTargets(input);
+
+  // 契约 §9.5：删除前复核 targets ⊆ 进包条目 − skipped，差异非空 → 拒绝删除整批并记日志。
+  // 注意：复核对象是 **input.targets（内部形状，含 absPath）**——info.delete.targets 已被
+  // buildDeleteTargets 映射成契约形状（丢了 absPath），坐标系必须与 entryAbsPaths 一致。
+  const { violations } = checkDeleteSetAgainstEntries(input.targets, input.entryAbsPaths, input.skippedAbsPaths || []);
+  if (input.entryAbsPaths && violations.length > 0) {
+    logger.error('删除集合与进包清单存在差异，整批拒绝删除（契约 §9.5）', {
+      taskId: info.id,
+      violations: violations.map((v) => v.userPath),
+    });
+    throw apiError(ERROR_CODES.INVALID_STATE, '删除集合与实际进包条目不一致，已拒绝删除', {
+      violationCount: violations.length,
+      violations: violations.slice(0, 5).map((v) => v.userPath),
+    });
+  }
+
   const confirmed = await awaitDeleteConfirm(manager, logger, info, input.confirmedAtCreate === true);
   if (!confirmed) return null;
 
@@ -248,7 +318,12 @@ async function compressOnePackage(record, deps, plugin, group, groupIndex, outpu
     verifyStrategy: null,
   });
 
-  return { bytesIn: Number(created.bytesIn) || 0, bytesOut: Number(created.bytesOut) || 0 };
+  return {
+    bytesIn: Number(created.bytesIn) || 0,
+    bytesOut: Number(created.bytesOut) || 0,
+    // 契约 v2 §3.4 条款 10：格式包回报的实际进包条目（源绝对路径）——INV-02 删除集合依据
+    entryPaths: Array.isArray(created.entryPaths) ? created.entryPaths : [],
+  };
 }
 
 /** 打包阶段：逐个包执行，返回累计字节数 */
@@ -258,12 +333,14 @@ async function stageCompressPackages(record, deps, plugin, outputDirAbs) {
 
   let bytesIn = 0;
   let bytesOut = 0;
+  const createdPackages = [];
   for (const [groupIndex, group] of groupSourcesForCompress(record.info).entries()) {
     const created = await compressOnePackage(record, deps, plugin, group, groupIndex, outputDirAbs);
+    createdPackages.push(created);
     bytesIn += created.bytesIn;
     bytesOut += created.bytesOut;
   }
-  return { bytesIn, bytesOut };
+  return { bytesIn, bytesOut, createdPackages };
 }
 
 /** 校验阶段（INV-01）：逐个产物做完整性校验，任一不通过即抛 VERIFY_FAILED */
@@ -292,7 +369,7 @@ function summarizeCompressResult(record, bytesIn, bytesOut) {
 
 /** 压缩任务主体：只做阶段编排 */
 async function runCompressTask(record, deps) {
-  const { registry, manager } = deps;
+  const { registry, manager, rootAbs } = deps;
   const info = record.info;
   const plugin = registry.require(info.format);
 
@@ -301,22 +378,24 @@ async function runCompressTask(record, deps) {
   }
 
   const outputDirAbs = await stageCompressPrecheck(record, deps);
-  const { bytesIn, bytesOut } = await stageCompressPackages(record, deps, plugin, outputDirAbs);
+  const { bytesIn, bytesOut, createdPackages } = await stageCompressPackages(record, deps, plugin, outputDirAbs);
   await stageVerifyPackages(record, deps, plugin);
   summarizeCompressResult(record, bytesIn, bytesOut);
 
-  // 删除原文件：仅当 keepOriginal=false（管理器已据此建好 delete 状态）
+  // 删除原文件：仅当 keepOriginal=false（管理器已据此建好 delete 状态）。
+  // 删除集合 = 实际进包条目（created.entryPaths，第一手事实）− skipped（INV-02），
+  // 绝不用 info.sources 全量（未进包条目删了就是静默数据丢失）。
   if (info.delete) {
-    const targets = info.sources.map((source) => ({
-      userPath: source.path,
-      absPath: source.absPath,
-      kind: source.kind,
-      size: Number(source.sizeBytes) || 0,
-    }));
+    const allEntryPaths = createdPackages.flatMap((pkg) => pkg.entryPaths || []);
+    const skippedAbsPaths = (info.result.skipped || []).map((item) => item.absPath).filter(Boolean);
+    const { targets } = buildDeleteTargetsFromEntries(allEntryPaths, skippedAbsPaths, null, (absPath) => toUserPath(rootAbs, absPath));
     await stageDelete(record, {
       targets,
       reason: 'compress_success_verified',
       confirmedAtCreate: info.options.deleteConfirmed === true,
+      // §9.5 复核依据：调用方声明的进包清单与 skipped（absPath 坐标系，与 targets 同源）
+      entryAbsPaths: allEntryPaths,
+      skippedAbsPaths,
     }, deps);
   }
 

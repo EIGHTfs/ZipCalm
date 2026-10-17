@@ -314,6 +314,9 @@ function runCreateStream(ctx, fileItems, summary, stats) {
           bytesOut: archive.pointer(),
           durationMs: Date.now() - stats.startedAt,
           skippedSymlinks: stats.skippedSymlinks,
+          // 契约 v2 §3.4 条款 10：实际进包条目的**源绝对路径**（进程内使用，不进 API）。
+          // INV-02 删除集合的第一手依据；禁止用包内路径（entryName）反推源路径。
+          entryPaths: fileItems.map((item) => item.absPath),
         }),
       );
     };

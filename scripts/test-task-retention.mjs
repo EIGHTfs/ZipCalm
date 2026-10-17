@@ -435,6 +435,7 @@ async function main() {
   console.log('    已备份 tasks.json / config.json（结束时还原）\n');
 
   try {
+    await createBigFixture(); // 夹具自建（收尾会清理，不能依赖上次残留）
     await caseCountLimit();
     await caseTimeLimit();
     await caseConfigDriven();
@@ -447,10 +448,48 @@ async function main() {
     await restoreConfig(configBackup);
     await startService();
     console.log('\n    已还原 tasks.json / config.json 并重启服务');
+    await cleanupArtefacts();
   }
 
   const runSummary = reporter.summary();
   if (runSummary.fail > 0) process.exitCode = 1;
+}
+
+/**
+ * 收尾清理测试产物（对齐 m4 套件的做法）：
+ * - `/m3-retention-out-*`：每轮解压的目标目录（纯残留，脚本自身不依赖它跨运行存在）；
+ * - `/m3-test`：压缩产物输出目录 + 大目录夹具。历史行为是保留（后续运行的 hasBig 探测会复用
+ *   它当夹具），但代价是无限累积；现在默认清理，每次运行自行重建（createBigFixture 语义不变，
+ *   只是夹具来源从"上一次的残留"变为"本次构造"）。
+ * 设 ZIPCALM_M3_KEEP=1 可保留产物便于人工复核。
+ */
+async function cleanupArtefacts() {
+  if (process.env.ZIPCALM_M3_KEEP === '1') {
+    console.log('（ZIPCALM_M3_KEEP=1：保留测试产物便于人工复核）');
+    return;
+  }
+  const removed = [];
+  // 解压产物目录：时间戳命名，逐个清（glob 不引依赖，直接读目录名过滤前缀）
+  const names = await fsp.readdir(ROOT).catch(() => []);
+  for (const name of names) {
+    if (name.startsWith('m3-retention-out-')) {
+      await fsp.rm(path.join(ROOT, name), { recursive: true, force: true }).catch(() => {});
+      removed.push(name);
+    }
+  }
+  await fsp.rm(path.join(ROOT, 'm3-test'), { recursive: true, force: true }).catch(() => {});
+  console.log(`    已清理测试产物：m3-retention-out-* ×${removed.length}、m3-test${removed.length > 0 ? `（${removed.slice(0, 3).join(', ')}${removed.length > 3 ? ' …' : ''}）` : ''}`);
+}
+
+// 运行期构造大目录夹具（/m3-test/big）：原先依赖"上次运行残留"，改为本次自建，
+// 使"每次跑完清理"不再破坏后续运行的夹具探测逻辑。
+async function createBigFixture() {
+  const bigDir = path.join(ROOT, 'm3-test', 'big');
+  await fsp.mkdir(bigDir, { recursive: true });
+  // 三个小文件即可：非终态存活用例只需要"任务能跑一小会儿"，不需要真的大体积
+  for (const name of ['a.txt', 'b.txt', 'c.txt']) {
+    await fsp.writeFile(path.join(bigDir, name), `fixture ${name}\n`.repeat(64), 'utf8');
+  }
 }
 
 main().catch((error) => {

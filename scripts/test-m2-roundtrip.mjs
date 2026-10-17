@@ -347,6 +347,17 @@ async function main() {
 
   const runSummary = reporter.summary({ withSkip: true });
   if (runSummary.fail > 0) process.exitCode = 1;
+  await cleanupArtefacts();
+}
+
+/** 收尾清理测试产物（对齐 m4 做法）：/m2-test 整目录；设 ZIPCALM_M2_KEEP=1 可保留复核 */
+async function cleanupArtefacts() {
+  if (process.env.ZIPCALM_M2_KEEP === '1') {
+    console.log('（ZIPCALM_M2_KEEP=1：保留测试产物便于人工复核）');
+    return;
+  }
+  await fsp.rm(WORK, { recursive: true, force: true }).catch(() => {});
+  console.log('    已清理测试产物：m2-test');
 }
 
 main().catch((error) => {
