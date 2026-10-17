@@ -21,6 +21,7 @@ import path from 'node:path';
 
 import { ERROR_CODES, apiError } from '../../lib/errors.js';
 import { pathExists } from '../../lib/fs-probe.js';
+import { matchEntry } from './blacklist.js';
 import { toUserPath } from '../fs/safePath.js';
 import { compressPreflight, extractPreflight } from './preflight.js';
 import { assertVerified, verifyArchive } from './verify.js';
@@ -308,8 +309,10 @@ async function stageCompressPrecheck(record, deps) {
 
   manager.setPhase(info.id, 'precheck');
   const outputDirAbs = record.internal.outputDirAbs || path.dirname(info.sources[0].absPath);
+  // 黑名单层：与创建任务时的预检用同一套解析（enabled=false 表示整条黑名单关掉）
+  const blacklistLayers = await resolveBlacklistLayers(deps, info);
   const preflight = await compressPreflight(
-    { config, rootAbs },
+    { config, rootAbs, blacklistLayers },
     { sources: info.sources, format: info.format, mode: info.mode, outputDir: outputDirAbs },
   );
   if (!preflight.canProceed) {
@@ -324,9 +327,29 @@ async function stageCompressPrecheck(record, deps) {
       preflightFactor: preflight.preflightFactor,
     },
     packages: [],
+    // 对外视图（只有用户路径）。**运行期以打包器回报为准**：预检只是预测，
+    // 若这里也预填一次、打包时再 push 一次，就会得到翻倍重复的 skipped（实测踩过）。
     skipped: [],
   };
+  // 内部视图：absPath 只放 internal（删除集合要用它，API 响应不出现）
+  record.internal.skippedEntries = [];
   return outputDirAbs;
+}
+
+/** 解析黑名单层（deps.blacklist 缺失时按"不启用"处理：不自造隐式保护） */
+async function resolveBlacklistLayers(deps, info) {
+  if (!deps.blacklist) return [];
+  const options = (info.options && info.options.blacklist) || {};
+  return deps.blacklist.layersFor({
+    enabled: options.enabled !== false,
+    taskPatterns: Array.isArray(options.extraPatterns) ? options.extraPatterns : [],
+  });
+}
+
+/** 命中判定函数（供格式包在收集条目时调用）：返回 {pattern, layer} 或 null */
+function shouldSkipMatcher(layers) {
+  if (!layers || layers.length === 0) return null;
+  return (entry) => matchEntry(layers, entry);
 }
 
 /** 按模式分组：single=每个源一个包；bundle=全部源一个包 */
@@ -360,6 +383,7 @@ async function compressOnePackage(record, deps, plugin, group, groupIndex, outpu
   const groupFiles = group.reduce((sum, source) => sum + (Number(source.fileCount) || 0), 0);
   manager.updateProgress(info.id, { totalBytes: groupBytes, totalFiles: groupFiles, processedBytes: 0, processedFiles: 0 });
 
+  const layers = await resolveBlacklistLayers(deps, info);
   const created = await plugin.create({
     taskId: info.id,
     format: info.format,
@@ -367,9 +391,25 @@ async function compressOnePackage(record, deps, plugin, group, groupIndex, outpu
     sources: group,
     outputPath: outputAbsPath,
     tempPath,
-    options: { level: info.options.level, preserveRoot: true, signal: manager.getAbortSignal(info.id) },
+    options: {
+      level: info.options.level,
+      preserveRoot: true,
+      signal: manager.getAbortSignal(info.id),
+      // 格式包在"收集条目"阶段就跳过命中项（省 CPU/磁盘，且它们不会进 entryPaths → 不会被删）
+      shouldSkip: shouldSkipMatcher(layers),
+    },
     onProgress: (payload) => manager.updateProgress(info.id, payload),
   });
+
+  // 汇总本次包的黑名单跳过项：对外 userPath、对内 absPath（删除集合要用）
+  for (const item of created.skipped || []) {
+    record.internal.skippedEntries.push(item);
+    info.result.skipped.push({
+      path: toUserPath(rootAbs, item.absPath),
+      pattern: item.pattern,
+      layer: item.layer,
+    });
+  }
 
   // 原子落盘：.part → 正式产物（崩溃/取消不会留下"看起来正常"的半成品）
   await fsp.rename(tempPath, outputAbsPath);
@@ -454,7 +494,8 @@ async function runCompressTask(record, deps) {
   // 绝不用 info.sources 全量（未进包条目删了就是静默数据丢失）。
   if (info.delete) {
     const allEntryPaths = createdPackages.flatMap((pkg) => pkg.entryPaths || []);
-    const skippedAbsPaths = (info.result.skipped || []).map((item) => item.absPath).filter(Boolean);
+    // skipped 的 absPath 只在 internal（对外 result.skipped 只有 userPath，契约 §2.2 红线）
+    const skippedAbsPaths = (record.internal.skippedEntries || []).map((item) => item.absPath).filter(Boolean);
     // 进包时快照（INV-03 ⑤ 的基准）：collectEntries 已对每个文件 stat 过（size 记录在条目上），
     // 这里原样带出作为删除前复核的比对基准，不做第二次 walk。
     const entryStats = new Map(createdPackages.flatMap((pkg) => pkg.entryStats || []));

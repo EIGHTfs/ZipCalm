@@ -17,6 +17,7 @@ import { pathExists } from './lib/fs-probe.js';
 import { createAuthStore } from './core/auth/store.js';
 import { verifyPassword } from './core/auth/password.js';
 import { createDeleteService } from './core/compress/deleter.js';
+import { createBlacklistService } from './core/compress/blacklist.js';
 import { createOrchestrator } from './core/compress/orchestrator.js';
 import { createRegistry } from './core/compress/registry.js';
 import { createTaskEvents } from './core/task/events.js';
@@ -133,7 +134,7 @@ async function createTaskLayer({ config, logger }) {
 }
 
 /** M2 压缩层：格式注册表 → 删除服务 → 编排器（编排器要用 rootAbs，必须在 pathGuard 之后） */
-async function createCompressLayer({ config, logger, projectRoot, manager }) {
+async function createCompressLayer({ config, logger, projectRoot, manager, blacklist }) {
   const registry = createRegistry({ logger });
   await registry.discover();
 
@@ -151,6 +152,8 @@ async function createCompressLayer({ config, logger, projectRoot, manager }) {
     registry,
     manager,
     deleteService,
+    // M6：打包阶段用它解析黑名单层（与预检同一套判定）
+    blacklist,
     rootAbs: config.storage.root,
   });
 
@@ -200,12 +203,18 @@ async function registerFrontend(app, { projectRoot, logger }) {
  * 单独成函数是为了让 buildApp 只保留"顺序"这一件事（每层内部各有自己的依赖顺序）。
  */
 async function attachCompressAndTaskLayers(app, { config, logger, projectRoot }) {
+  // 黑名单：用户层落盘在 storage/blacklist-user.json（config.json 是启动期只读快照，不适合放可改设置）
+  const blacklist = createBlacklistService({ dataDir: config.storage.dataDir, logger });
+  await blacklist.loadUser(); // 启动即加载一次用户层（坏文件只告警、不影响启动）
+  app.decorate('blacklist', blacklist);
+
   const taskLayer = await createTaskLayer({ config, logger });
   const compressLayer = await createCompressLayer({
     config,
     logger,
     projectRoot,
     manager: taskLayer.manager,
+    blacklist,
   });
 
   app.decorate('m2', {

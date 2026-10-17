@@ -7,7 +7,7 @@
 # 如果先跑自管类、再跑依赖类，后者会在"服务已停"状态下整片失败。
 # 本项目在验收中真踩过两次（不是产品问题，是跑法问题），故固化成脚本。
 #
-# 固定顺序：build → start → m1/m2/m3 → stop → crash/probes/retention/m4
+# 固定顺序：build → start → m1/m2/m3 → stop → crash/probes/retention/m4 → m6（m4 之后服务仍由 m4 管着，m6 用 start.sh restart 自管）
 #
 # 用法：
 #   bash scripts/test-all.sh              # 全跑
@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}" || exit 1
 
-WANT="${*:-build m1 m2 m3 crash probes retention m4}"
+WANT="${*:-build m1 m2 m3 crash probes retention m4 m6}"
 LOGDIR="${TMPDIR:-/tmp}/zipcalm-suites"
 mkdir -p "${LOGDIR}"
 
@@ -65,6 +65,8 @@ if has crash; then run_one crash bash "${SCRIPT_DIR}/test-m3-crash-recovery.sh";
 if has probes; then run_one probes bash "${SCRIPT_DIR}/test-acceptance-probes.sh"; fi
 if has retention; then run_one retention node "${SCRIPT_DIR}/test-task-retention.mjs"; fi
 if has m4; then run_one m4 node "${SCRIPT_DIR}/test-m4-formats.mjs"; fi
+# M6：黑名单三层 + 端点 + 预检 + 「跳过项不被删」（自己管理服务？否 —— 依赖已启动的服务，放在 m4 之后）
+if has m6; then run_one m6 node "${SCRIPT_DIR}/test-m6-blacklist.mjs"; fi
 
 echo
 echo "── 汇总 ──"

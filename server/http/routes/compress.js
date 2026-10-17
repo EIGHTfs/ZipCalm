@@ -44,12 +44,19 @@ async function handleCompressTaskCreate(app, request, reply) {
     throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, `格式 ${parsed.format} 当前不可用`);
   }
 
-  // 预检已把目录展开成 size/fileCount，直接用于进度分母
-  const enriched = parsed.sources.map((source, index) => ({
-    ...source,
-    size: preflight.items[index] ? preflight.items[index].size : 0,
-    fileCount: preflight.items[index] ? preflight.items[index].fileCount : 0,
-  }));
+  // 预检已把目录展开成 size/fileCount，直接用于进度分母。
+  // willSkip 的源（整源都被黑名单跳过）不建包 —— 契约：single 模式"跳过文件不生成空压缩包"。
+  const enriched = parsed.sources
+    .map((source, index) => ({
+      ...source,
+      size: preflight.items[index] ? preflight.items[index].size : 0,
+      fileCount: preflight.items[index] ? preflight.items[index].keptFiles : 0,
+      willSkip: Boolean(preflight.items[index] && preflight.items[index].willSkip),
+    }))
+    .filter((source) => !source.willSkip);
+  if (enriched.length === 0) {
+    throw apiError(ERROR_CODES.ALL_SOURCES_SKIPPED, '没有可压缩的文件：全部命中黑名单');
+  }
 
   const task = await manager.create({
     kind: 'compress',
@@ -61,6 +68,13 @@ async function handleCompressTaskCreate(app, request, reply) {
       keepOriginal: parsed.options.keepOriginal !== false,
       deleteConfirmed: parsed.options.deleteConfirmed === true,
       bundle: parsed.mode === 'bundle',
+      // 黑名单意图随任务落盘：打包阶段要按同一份意图重新解析（用户可能在创建后改过用户层）
+      blacklist: {
+        enabled: !parsed.options.blacklist || parsed.options.blacklist.enabled !== false,
+        extraPatterns: (parsed.options.blacklist && Array.isArray(parsed.options.blacklist.extraPatterns))
+          ? parsed.options.blacklist.extraPatterns
+          : [],
+      },
     },
     // 绝对路径只走 internal（不会出现在 API 响应里）
     internal: { outputDirAbs: parsed.outputDirAbs },
@@ -196,8 +210,14 @@ function fsStat(target) {
 }
 
 async function compressPreflightFor(app, parsed) {
+  // 黑名单层在这里解析一次：预检与（随后的）打包必须用同一套判定语义
+  const blacklist = parsed.options.blacklist || {};
+  const layers = await app.blacklist.layersFor({
+    enabled: blacklist.enabled !== false,
+    taskPatterns: Array.isArray(blacklist.extraPatterns) ? blacklist.extraPatterns : [],
+  });
   return compressPreflight(
-    { config: app.m2.config, rootAbs: app.fsContext.rootAbs },
+    { config: app.m2.config, rootAbs: app.fsContext.rootAbs, blacklistLayers: layers },
     {
       sources: parsed.sources,
       format: parsed.format,

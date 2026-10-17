@@ -12,6 +12,8 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import { ERROR_CODES, apiError } from '../../lib/errors.js';
+import { matchEntry } from './blacklist.js';
+import { collectFilesUnder } from './sourceWalk.js';
 import { pathExists } from '../../lib/fs-probe.js';
 
 /** 压缩估算的粗比值（M2 只用于给前端一个量级；真实压缩比由格式包 estimate 决定） */
@@ -86,8 +88,60 @@ async function collectSourceItems(sources) {
   return items;
 }
 
+/**
+ * 给每个源标注"是否会被整体跳过"，并汇总被跳过的文件清单。
+ *
+ * 为什么跳过项要从"待压字节"里扣掉：它们根本不会进包（不耗压缩 CPU、不占产物空间），
+ * 若仍按 totalBytes 做 2 倍空间判定，会出现"明明只剩几个文本文件，却因为目录里有 100GB 视频被拒"。
+ *
+ * @param {Array} items collectSourceItems 的结果
+ * @param {Array} sources 与 items 同序的源（要 absPath）
+ * @param {Array} layers resolveLayers 的结果（空数组 = 黑名单关闭）
+ * @returns {Promise<{items: Array, skipped: Array<{path: string, pattern: string, layer: string}>, skippedBytes: number}>}
+ */
+async function annotateWithBlacklist(items, sources, layers) {
+  const skipped = [];
+  let skippedBytes = 0;
+  const annotated = [];
+
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    const source = sources[index];
+    const next = { ...item, willSkip: false, skipReason: null, keptFiles: Number(item.fileCount) || 0 };
+    annotated.push(next);
+    if (!item.exists || !source || layers.length === 0) continue;
+
+    const files = await collectFilesUnder(source.absPath);
+    let keptFiles = 0;
+    for (const file of files) {
+      const hit = matchEntry(layers, { name: file.name, segments: file.segments });
+      if (!hit) {
+        keptFiles += 1;
+        continue;
+      }
+      skipped.push({ path: joinUserPath(item.path, file.relative), pattern: hit.pattern, layer: hit.layer });
+      skippedBytes += Number(file.size) || 0;
+    }
+    next.keptFiles = keptFiles;
+    // 整个源都被跳过（且确实有文件）：前端据此提示"该目录没有可压缩文件"，single 模式据此不建空包
+    if (files.length > 0 && keptFiles === 0) {
+      next.willSkip = true;
+      next.skipReason = 'blacklisted';
+    }
+  }
+
+  return { items: annotated, skipped, skippedBytes };
+}
+
+/** 用户路径拼接（POSIX 风格；relative 为空表示源本身就是文件） */
+function joinUserPath(base, relative) {
+  if (!relative) return base;
+  const prefix = base === '/' ? '' : String(base).replace(/\/$/, '');
+  return `${prefix}/${relative}`;
+}
+
 /** 压缩预检的拦截判定（顺序即优先级：不存在 > 不可读 > 目录不存在 > 不可写 > 空间不足） */
-function compressBlockedReason({ items, outputExists, outputWritable, freeBytes, requiredBytes, factor }) {
+function compressBlockedReason({ items, outputExists, outputWritable, freeBytes, requiredBytes, factor, totalBytes, keptBytes }) {
   const missing = items.filter((item) => !item.exists);
   const unreadable = items.filter((item) => item.exists && !item.readable);
 
@@ -96,6 +150,10 @@ function compressBlockedReason({ items, outputExists, outputWritable, freeBytes,
   // 输出目录必须已存在：我们不会替用户"静默创建目录"（那是副作用）；不存在 → PATH_NOT_FOUND（诚实错误码）
   if (!outputExists) return { code: ERROR_CODES.PATH_NOT_FOUND, message: '输出目录不存在' };
   if (!outputWritable) return { code: ERROR_CODES.PERMISSION_DENIED, message: '输出目录不可写' };
+  // 全部命中黑名单：没有可压的东西（契约错误码 ALL_SOURCES_SKIPPED，422）
+  if (totalBytes > 0 && keptBytes === 0) {
+    return { code: ERROR_CODES.ALL_SOURCES_SKIPPED, message: '没有可压缩的文件：全部命中黑名单（可在设置里调整或关闭黑名单）' };
+  }
   if (freeBytes !== null && freeBytes < requiredBytes) {
     return {
       code: ERROR_CODES.DISK_FULL,
@@ -112,14 +170,20 @@ function compressBlockedReason({ items, outputExists, outputWritable, freeBytes,
  */
 export async function compressPreflight(deps, input) {
   const factor = deps.config.compress.preflightFactor;
-  const items = await collectSourceItems(input.sources);
+  const rawItems = await collectSourceItems(input.sources);
+  // 黑名单层由调用方解析（路由里一次性解析，预检与打包共用同一份判定语义）
+  const layers = Array.isArray(deps.blacklistLayers) ? deps.blacklistLayers : [];
+  const { items, skipped, skippedBytes } = await annotateWithBlacklist(rawItems, input.sources, layers);
+
   const totalBytes = items.reduce((sum, item) => sum + item.size, 0);
+  // 「待压字节」= 全部源 − 黑名单跳过：跳过项不进包，不该占用 2 倍空间额度
+  const keptBytes = Math.max(0, totalBytes - skippedBytes);
 
   const outputDir = input.outputDir;
   const outputExists = await pathExists(outputDir);
   const outputWritable = outputExists ? await isWritable(outputDir) : false;
   const freeBytes = await freeBytesOf(outputExists ? outputDir : path.dirname(outputDir));
-  const requiredBytes = totalBytes * factor;
+  const requiredBytes = keptBytes * factor;
 
   const blockedReason = compressBlockedReason({
     items,
@@ -128,6 +192,8 @@ export async function compressPreflight(deps, input) {
     freeBytes,
     requiredBytes,
     factor,
+    totalBytes,
+    keptBytes,
   });
 
   return {
@@ -136,11 +202,13 @@ export async function compressPreflight(deps, input) {
     mode: input.mode,
     format: input.format,
     totalBytes,
-    estimatedOutputBytes: Math.ceil(totalBytes * ESTIMATED_OUTPUT_RATIO),
+    estimatedOutputBytes: Math.ceil(keptBytes * ESTIMATED_OUTPUT_RATIO),
     requiredBytes,
     freeBytes,
     preflightFactor: factor,
     items,
+    // 契约 §compress/preflight：skipped[] = { path, pattern, layer }（对外只有用户路径）
+    skipped,
     packages: [],
   };
 }

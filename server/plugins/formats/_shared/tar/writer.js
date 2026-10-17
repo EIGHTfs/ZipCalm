@@ -41,12 +41,15 @@ export async function collectEntries(ctx) {
   const fileEntries = [];
   const sourceParents = [];
   const sourceStats = new Map();
+  const skipped = [];
+  // 黑名单命中项（由编排层传入）：收集阶段就不放进包
+  const shouldSkip = typeof (ctx.options && ctx.options.shouldSkip) === 'function' ? ctx.options.shouldSkip : null;
   let skippedSymlinks = 0;
 
   for (const source of ctx.sources) {
     const sourceName = source.name || path.basename(source.absPath);
     sourceParents.push(path.dirname(source.absPath));
-    const collected = await collectSource(source, sourceName, skippedSymlinks);
+    const collected = await collectSource(source, sourceName, skippedSymlinks, shouldSkip, skipped);
     skippedSymlinks = collected.skippedSymlinks;
     fileEntries.push(...collected.entries);
     sourceStats.set(sourceName, { count: collected.entries.length, bytes: collected.bytes });
@@ -64,18 +67,31 @@ export async function collectEntries(ctx) {
     totalBytes: fileEntries.reduce((sum, fileEntry) => sum + fileEntry.size, 0),
     totalFiles: fileEntries.length,
     skippedSymlinks,
+    skipped,
   };
 }
 
 /** 单个源 → 条目列表（文件直接用；目录递归；符号链接跳过并计数） */
-async function collectSource(source, sourceName, skipped) {
+async function collectSource(source, sourceName, skipped, shouldSkip, skippedEntries) {
   let skippedSymlinks = skipped;
   const entries = [];
+
+  /** 命中就记账并返回 true（调用方据此 continue） */
+  const recordSkip = (absPath, name, segments) => {
+    if (!shouldSkip) return false;
+    const hit = shouldSkip({ name, segments });
+    if (!hit) return false;
+    skippedEntries.push({ absPath, pattern: hit.pattern, layer: hit.layer });
+    return true;
+  };
 
   if (source.kind === 'file') {
     const fileStat = await fsp.lstat(source.absPath).catch(() => null);
     if (!fileStat || !fileStat.isFile()) {
       throw apiError(ERROR_CODES.PATH_NOT_FOUND, '源文件在扫描后已不可用', { source: sourceName });
+    }
+    if (recordSkip(source.absPath, path.basename(source.absPath), [sourceName])) {
+      return { entries, bytes: 0, skippedSymlinks };
     }
     entries.push({ absPath: source.absPath, size: fileStat.size, sourceName });
     return { entries, bytes: fileStat.size, skippedSymlinks };
@@ -93,6 +109,8 @@ async function collectSource(source, sourceName, skipped) {
       if (dirent.isDirectory()) {
         await walk(childAbs, `${prefix}/${dirent.name}`);
       } else if (dirent.isFile()) {
+        // 目录名规则（如 @eaDir）也参与匹配：segments 用完整相对路径
+        if (recordSkip(childAbs, dirent.name, `${prefix}/${dirent.name}`.split('/'))) continue;
         const fileStat = await fsp.lstat(childAbs);
         entries.push({ absPath: childAbs, size: fileStat.size, sourceName });
         bytes += fileStat.size;

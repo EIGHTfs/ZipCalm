@@ -253,6 +253,17 @@ function publishTask(ctx, record, options = {}) {
 /** 压缩级别缺省值（未指定时用格式默认档；这里只兜底，真实校验在格式包） */
 const DEFAULT_COMPRESS_LEVEL = 6;
 
+/** 黑名单意图（M6）：随任务落盘，打包阶段按同一份意图重新解析用户层 */
+function normalizeBlacklist(raw) {
+  const blacklist = raw || {};
+  return {
+    enabled: blacklist.enabled !== false,
+    extraPatterns: Array.isArray(blacklist.extraPatterns)
+      ? blacklist.extraPatterns.filter((pattern) => typeof pattern === 'string')
+      : [],
+  };
+}
+
 /** 归一化 options：缺省值集中一处，避免创建路径里塞满三元表达式 */
 function normalizeOptions(raw) {
   const options = raw || {};
@@ -263,6 +274,8 @@ function normalizeOptions(raw) {
     deleteArchiveAfterExtract: Boolean(options.deleteArchiveAfterExtract),
     outputDir: options.outputDir || null,
     parallel: false,
+    // 只有调用方显式给了 blacklist 才写入（解压任务不该凭空多出这个字段）
+    ...(options.blacklist ? { blacklist: normalizeBlacklist(options.blacklist) } : {}),
   };
 }
 

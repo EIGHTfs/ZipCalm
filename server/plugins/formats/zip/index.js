@@ -147,7 +147,20 @@ function toSharedEntries(directory) {
 /** 递归收集待归档条目（不跟随符号链接，避免把链接指向的外部内容打进去） */
 async function collectEntries(ctx) {
   const fileItems = [];
+  // 黑名单命中项（由编排层传入判定函数）：**收集阶段就不放进包**，既省 CPU/磁盘，
+  // 也保证"没进包的不会被删除"从源头成立（M5 的删除集合 = 进包条目 − skipped）。
+  const shouldSkip = typeof (ctx.options && ctx.options.shouldSkip) === 'function' ? ctx.options.shouldSkip : null;
+  const skipped = [];
   let skippedSymlinks = 0;
+
+  /** 命中就记账并返回 true（调用方据此 continue） */
+  const recordSkip = (absPath, name, segments) => {
+    if (!shouldSkip) return false;
+    const hit = shouldSkip({ name, segments });
+    if (!hit) return false;
+    skipped.push({ absPath, pattern: hit.pattern, layer: hit.layer });
+    return true;
+  };
 
   for (const source of ctx.sources) {
     const sourceName = source.name || path.basename(source.absPath);
@@ -157,6 +170,7 @@ async function collectEntries(ctx) {
       if (!fileStat || !fileStat.isFile()) {
         throw apiError(ERROR_CODES.PATH_NOT_FOUND, '源文件在扫描后已不可用', { source: sourceName });
       }
+      if (recordSkip(source.absPath, path.basename(source.absPath), [sourceName])) continue;
       fileItems.push({ absPath: source.absPath, entryName: sourceName, size: fileStat.size });
       continue;
     }
@@ -174,6 +188,8 @@ async function collectEntries(ctx) {
         if (dirent.isDirectory()) {
           await walk(childAbs, childEntry);
         } else if (dirent.isFile()) {
+          // 目录名规则（如 @eaDir）也参与匹配：所以 segments 带上完整相对路径
+          if (recordSkip(childAbs, dirent.name, childEntry.split('/'))) continue;
           const fileStat = await fsp.lstat(childAbs);
           fileItems.push({ absPath: childAbs, entryName: childEntry, size: fileStat.size });
         }
@@ -182,7 +198,7 @@ async function collectEntries(ctx) {
     await walk(source.absPath, sourceName);
   }
 
-  return { fileItems, skippedSymlinks };
+  return { fileItems, skippedSymlinks, skipped };
 }
 
 // ===== create（压缩）=====
@@ -314,6 +330,7 @@ function runCreateStream(ctx, fileItems, summary, stats) {
           bytesOut: archive.pointer(),
           durationMs: Date.now() - stats.startedAt,
           skippedSymlinks: stats.skippedSymlinks,
+          skipped: stats.skipped || [],
           // 契约 v2 §3.4 条款 10：实际进包条目的**源绝对路径**（进程内使用，不进 API）。
           // INV-02 删除集合的第一手依据；禁止用包内路径（entryName）反推源路径。
           entryPaths: fileItems.map((item) => item.absPath),
@@ -355,12 +372,13 @@ function runCreateStream(ctx, fileItems, summary, stats) {
 async function create(ctx) {
   await assertCreatable(ctx);
 
-  const { fileItems, skippedSymlinks } = await collectEntries(ctx);
+  const { fileItems, skippedSymlinks, skipped } = await collectEntries(ctx);
   const summary = summarizeEntries(fileItems);
 
   return runCreateStream(ctx, fileItems, summary, {
     startedAt: Date.now(),
     skippedSymlinks,
+    skipped,
     level: resolveLevel(ctx.options),
     signal: ctx.options && ctx.options.signal,
   });

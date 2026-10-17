@@ -26,7 +26,10 @@ function toBool(value) {
 export default async function fsRoutes(app) {
   app.get('/fs/list', { preHandler: [app.requireAuth, app.guardPath({ source: 'query' })] }, async (request, reply) => {
     const query = request.query || {};
+    // 黑名单层（用户层有缓存，逐请求解析成本可忽略）；契约 §4.2 的 blacklisted/blacklistLayer 由服务端算
+    const blacklistLayers = await app.blacklist.layersFor({ enabled: true, taskPatterns: [] });
     const listing = await listDirectory(app.fsContext, {
+      blacklistLayers,
       // 用中间件已校验过的 userPath 再走一遍 core（core 内部仍会完整校验）
       path: request.userPath,
       sort: query.sort,
@@ -42,7 +45,8 @@ export default async function fsRoutes(app) {
     if (request.userPath === undefined) {
       throw apiError(ERROR_CODES.VALIDATION_FAILED, 'path 必填');
     }
-    const entry = await statEntry(app.fsContext, request.userPath);
+    const blacklistLayers = await app.blacklist.layersFor({ enabled: true, taskPatterns: [] });
+    const entry = await statEntry(app.fsContext, request.userPath, { blacklistLayers });
     reply.ok(entry);
   });
 }

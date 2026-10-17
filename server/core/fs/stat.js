@@ -10,6 +10,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { ERROR_CODES, apiError, toApiError } from '../../lib/errors.js';
+import { matchEntry } from '../compress/blacklist.js';
 import { ROOT_USER_PATH, resolveRequestPath } from './safePath.js';
 
 /** 入口类型判定（不跟随符号链接） */
@@ -72,7 +73,13 @@ async function applyDirInfo(entry, realPath) {
  * @param {{rootAbs: string, maxPathLength?: number}} ctx
  * @param {string} rawPath 用户路径（必须存在；根路径也可，返回存储根本身的信息）
  */
-export async function statEntry(ctx, rawPath) {
+/**
+ * 单条目详情。
+ * @param {object} ctx fsContext
+ * @param {string} rawPath 用户路径
+ * @param {{blacklistLayers?: Array}} [options] 黑名单层（契约 §4.2：blacklisted/blacklistLayer 由服务端算）
+ */
+export async function statEntry(ctx, rawPath, options = {}) {
   const { userPath, realPath } = await resolveRequestPath(
     {
       rootAbs: ctx.rootAbs,
@@ -92,5 +99,12 @@ export async function statEntry(ctx, rawPath) {
   const entry = await buildBaseEntry(userPath, realPath, fileStat);
   if (entry.type === 'symlink') await applySymlinkInfo(entry, realPath, userPath);
   if (entry.type === 'dir') await applyDirInfo(entry, realPath);
+
+  const layers = Array.isArray(options.blacklistLayers) ? options.blacklistLayers : [];
+  const hit = layers.length > 0
+    ? matchEntry(layers, { name: path.basename(userPath), segments: userPath.split('/').filter(Boolean) })
+    : null;
+  entry.blacklisted = Boolean(hit);
+  entry.blacklistLayer = hit ? hit.layer : null;
   return entry;
 }

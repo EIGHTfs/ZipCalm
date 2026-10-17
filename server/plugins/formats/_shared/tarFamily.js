@@ -74,11 +74,13 @@ async function pluginCreate(spec, ctx) {
   await assertCreatable(ctx, () => pluginAvailable(spec), spec.id);
   const collected = await collectEntries(ctx);
   const level = Number.isInteger(ctx.options && ctx.options.level) ? ctx.options.level : (spec.defaultLevel || 6);
-  return writeTarStream(ctx, collected, {
+  const written = await writeTarStream(ctx, collected, {
     compression: spec.compression,
     level,
     signal: ctx.options && ctx.options.signal,
   });
+  // 契约 v2：把黑名单跳过项回报给编排层（它负责换成 userPath 并排除出删除集合）
+  return { ...written, skipped: collected.skipped || [] };
 }
 
 async function pluginList(spec, archivePath) {

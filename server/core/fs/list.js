@@ -8,6 +8,8 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
+import { matchEntry } from '../compress/blacklist.js';
+
 import { ERROR_CODES, apiError, toApiError } from '../../lib/errors.js';
 import { ROOT_USER_PATH, parentUserPath, resolveRequestPath } from './safePath.js';
 
@@ -112,15 +114,25 @@ export async function listDirectory(ctx, query = {}) {
         enterable = probe.enterable;
       }
 
+      const entryPath = userPath === ROOT_USER_PATH ? `/${dirent.name}` : `${userPath}/${dirent.name}`;
+      // 黑名单标注（契约 §4.2：由服务端计算）——目录也要标（@eaDir 这类是按路径段命中的）
+      const hit = Array.isArray(query.blacklistLayers) && query.blacklistLayers.length > 0
+        ? matchEntry(query.blacklistLayers, {
+          name: dirent.name,
+          segments: [...entryPath.split('/').filter(Boolean)],
+        })
+        : null;
       return {
         name: dirent.name,
-        path: userPath === ROOT_USER_PATH ? `/${dirent.name}` : `${userPath}/${dirent.name}`,
+        path: entryPath,
         type,
         size: type === 'file' ? stat.size : 0,
         mtime: Math.trunc(stat.mtimeMs),
         readable: await probeReadable(entryAbs),
         extension: type === 'file' ? path.extname(dirent.name) : '',
         enterable,
+        blacklisted: Boolean(hit),
+        blacklistLayer: hit ? hit.layer : null,
       };
     })
   ).filter(Boolean);
