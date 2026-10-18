@@ -14,11 +14,11 @@ import { collectFilesUnder } from '../../core/compress/sourceWalk.js';
  * 单个源的预览：返回该源命中的文件与"是否还有可压的文件"。
  * 抽出来是为了让路由本体只做"解析参数 → 逐个源调用 → 拼响应"（单函数不超 50 行）。
  */
-async function previewOneSource(app, rawPath, layers) {
+async function previewOneSource(app, rawPath, layers, rootAbs) {
   if (typeof rawPath !== 'string' || rawPath.length === 0) {
     throw apiError(ERROR_CODES.VALIDATION_FAILED, 'paths 里每一项都必须是非空字符串');
   }
-  const resolved = await app.fsGuard.resolveReal(rawPath);
+  const resolved = await app.fsGuard.resolveRealIn(rootAbs, rawPath);
   const files = await collectFilesUnder(resolved.absPath);
   const skipped = [];
   let keptFiles = 0;
@@ -42,11 +42,13 @@ async function previewManySources(app, body) {
 
   const taskPatterns = Array.isArray(body.extraPatterns) ? body.extraPatterns : [];
   const layers = await app.blacklist.layersFor({ enabled: true, taskPatterns });
+  // 根：与 fs 路由同一套语义（未知 rootId → VALIDATION_FAILED）
+  const root = app.fsGuard.root(body.rootId);
   const skipped = [];
   const kept = [];
 
   for (const rawPath of rawPaths) {
-    const one = await previewOneSource(app, rawPath, layers);
+    const one = await previewOneSource(app, rawPath, layers, root.absPath);
     skipped.push(...one.skipped);
     // 空目录/不可读：不算"跳过"，如实放进 kept（真正原因由压缩预检去报）；
     // 有文件留下也算 kept；整源都被跳过时不放进 kept（前端据此提示"该目录没有可压缩文件"）

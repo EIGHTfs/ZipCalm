@@ -246,6 +246,8 @@ export async function deleteEntries(ctx, body, deps) {
     mode: 'trash',
     // 手动删除没有"压缩成功"这个前置条件；二次确认由前端负责
     taskId: null,
+    // INV-06 复核基准跟随本次请求的根（多根下不能用全局默认根）
+    rootAbs: deps.rootAbs,
   });
 
   const deleted = (outcome.deleted || []).map((entry) => (entry.path || entry.userPath || entry));

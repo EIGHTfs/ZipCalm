@@ -84,6 +84,43 @@ function validateStorage(config, errors) {
   if (typeof root === 'string' && (root === '/' || /^[A-Za-z]:[\\/]?$/.test(root))) {
     errors.push('storage.root 不允许指向文件系统根（会让路径白名单失去意义）');
   }
+  validateRoots(config.storage.roots, errors);
+}
+
+/** 可切换根列表：结构 + id 唯一 + 不许指向文件系统根（同一个 INV-06 防呆） */
+function validateRoots(roots, errors) {
+  if (roots === undefined || roots === null) return;
+  if (!Array.isArray(roots)) {
+    errors.push('storage.roots 必须是数组（[{ id, label, path }]），空数组表示自动发现');
+    return;
+  }
+  const seen = new Set();
+  for (const [index, entry] of roots.entries()) {
+    if (!entry || typeof entry !== 'object') {
+      errors.push(`storage.roots[${index}] 必须是对象 { id, label, path }`);
+      continue;
+    }
+    validateRootEntry(entry, index, seen, errors);
+  }
+}
+
+/** 单条根校验（拆出来是为了把 validateRoots 的圈复杂度压在阈值内） */
+function validateRootEntry(entry, index, seen, errors) {
+  for (const key of ['id', 'path']) {
+    if (typeof entry[key] !== 'string' || entry[key].length === 0) {
+      errors.push(`storage.roots[${index}].${key} 必须是非空字符串`);
+    }
+  }
+  if (entry.label !== undefined && typeof entry.label !== 'string') {
+    errors.push(`storage.roots[${index}].label 必须是字符串`);
+  }
+  if (typeof entry.id === 'string') {
+    if (seen.has(entry.id)) errors.push(`storage.roots 里 id 重复：${entry.id}`);
+    seen.add(entry.id);
+  }
+  if (entry.path === '/' || /^[A-Za-z]:[\\/]?$/.test(String(entry.path))) {
+    errors.push(`storage.roots[${index}].path 不允许指向文件系统根`);
+  }
 }
 
 /** 路径长度相关（含两者之间的相对关系） */

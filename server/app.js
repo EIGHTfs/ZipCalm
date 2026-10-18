@@ -95,7 +95,7 @@ async function registerSecurityLayer(app, { config, logger }) {
   app.decorate('authStore', authStore);
 
   registerAuth(app, { store: authStore, config: config.auth });
-  registerPathGuard(app, { config, logger });
+  await registerPathGuard(app, { config, logger });
   return authStore;
 }
 

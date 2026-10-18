@@ -12,6 +12,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import { ERROR_CODES, apiError } from '../../lib/errors.js';
+import { resolveWithinRoot } from '../../core/fs/safePath.js';
 import { compressPreflight, extractPreflight } from '../../core/compress/preflight.js';
 import { defaultExtractDir } from '../../core/compress/orchestrator.js';
 
@@ -77,7 +78,8 @@ async function handleCompressTaskCreate(app, request, reply) {
       },
     },
     // 绝对路径只走 internal（不会出现在 API 响应里）
-    internal: { outputDirAbs: parsed.outputDirAbs },
+    // rootAbs 必须随任务落盘：执行/删除阶段的 INV-06 复核要用**任务自己的根**，不能用服务默认根
+    internal: { outputDirAbs: parsed.outputDirAbs, rootAbs: parsed.rootAbs },
   });
 
   manager.enqueue(task.id, (record) => orchestrator.runCompress(record));
@@ -114,7 +116,11 @@ async function handleExtractTaskCreate(app, request, reply) {
     archivePath: parsed.archive.userPath,
     targetDir: parsed.target.userPath,
     // 绝对路径只走 internal（不泄漏到 API 响应）
-    internal: { archiveAbsPath: parsed.archive.realPath, targetAbsDir: parsed.target.absPath },
+    internal: {
+      archiveAbsPath: parsed.archive.realPath,
+      targetAbsDir: parsed.target.absPath,
+      rootAbs: parsed.rootAbs,
+    },
     options: {
       deleteArchiveAfterExtract: parsed.options.deleteArchiveAfterExtract === true,
       deleteConfirmed: parsed.options.deleteConfirmed === true,
@@ -145,7 +151,10 @@ export default async function compressRoutes(app) {
 /** 校验并解析压缩请求（sources / format / mode / outputDir） */
 async function parseCompressRequest(app, body, options = {}) {
   const { config } = app.m2;
-  const sources = await resolveSources(app, body.sources);
+  // 根先定下来：源解析/输出目录/预检都以它为准（未知 rootId → VALIDATION_FAILED）
+  const root = app.fsGuard.root(body.rootId);
+  const rootAbs = root.absPath;
+  const sources = await resolveSources(app, body.sources, rootAbs);
   const format = String(body.format || config.compress.defaultFormat);
   const mode = String(body.mode || config.compress.defaultMode);
 
@@ -158,15 +167,16 @@ async function parseCompressRequest(app, body, options = {}) {
 
   const requestedOutputDir = body.options && body.options.outputDir;
   const outputDirAbs = requestedOutputDir
-    ? (await resolveDirForWrite(app, requestedOutputDir, { allowRoot: true })).absPath
+    ? (await resolveDirForWrite(app, requestedOutputDir, { allowRoot: true, rootAbs })).absPath
     : path.dirname(sources[0].absPath);
 
-  return { sources, format, mode, outputDirAbs, options: body.options || {} };
+  return { sources, format, mode, outputDirAbs, rootAbs, rootId: root.id, options: body.options || {} };
 }
 
 /** 校验并解析解压请求（归档 + 目标目录 + 选项） */
 async function parseExtractRequest(app, body) {
-  const archive = await app.fsGuard.resolveReal(body.path);
+  const root = app.fsGuard.root(body.rootId);
+  const archive = await app.fsGuard.resolveRealIn(root.absPath, body.path);
   const stat = await fsStat(archive.realPath);
   if (!stat.isFile()) {
     throw apiError(ERROR_CODES.NOT_A_DIRECTORY, '解压目标必须是文件', { path: archive.userPath });
@@ -174,10 +184,10 @@ async function parseExtractRequest(app, body) {
 
   const plugin = pluginForArchive(app, archive.userPath);
   const target = body.targetDir
-    ? await resolveDirForWrite(app, body.targetDir)
+    ? await resolveDirForWrite(app, body.targetDir, { rootAbs: root.absPath })
     : await defaultTarget(app, archive.realPath);
 
-  return { archive, plugin, target, options: body.options || {} };
+  return { archive, plugin, target, rootAbs: root.absPath, rootId: root.id, options: body.options || {} };
 }
 
 /** 未指定目标目录时：用"与压缩包同级的同名目录"（可能尚不存在） */
@@ -187,13 +197,13 @@ async function defaultTarget(app, archiveAbsPath) {
 }
 
 /** 把 body.sources（API 路径数组）解析成白名单内的实体 */
-async function resolveSources(app, rawSources) {
+async function resolveSources(app, rawSources, rootAbs) {
   if (!Array.isArray(rawSources) || rawSources.length === 0) {
     throw apiError(ERROR_CODES.VALIDATION_FAILED, 'sources 必须是非空数组');
   }
   const resolved = [];
   for (const raw of rawSources) {
-    const { userPath, realPath } = await app.fsGuard.resolveReal(raw);
+    const { userPath, realPath } = await app.fsGuard.resolveRealIn(rootAbs, raw);
     resolved.push({
       path: userPath,
       userPath,
@@ -217,7 +227,7 @@ async function compressPreflightFor(app, parsed) {
     taskPatterns: Array.isArray(blacklist.extraPatterns) ? blacklist.extraPatterns : [],
   });
   return compressPreflight(
-    { config: app.m2.config, rootAbs: app.fsContext.rootAbs, blacklistLayers: layers },
+    { config: app.m2.config, rootAbs: parsed.rootAbs, blacklistLayers: layers },
     {
       sources: parsed.sources,
       format: parsed.format,
@@ -265,14 +275,24 @@ function relUserPath(app, absPath) {
  * - 先用 fsGuard.resolve 做形态 + 白名单前缀校验（不碰磁盘），
  *   再对**父目录**做 resolveReal（父目录必须存在，借此拦住 symlink 逃逸）。
  */
+/** 在指定根下做同步形态校验（与 fsGuard.resolve 同规则，只是换了基准） */
+function resolveWithinRootFor(rootAbs, rawUserPath, fsContext) {
+  return resolveWithinRoot(rootAbs, rawUserPath, {
+    maxPathLength: fsContext.maxPathLength,
+    maxPathSegmentLength: fsContext.maxPathSegmentLength,
+  });
+}
+
 async function resolveDirForWrite(app, rawUserPath, options = {}) {
-  const { userPath } = app.fsGuard.resolve(rawUserPath);
+  // 多根：输出目录也必须在**本次请求的根**下解析（否则任务会把产物写到另一个根里）
+  const rootAbs = options.rootAbs || app.fsContext.rootAbs;
+  const { userPath } = resolveWithinRootFor(rootAbs, rawUserPath, app.fsContext);
   if (userPath === '/') {
-    if (options.allowRoot) return { userPath: '/', absPath: app.fsContext.rootAbs };
+    if (options.allowRoot) return { userPath: '/', absPath: rootAbs };
     throw apiError(ERROR_CODES.VALIDATION_FAILED, 'targetDir 不能是存储根目录', { path: userPath });
   }
   const parentUserPath = path.posix.dirname(userPath);
-  const parent = await app.fsGuard.resolveReal(parentUserPath);
+  const parent = await app.fsGuard.resolveRealIn(rootAbs, parentUserPath);
   const absPath = path.join(parent.realPath, path.posix.basename(userPath));
   if (!absPath.startsWith(parent.realPath + path.sep)) {
     throw apiError(ERROR_CODES.PATH_OUT_OF_ROOT, '目录超出可访问范围', { path: userPath });

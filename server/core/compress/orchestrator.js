@@ -50,6 +50,15 @@ export async function defaultExtractDir(archiveAbsPath) {
 }
 
 /** 归档绝对路径 → 校验用路径（产物用 userPath 记录，这里换回本地路径） */
+
+/**
+ * 本次任务使用的存储根：**任务自己的根优先**（多根下在哪个卷/共享下建的任务，就用哪个根）。
+ * 为什么不能用 deps.rootAbs：那样在 /volume1 下建的任务，产物路径与删除复核会按 fs-root 算（INV-06 会误判）。
+ */
+function rootAbsOf(record, deps) {
+  return (record && record.internal && record.internal.rootAbs) || deps.rootAbs;
+}
+
 function archiveAbsOf(rootAbs, userPath) {
   return path.join(rootAbs, ...userPath.split('/').filter(Boolean));
 }
@@ -240,6 +249,7 @@ export function checkDeleteSetAgainstEntries(targets, entryAbsPaths, skippedAbsP
  */
 async function stageDelete(record, input, deps) {
   const { manager, logger, deleteService } = deps;
+  const rootAbs = rootAbsOf(record, deps);
   const info = record.info;
   if (!info.delete) return null;
 
@@ -290,6 +300,8 @@ async function stageDelete(record, input, deps) {
   manager.setPhase(info.id, 'deleting');
   info.delete.status = 'deleting';
   const deleteOutcome = await deleteService.deleteTargets({
+    // INV-06 复核基准：任务自己的根（多根下不能用服务默认根）
+    rootAbs,
     taskId: info.id,
     kind: info.kind,
     reason: input.reason,
@@ -304,7 +316,8 @@ async function stageDelete(record, input, deps) {
 
 /** 压缩预检：权限 + 2 倍空间 + 输出目录；不通过直接抛契约错误码（任务随后 failed） */
 async function stageCompressPrecheck(record, deps) {
-  const { config, manager, rootAbs } = deps;
+  const { config, manager } = deps;
+  const rootAbs = rootAbsOf(record, deps);
   const info = record.info;
 
   manager.setPhase(info.id, 'precheck');
@@ -364,7 +377,8 @@ function packageBaseName(group) {
 
 /** 压缩一个包：写 .part → 原子 rename → 记账到 result.packages */
 async function compressOnePackage(record, deps, plugin, group, groupIndex, outputDirAbs) {
-  const { manager, rootAbs, logger } = deps;
+  const { manager, logger } = deps;
+  const rootAbs = rootAbsOf(record, deps);
   const info = record.info;
 
   const outputAbsPath = await uniqueTargetPath(outputDirAbs, packageBaseName(group), plugin.ext);
@@ -452,7 +466,8 @@ async function stageCompressPackages(record, deps, plugin, outputDirAbs) {
 
 /** 校验阶段（INV-01）：逐个产物做完整性校验，任一不通过即抛 VERIFY_FAILED */
 async function stageVerifyPackages(record, deps, plugin) {
-  const { manager, rootAbs } = deps;
+  const { manager } = deps;
+  const rootAbs = rootAbsOf(record, deps);
   manager.setPhase(record.info.id, 'verifying');
 
   for (const pkg of record.info.result.packages) {
@@ -476,7 +491,8 @@ function summarizeCompressResult(record, bytesIn, bytesOut) {
 
 /** 压缩任务主体：只做阶段编排 */
 async function runCompressTask(record, deps) {
-  const { registry, manager, rootAbs } = deps;
+  const { registry, manager } = deps;
+  const rootAbs = rootAbsOf(record, deps);
   const info = record.info;
   const plugin = registry.require(info.format);
 

@@ -34,8 +34,14 @@ export const DEFAULT_CONFIG = {
   },
 
   storage: {
-    /** 可浏览/（将来）可压缩的存储根：API 的白名单基准 */
+    /** 可浏览/可压缩的默认存储根：单根回退，也是侧栏里的「应用数据」项 */
     root: './storage/fs-root',
+    /**
+     * 可切换的根列表（docs/16 §三）：[{ id, label, path }]。
+     * **空数组 = 自动发现**（群晖列 /volumeN 下的共享；其他系统列卷/挂载点）。
+     * 显式配置优先于自动发现；相对 path 与 root 同规则按项目根解析。
+     */
+    roots: [],
     /** 运行态数据目录（任务状态、令牌、日志、回收站都在这里；已 gitignore） */
     dataDir: './storage',
     trashDir: './storage/trash',

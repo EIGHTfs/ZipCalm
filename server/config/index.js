@@ -108,6 +108,8 @@ export async function loadConfig(options = {}) {
     storage: {
       ...config.storage,
       root: resolveUnderProject(config.storage.root),
+      // 每个可切换根也绝对化；**不 ensureDir**（它们可能是 NAS 卷，应用无权/不该创建）
+      roots: (config.storage.roots || []).map((root) => ({ ...root, path: resolveUnderProject(root.path) })),
       dataDir: resolveUnderProject(config.storage.dataDir),
       trashDir: resolveUnderProject(config.storage.trashDir),
       logDir: resolveUnderProject(config.storage.logDir),

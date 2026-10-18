@@ -55,6 +55,9 @@ function logBaseOf(ctx, input, target, ts, batchId, mode = ctx.mode) {
   };
 }
 
+/** 跨分区删除的暂存目录名（创建在**源文件同级**，保证 rename 不跨分区） */
+const CROSS_DEVICE_STAGING_DIR = '.zipcalm-cross-device';
+
 /** log-only：只记账、不动文件（关键安全行为） */
 async function skipInLogOnly(ctx, input, target, deleteRecord, base) {
   deleteRecord.skipped.push({ path: target.userPath, reason: 'log-only' });
@@ -63,13 +66,12 @@ async function skipInLogOnly(ctx, input, target, deleteRecord, base) {
 }
 
 /**
- * EXDEV 回退（跨分区）：copyFile → size 校验 → 原件 rename 进回收站的 `.cross-device/`
- * 暂存位（同分区，秒级）。**全程零 unlink**——复制校验失败时只清理本次新建的不完整副本，
- * 原件原地不动，绝不走直接删除。
+ * EXDEV 回退（跨分区）：copyFile → size 校验 → 原件 rename 进**源分区内**的暂存目录。
+ * **全程零 unlink**——复制校验失败时只清理本次新建的不完整副本，原件原地不动，绝不走直接删除。
  *
  * 为什么原件也要再挪一步而不是 copy 后留在原地：trash 语义是"原件已入回收站可恢复"，
  * 若 copy 成功但原件留在源目录，任务 delete.status=deleted 与磁盘状态不一致（文件还在）。
- * `.cross-device/` 暂存位与 batchId 同区，恢复路径一致。
+ * 暂存目录与源同分区，恢复时直接从那里取回。
  */
 async function moveCrossDevice(ctx, target, destination) {
   const sourceStat = await fsp.stat(target.absPath);
@@ -80,7 +82,9 @@ async function moveCrossDevice(ctx, target, destination) {
     await fsp.rm(destination, { force: true }).catch(() => {});
     throw Object.assign(new Error('跨分区复制校验失败（size 不一致）'), { code: 'INTERNAL_ERROR' });
   }
-  const stagingDir = path.join(ctx.trashDir, '.cross-device');
+  // 暂存目录必须在**源所在分区**：放在 trashDir 下的话，对"根在别的分区"的场景（如多根切到 /volumeN）
+  // 这一 rename 仍然是 EXDEV，会表现为"回收站里躺着一份副本、原件还在原地、删除记为失败"（实测踩过）。
+  const stagingDir = path.join(path.dirname(target.absPath), CROSS_DEVICE_STAGING_DIR);
   await fsp.mkdir(stagingDir, { recursive: true });
   const stagedName = `${Date.now()}-${path.basename(destination)}`;
   await fsp.rename(target.absPath, path.join(stagingDir, stagedName));
@@ -128,6 +132,8 @@ async function deleteTargets(ctx, input) {
   // 但**用户手动删除**（fs/delete）语义不同 —— 他明确点了删除，log-only 会表现为"点了没反应"，
   // 所以那条路径显式传 mode:'trash'（仍然进回收站可恢复，不是永真删除）。
   const mode = input.mode && VALID_MODES.has(input.mode) ? input.mode : ctx.mode;
+  // INV-06 复核基准：默认用服务级根；多根下由调用方传"这次操作所属的根"
+  const rootAbs = input.rootAbs || ctx.rootAbs;
   const batchId = crypto.randomUUID();
   const ts = new Date().toISOString();
   const logFile = path.join(ctx.logDir, logFileName(new Date()));
@@ -145,11 +151,11 @@ async function deleteTargets(ctx, input) {
   // 白名单校验并**自行推导** absPath；与调用方传入值交叉断言，不一致按单条失败隔离
   // （单条不整批崩，其余条目照删，避免一个坏 target 阻断整批）。
   let verifiedTargets = input.targets;
-  if (ctx.rootAbs) {
+  if (rootAbs) {
     verifiedTargets = [];
     for (const target of input.targets) {
       try {
-        const { absPath: derived } = resolveWithinRoot(ctx.rootAbs, target.userPath);
+        const { absPath: derived } = resolveWithinRoot(rootAbs, target.userPath);
         if (target.absPath && derived !== target.absPath) {
           throw apiError(ERROR_CODES.PATH_OUT_OF_ROOT, 'absPath 与 userPath 推导结果不一致', {
             userPath: target.userPath,

@@ -8,6 +8,7 @@
 
 import { ERROR_CODES, apiError } from '../../lib/errors.js';
 import { listDirectory } from '../../core/fs/list.js';
+import { listRoots } from '../../core/fs/roots.js';
 import { deleteEntries, makeDirectory, moveEntries, renameEntry } from '../../core/fs/writeOps.js';
 import { statEntry } from '../../core/fs/stat.js';
 
@@ -25,11 +26,24 @@ function toBool(value) {
 }
 
 export default async function fsRoutes(app) {
+  /**
+   * 存储根列表（docs/16 §三.2）：平台 + 模式 + 根列表 + 容量。
+   * 两种数据源（卷 / 共享）由 roots.js 按平台决定；statfs 失败只让容量为 null，不报错。
+   */
+  app.get('/fs/volumes', { preHandler: [app.requireAuth] }, async (request, reply) => {
+    const storage = app.m2.config.storage;
+    const result = await listRoots({ storage, env: process.env });
+    // 回写缓存：新增/删除共享后，带 rootId 的请求不必等重启就能用
+    if (typeof app.refreshRoots === 'function') app.refreshRoots(result);
+    // 配置里显式给了 roots 时，把它们的 label 一并带上（自动发现的 label 已在 roots.js 里定好）
+    reply.ok(result);
+  });
+
   app.get('/fs/list', { preHandler: [app.requireAuth, app.guardPath({ source: 'query' })] }, async (request, reply) => {
     const query = request.query || {};
     // 黑名单层（用户层有缓存，逐请求解析成本可忽略）；契约 §4.2 的 blacklisted/blacklistLayer 由服务端算
     const blacklistLayers = await app.blacklist.layersFor({ enabled: true, taskPatterns: [] });
-    const listing = await listDirectory(app.fsContext, {
+    const listing = await listDirectory(app.requestContext(request), {
       blacklistLayers,
       // 用中间件已校验过的 userPath 再走一遍 core（core 内部仍会完整校验）
       path: request.userPath,
@@ -46,22 +60,24 @@ export default async function fsRoutes(app) {
   // 路径校验在这里**不做 preHandler**：四个端点都可能是"源 + 目标"或数组路径，
   // 统一交给 core/fs/writeOps 逐条走 safePath（含符号链接复核），避免半套校验。
   app.post('/fs/mkdir', { preHandler: [app.requireAuth] }, async (request, reply) => {
-    reply.ok(await makeDirectory(app.fsContext, request.body || {}));
+    reply.ok(await makeDirectory(app.requestContext(request), request.body || {}));
   });
 
   app.post('/fs/rename', { preHandler: [app.requireAuth] }, async (request, reply) => {
-    reply.ok(await renameEntry(app.fsContext, request.body || {}));
+    reply.ok(await renameEntry(app.requestContext(request), request.body || {}));
   });
 
   app.post('/fs/move', { preHandler: [app.requireAuth] }, async (request, reply) => {
-    reply.ok(await moveEntries(app.fsContext, request.body || {}));
+    reply.ok(await moveEntries(app.requestContext(request), request.body || {}));
   });
 
   app.post('/fs/delete', { preHandler: [app.requireAuth] }, async (request, reply) => {
-    reply.ok(await deleteEntries(app.fsContext, request.body || {}, {
+    reply.ok(await deleteEntries(app.requestContext(request), request.body || {}, {
       // 与 M5 删除原文件同一机制：进回收站（delete.mode 决定是 trash 还是 log-only 记账）
       deleter: app.m2.deleteService,
       maxDeleteItems: app.fsContext.maxDeleteItems,
+      // 删除任务的 INV-06 复核基准跟随本次请求的根（多根下不能用全局默认根）
+      rootAbs: app.requestContext(request).rootAbs,
     }));
   });
 
@@ -70,7 +86,7 @@ export default async function fsRoutes(app) {
       throw apiError(ERROR_CODES.VALIDATION_FAILED, 'path 必填');
     }
     const blacklistLayers = await app.blacklist.layersFor({ enabled: true, taskPatterns: [] });
-    const entry = await statEntry(app.fsContext, request.userPath, { blacklistLayers });
+    const entry = await statEntry(app.requestContext(request), request.userPath, { blacklistLayers });
     reply.ok(entry);
   });
 }
