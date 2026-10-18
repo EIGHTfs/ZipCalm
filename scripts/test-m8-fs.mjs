@@ -24,6 +24,8 @@ const ROOT = path.resolve(PROJECT_ROOT, (runtimeConfig.storage && runtimeConfig.
 const LOGIN = { username: process.env.ZIPCALM_TEST_USER || 'admin', password: process.env.ZIPCALM_TEST_PASSWORD || 'zipcalm' };
 
 const HTTP_TIMEOUT_MS = 15000;
+/** 信封解析失败时回显的消息片段长度 */
+const ERROR_SNIPPET_CHARS = 120;
 const FIXTURE_API = '/m8-fs-test';
 const FIXTURE_ABS = path.join(ROOT, 'm8-fs-test');
 
@@ -46,7 +48,7 @@ async function api(method, urlPath, body) {
   try {
     json = JSON.parse(text);
   } catch {
-    json = { ok: false, error: { code: 'NO_ENVELOPE', message: text.slice(0, 120) } };
+    json = { ok: false, error: { code: 'NO_ENVELOPE', message: text.slice(0, ERROR_SNIPPET_CHARS) } };
   }
   return { status: response.status, json };
 }

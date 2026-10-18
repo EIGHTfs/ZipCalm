@@ -30,6 +30,24 @@ async function targetExists(absPath) {
 }
 
 /**
+ * 解析"要创建的目标"：目标本身可能不存在，所以校验的是**父目录的真实路径**（父目录的符号链接
+ * 也不能指向根外），再把 basename 拼回去 —— 既守住白名单，又不会把合法的 mkdir 判死。
+ * @returns {{parentAbs: string, targetAbs: string}}
+ */
+async function resolveCreateTarget(ctx, userPath, absPath) {
+  const parentUser = parentUserPath(userPath);
+  if (parentUser === null) {
+    throw apiError(ERROR_CODES.VALIDATION_FAILED, '不能在存储根上再建根目录');
+  }
+  const parent = await resolveRequestPath(ctx, parentUser);
+  const parentStat = await fsp.lstat(parent.realPath).catch(() => null);
+  if (!parentStat || !parentStat.isDirectory()) {
+    throw apiError(ERROR_CODES.PATH_NOT_FOUND, '父目录不存在', { path: userPath });
+  }
+  return { parentAbs: parent.realPath, targetAbs: path.join(parent.realPath, path.basename(absPath)) };
+}
+
+/**
  * POST /fs/mkdir
  * @param {object} ctx fsContext（rootAbs 等）
  * @param {{path?: string}} body
@@ -41,24 +59,12 @@ export async function makeDirectory(ctx, body) {
   // 目标本身可以不存在（这正是 mkdir 的场景），所以 mustExist:false；真正的越界防护在下面的父目录解析
   const { userPath, absPath } = await resolveRequestPath(ctx, body.path, { mustExist: false });
 
-  // 目标本来就可能不存在：**对父目录做真实路径校验**（父目录的符号链接也不能指向根外），
-  // 再把 basename 拼回去 —— 这样既守住白名单，又不会因为"路径不存在"把合法的 mkdir 判死。
-  const parentUser = parentUserPath(userPath);
-  if (parentUser === null) {
-    throw apiError(ERROR_CODES.VALIDATION_FAILED, '不能在存储根上再建根目录');
-  }
-  const parent = await resolveRequestPath(ctx, parentUser);
-  const parentAbs = parent.realPath;
-  const targetAbs = path.join(parentAbs, path.basename(absPath));
+  const { parentAbs, targetAbs } = await resolveCreateTarget(ctx, userPath, absPath);
 
   const existing = await fsp.lstat(targetAbs).catch(() => null);
   if (existing) {
     if (existing.isDirectory()) return { path: userPath, created: false }; // 幂等
     throw apiError(ERROR_CODES.TARGET_EXISTS, '同名文件已存在', { path: userPath });
-  }
-  const parentStat = await fsp.lstat(parentAbs).catch(() => null);
-  if (!parentStat || !parentStat.isDirectory()) {
-    throw apiError(ERROR_CODES.PATH_NOT_FOUND, '父目录不存在', { path: userPath });
   }
 
   try {
@@ -122,6 +128,50 @@ export async function renameEntry(ctx, body) {
 }
 
 /**
+ * 整批校验：源都存在、目标目录内没有同名项（契约：目标同名整批拒绝，不做部分移动）。
+ * 与执行分开是为了让"先验证后动手"这件事一眼可见。
+ */
+async function planMoves(ctx, body) {
+  const target = await resolveRequestPath(ctx, body.targetDir);
+  const targetStat = await fsp.lstat(target.absPath).catch(() => null);
+  if (!targetStat || !targetStat.isDirectory()) {
+    throw apiError(ERROR_CODES.PATH_NOT_FOUND, '目标目录不存在', { targetDir: body.targetDir });
+  }
+
+  const plans = [];
+  for (const rawPath of body.paths) {
+    const source = await resolveRequestPath(ctx, rawPath);
+    const destAbs = path.join(target.realPath, path.basename(source.realPath));
+    if (destAbs === source.realPath) {
+      throw apiError(ERROR_CODES.TARGET_EXISTS, '源与目标相同', { path: source.userPath });
+    }
+    if (await targetExists(destAbs)) {
+      throw apiError(ERROR_CODES.TARGET_EXISTS, '目标目录已有同名项（整批取消）', { path: source.userPath, name: path.basename(destAbs) });
+    }
+    plans.push({ source, destAbs, destUser: path.posix.join(target.userPath, path.basename(destAbs)) });
+  }
+  return plans;
+}
+
+/** 单个 rename；错误码翻译集中在这里 */
+async function moveOne(plan) {
+  try {
+    await fsp.rename(plan.source.realPath, plan.destAbs);
+  } catch (error) {
+    if (error.code === 'EXDEV') {
+      // 契约：跨分区不支持移动，提示改用"复制 + 删除原文件"
+      throw apiError(ERROR_CODES.CROSS_DEVICE_UNSUPPORTED, '跨分区移动不支持，请改用「复制 + 删除原文件」', {
+        path: plan.source.userPath,
+      });
+    }
+    if (error.code === 'EACCES' || error.code === 'EPERM') {
+      throw apiError(ERROR_CODES.PERMISSION_DENIED, '没有权限移动', { path: plan.source.userPath });
+    }
+    throw error;
+  }
+}
+
+/**
  * POST /fs/move（同步；目标同名整批拒绝，避免"搬了一半"）
  * @returns {{moved: string[], skipped: string[]}}
  */
@@ -136,46 +186,13 @@ export async function moveEntries(ctx, body) {
     throw apiError(ERROR_CODES.VALIDATION_FAILED, 'targetDir 必填');
   }
 
-  const target = await resolveRequestPath(ctx, body.targetDir);
-  const targetStat = await fsp.lstat(target.absPath).catch(() => null);
-  if (!targetStat || !targetStat.isDirectory()) {
-    throw apiError(ERROR_CODES.PATH_NOT_FOUND, '目标目录不存在', { targetDir: body.targetDir });
-  }
-
-  // 先整批校验（源存在 + 目标不冲突），全部通过再动手：契约要求"整批拒绝，不做部分移动"
-  const plans = [];
-  for (const rawPath of body.paths) {
-    const source = await resolveRequestPath(ctx, rawPath);
-    const destAbs = path.join(target.realPath, path.basename(source.realPath));
-    if (destAbs === source.realPath) {
-      throw apiError(ERROR_CODES.TARGET_EXISTS, '源与目标相同', { path: source.userPath });
-    }
-    if (await targetExists(destAbs)) {
-      throw apiError(ERROR_CODES.TARGET_EXISTS, '目标目录已有同名项（整批取消）', { path: source.userPath, name: path.basename(destAbs) });
-    }
-    plans.push({ source, destAbs, destUser: path.posix.join(target.userPath, path.basename(destAbs)) });
-  }
-
+  const plans = await planMoves(ctx, body);
   const moved = [];
-  const skipped = [];
   for (const plan of plans) {
-    try {
-      await fsp.rename(plan.source.realPath, plan.destAbs);
-      moved.push(plan.destUser);
-    } catch (error) {
-      if (error.code === 'EXDEV') {
-        // 契约：跨分区不支持移动，提示改用"复制 + 删除原文件"
-        throw apiError(ERROR_CODES.CROSS_DEVICE_UNSUPPORTED, '跨分区移动不支持，请改用「复制 + 删除原文件」', {
-          path: plan.source.userPath,
-        });
-      }
-      if (error.code === 'EACCES' || error.code === 'EPERM') {
-        throw apiError(ERROR_CODES.PERMISSION_DENIED, '没有权限移动', { path: plan.source.userPath });
-      }
-      throw error;
-    }
+    await moveOne(plan);
+    moved.push(plan.destUser);
   }
-  return { moved, skipped };
+  return { moved, skipped: [] };
 }
 
 /**

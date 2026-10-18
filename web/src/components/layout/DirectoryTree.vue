@@ -53,17 +53,17 @@ async function toggle(nodePath) {
 
 /** 拍平可见节点：根 + 递归展开的部分 */
 const visibleNodes = computed(() => {
-  const result = [];
+  const flatNodes = [];
   const walk = (nodePath, depth) => {
-    const node = nodes.value.get(nodePath);
-    if (!node) return;
-    for (const child of node.children || []) {
-      result.push({ ...child, depth, expanded: Boolean(nodes.value.get(child.path)?.expanded) });
+    const treeNode = nodes.value.get(nodePath);
+    if (!treeNode) return;
+    for (const child of treeNode.children || []) {
+      flatNodes.push({ ...child, depth, expanded: Boolean(nodes.value.get(child.path)?.expanded) });
       if (nodes.value.get(child.path)?.expanded) walk(child.path, depth + 1);
     }
   };
   walk(ROOT_PATH, 0);
-  return result;
+  return flatNodes;
 });
 
 async function onDrop(targetPath, event) {

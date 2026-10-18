@@ -280,44 +280,24 @@ const menuItems = computed(() => {
   return items;
 });
 
-/** 菜单动作分发 */
+/** 菜单动作表：把"键 → 做什么"拆开写，各动作独立成函数（也让单函数复杂度落在阈值内） */
+const MENU_ACTIONS = {
+  compress: () => { if (selected.value.size > 0) showCompress.value = true; },
+  extract: (target) => { if (target) selectOnly(target); showExtract.value = true; },
+  enter: (target) => { if (target) goto(target.path); },
+  rename: (target) => { if (target) openRename(target); },
+  move: () => openMove(),
+  'copy-path': (target) => { void copyPath(target); },
+  delete: () => openDeleteConfirm(),
+  'select-all': () => selectAll(),
+  mkdir: () => openMkdir(),
+  reload: () => { void load(); },
+};
+
+/** 菜单动作分发（未知键静默忽略：菜单是数据驱动的，多一项不该让页面崩） */
 function pickMenuItem(key) {
-  const target = menuTarget.value;
-  switch (key) {
-    case 'compress':
-      if (selected.value.size > 0) showCompress.value = true;
-      break;
-    case 'extract':
-      if (target) selectOnly(target);
-      showExtract.value = true;
-      break;
-    case 'enter':
-      if (target) goto(target.path);
-      break;
-    case 'rename':
-      if (target) openRename(target);
-      break;
-    case 'move':
-      openMove();
-      break;
-    case 'copy-path':
-      void copyPath(target);
-      break;
-    case 'delete':
-      openDeleteConfirm();
-      break;
-    case 'select-all':
-      selectAll();
-      break;
-    case 'mkdir':
-      openMkdir();
-      break;
-    case 'reload':
-      void load();
-      break;
-    default:
-      break;
-  }
+  const action = MENU_ACTIONS[key];
+  if (typeof action === 'function') action(menuTarget.value);
 }
 
 /** 只选中某一项（用于"对单个文件解压"这类动作） */
@@ -420,8 +400,8 @@ function openDeleteConfirm() {
     label: `将把 ${summary} 移入回收站（可在 storage/trash 恢复）。确定删除？`,
     danger: true,
     submit: async () => {
-      const result = await api.post('/fs/delete', { paths: targets.map((entry) => entry.path) });
-      const moved = (result && result.deleted && result.deleted.length) || 0;
+      const deleteOutcome = await api.post('/fs/delete', { paths: targets.map((target) => target.path) });
+      const moved = (deleteOutcome && deleteOutcome.deleted && deleteOutcome.deleted.length) || 0;
       notice(`已移入回收站：${moved} 项`);
       clearSelection();
       await load();
@@ -452,8 +432,8 @@ function openMove() {
     label: '目标目录（例如 /备份/2024）',
     value: currentPath.value,
     submit: async (targetDir) => {
-      const result = await api.post('/fs/move', { paths: targets.map((entry) => entry.path), targetDir });
-      const movedCount = (result && result.moved && result.moved.length) || 0;
+      const moveOutcome = await api.post('/fs/move', { paths: targets.map((target) => target.path), targetDir });
+      const movedCount = (moveOutcome && moveOutcome.moved && moveOutcome.moved.length) || 0;
       notice(`已移动 ${movedCount} 项到 ${targetDir}`);
       clearSelection();
       await load();
@@ -463,8 +443,8 @@ function openMove() {
 
 async function onTreeDrop({ paths, targetDir }) {
   try {
-    const result = await api.post('/fs/move', { paths, targetDir });
-    notice(`已移动 ${(result && result.moved && result.moved.length) || 0} 项到 ${targetDir}`);
+    const moveOutcome = await api.post('/fs/move', { paths, targetDir });
+    notice(`已移动 ${(moveOutcome && moveOutcome.moved && moveOutcome.moved.length) || 0} 项到 ${targetDir}`);
     clearSelection();
     await load();
   } catch (error) {
