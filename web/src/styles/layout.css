@@ -291,6 +291,238 @@
   line-height: 1.2;
 }
 
+/* ===== M8：右键菜单 ===== */
+.context-menu {
+  position: fixed;
+  z-index: 3000;
+  min-width: 180px;
+  padding: var(--space-1) 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+}
+
+.context-menu__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  width: 100%;
+  /* 触屏可点区域：菜单项也按 40px 起步（桌面看也不突兀） */
+  min-height: 40px;
+  padding: 0 var(--space-3);
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  font-size: var(--font-size-sm, 0.875rem);
+  text-align: left;
+  cursor: pointer;
+}
+
+.context-menu__item:hover:not(:disabled) {
+  background: var(--color-hover);
+}
+
+.context-menu__item:disabled {
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+}
+
+.context-menu__item--danger {
+  color: var(--color-error, #dc2626);
+}
+
+.context-menu__shortcut {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.context-menu__divider {
+  height: 1px;
+  margin: var(--space-1) 0;
+  background: var(--color-border);
+}
+
+/* ===== M8：对话框（重命名/新建/删除确认/移动） ===== */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 3100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  background: rgb(15 23 42 / 45%);
+}
+
+.dialog {
+  width: min(420px, 100%);
+  padding: var(--space-4);
+  background: var(--color-surface);
+  border-radius: var(--radius-md);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 25%);
+}
+
+.dialog__title {
+  margin: 0 0 var(--space-3);
+  font-size: var(--font-size-lg, 1.125rem);
+}
+
+.dialog__field {
+  display: block;
+  margin-bottom: var(--space-3);
+}
+
+.dialog__field span {
+  display: block;
+  margin-bottom: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.dialog__field input {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.dialog__text {
+  margin: 0 0 var(--space-3);
+  color: var(--color-text-muted);
+}
+
+.dialog__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.dialog__footer button {
+  min-height: 40px;
+  padding: 0 var(--space-4);
+}
+
+.dialog__primary {
+  border-color: var(--color-primary, #2f6fed);
+  background: var(--color-primary, #2f6fed);
+  color: #fff;
+}
+
+.dialog__primary--danger {
+  border-color: var(--color-error, #dc2626);
+  background: var(--color-error, #dc2626);
+}
+
+/* ===== M8：目录树（左栏 + 拖放高亮） ===== */
+.file-browser__split {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) minmax(0, 1fr);
+  gap: var(--space-4);
+  margin-top: var(--space-3);
+}
+
+.file-browser__tree-pane {
+  overflow: auto;
+  max-height: 62vh;
+  border-right: 1px solid var(--color-border);
+  padding-right: var(--space-3);
+}
+
+.dir-tree__caption {
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.dir-tree__node {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  width: 100%;
+  /* 触屏行高：目录树也是可点目标，按 40px 起步 */
+  min-height: 40px;
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.dir-tree__node:hover {
+  background: var(--color-hover);
+}
+
+.dir-tree__node--active {
+  background: var(--color-hover);
+  font-weight: 600;
+}
+
+/* 拖放目标高亮：拖拽经过时必须有明确反馈，否则用户不知道会放到哪 */
+.dir-tree__node[data-drop-active='true'] {
+  outline: 2px dashed var(--color-primary, #2f6fed);
+  outline-offset: -2px;
+  background: color-mix(in srgb, var(--color-primary, #2f6fed) 12%, transparent);
+}
+
+.dir-tree__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dir-tree__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.dir-tree__toggle {
+  /* 展开箭头本身也是点目标：给足 28px（触屏上不要求 40，但别做成 16px 的针尖） */
+  width: 28px;
+  min-height: 40px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+/* ===== M8：行焦点/选中/拖放目标 ===== */
+.file-table__row--focused {
+  outline: 2px solid var(--color-primary, #2f6fed);
+  outline-offset: -2px;
+}
+
+.file-table__row--selected {
+  background: color-mix(in srgb, var(--color-primary, #2f6fed) 10%, transparent);
+}
+
+.drop-target {
+  outline: 2px dashed var(--color-primary, #2f6fed);
+  outline-offset: 2px;
+}
+
+/* 窄屏：目录树收到上方、降低高度，避免挤占文件列表 */
+@media (max-width: 760px) {
+  .file-browser__split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .file-browser__tree-pane {
+    max-height: 30vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--color-border);
+    padding-right: 0;
+    padding-bottom: var(--space-2);
+  }
+}
+
 .placeholder-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
