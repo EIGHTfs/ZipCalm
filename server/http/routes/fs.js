@@ -9,6 +9,7 @@
 import { ERROR_CODES, apiError } from '../../lib/errors.js';
 import { listDirectory } from '../../core/fs/list.js';
 import { listRoots } from '../../core/fs/roots.js';
+import { searchFiles } from '../../core/fs/search.js';
 import { deleteEntries, makeDirectory, moveEntries, renameEntry } from '../../core/fs/writeOps.js';
 import { statEntry } from '../../core/fs/stat.js';
 
@@ -79,6 +80,17 @@ export default async function fsRoutes(app) {
       // 删除任务的 INV-06 复核基准跟随本次请求的根（多根下不能用全局默认根）
       rootAbs: app.requestContext(request).rootAbs,
     }));
+  });
+
+  /**
+   * 文件名搜索（有界遍历：深度 6 / 结果 500 / 3s）：只在当前根内、不跟随符号链接、跳过黑名单目录。
+   * 未给 q 或为空 → 400（前端"未输入不请求"）。
+   */
+  app.get('/fs/search', { preHandler: [app.requireAuth] }, async (request, reply) => {
+    const context = app.requestContext(request);
+    const layers = await app.blacklist.layersFor({ enabled: true, taskPatterns: [] });
+    const result = await searchFiles(context, request.query.q, { limit: request.query.limit, layers });
+    reply.ok(result);
   });
 
   app.get('/fs/stat', { preHandler: [app.requireAuth, app.guardPath({ source: 'query' })] }, async (request, reply) => {

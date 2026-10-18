@@ -110,19 +110,23 @@ async function main() {
   check('登录拿到 Bearer Token', Boolean(TOKEN));
 
   // 用户层先清零，保证断言从已知状态出发（结束时会再还原）
-  await api('PUT', '/blacklist/user', { patterns: [], enabled: true });
+  // 默认黑名单已收敛为"系统垃圾"（见 blacklist.js 注释）：本套件需要 jpg 被跳过，
+  // 所以显式用**用户自定义层**加 *.jpg —— 这正好也证明"M6 第 6 条在用户规则下照样成立"。
+  await api('PUT', '/blacklist/user', { patterns: ['*.jpg'], enabled: true });
 
   // ===== ④ 端点形状 + 添加/删除扩展名 =====
   const initial = await api('GET', '/blacklist');
   const globalPatterns = (initial.json && initial.json.data && initial.json.data.global && initial.json.data.global.patterns) || [];
   check('GET /blacklist 返回三层结构', Boolean(initial.json && initial.json.data && initial.json.data.global && initial.json.data.user), `HTTP ${initial.status}`);
-  check('global 层 locked 且含已压缩格式与系统垃圾', initial.json.data.global.locked === true
-    && ['*.jpg', '*.mp4', '*.zip', 'Thumbs.db', '@eaDir'].every((pattern) => globalPatterns.includes(pattern)), `共 ${globalPatterns.length} 条`);
+  check('global 层 locked 且只含系统垃圾（jpg 等已不在默认里）', initial.json.data.global.locked === true
+    && ['Thumbs.db', '.DS_Store', '@eaDir'].every((pattern) => globalPatterns.includes(pattern))
+    && !globalPatterns.includes('*.jpg'), `共 ${globalPatterns.length} 条`);
   check('effectiveCount ≥ 全局默认条数', initial.json.data.effectiveCount >= globalPatterns.length, `effectiveCount=${initial.json.data.effectiveCount}`);
 
-  const added = await api('PUT', '/blacklist/user', { patterns: ['*.bak', '*.tmp'], enabled: true });
+  const added = await api('PUT', '/blacklist/user', { patterns: ['*.jpg', '*.bak', '*.tmp'], enabled: true });
   const userPatterns = (added.json && added.json.data && added.json.data.user && added.json.data.user.patterns) || [];
-  check('PUT /blacklist/user 添加扩展名生效', userPatterns.includes('*.bak') && userPatterns.includes('*.tmp'), `patterns=${JSON.stringify(userPatterns)}`);
+  check('PUT /blacklist/user 添加扩展名生效（并把原有 *.jpg 一起替换上去）',
+    userPatterns.includes('*.bak') && userPatterns.includes('*.tmp') && userPatterns.includes('*.jpg'), `patterns=${JSON.stringify(userPatterns)}`);
   const reread = await api('GET', '/blacklist');
   check('重新 GET 能读到用户层（持久化生效）', ((reread.json.data.user && reread.json.data.user.patterns) || []).includes('*.bak'));
 
@@ -131,8 +135,10 @@ async function main() {
   const tooLong = await api('PUT', '/blacklist/user', { patterns: [`*.${'x'.repeat(OVERLONG_PATTERN_LENGTH)}`] });
   check('单条超过 128 字符被拒', tooLong.json && tooLong.json.error && tooLong.json.error.code === 'VALIDATION_FAILED');
 
-  const removed = await api('PUT', '/blacklist/user', { patterns: ['*.tmp'], enabled: true });
-  check('PUT 全量替换（删除 *.bak 后只剩 *.tmp）', JSON.stringify((removed.json.data.user.patterns) || []) === '["*.tmp"]', JSON.stringify(removed.json.data.user.patterns));
+  const removed = await api('PUT', '/blacklist/user', { patterns: ['*.jpg', '*.tmp'], enabled: true });
+  check('PUT 全量替换（删除 *.bak 后只剩 *.jpg/*.tmp）',
+    JSON.stringify((removed.json.data.user.patterns) || []) === '["*.jpg","*.tmp"]',
+    JSON.stringify(removed.json.data.user.patterns));
 
   // ===== ①②③⑥ 夹具与预览 =====
   await prepareFixture();
@@ -140,7 +146,7 @@ async function main() {
   const skippedAll = (previewAll.json && previewAll.json.data && previewAll.json.data.skipped) || [];
   const keptAll = (previewAll.json && previewAll.json.data && previewAll.json.data.kept) || [];
   check('预览：全 jpg 目录 3 个文件全部跳过', skippedAll.length === 3 && keptAll.length === 0, `skipped=${skippedAll.length} kept=${keptAll.length}`);
-  check('预览：skipped 带 pattern/layer（global/*.jpg）', skippedAll.every((item) => item.pattern === '*.jpg' && item.layer === 'global'), JSON.stringify(skippedAll[0] || null));
+  check('预览：skipped 带 pattern/layer（user/*.jpg —— 用户自定义层）', skippedAll.every((item) => item.pattern === '*.jpg' && item.layer === 'user'), JSON.stringify(skippedAll[0] || null));
   check('预览：skipped 只有用户路径（不泄漏 absPath）', skippedAll.every((item) => typeof item.path === 'string' && item.path.startsWith('/m6-test/') && !item.absPath));
 
   const previewMixed = await api('POST', '/blacklist/preview', { paths: [`${FIXTURE_API}/mixed`], extraPatterns: [] });
@@ -157,7 +163,7 @@ async function main() {
   const entries = (listing.json && listing.json.data && listing.json.data.entries) || [];
   const jpgEntry = entries.find((entry) => entry.name === 'a.jpg');
   const txtEntry = entries.find((entry) => entry.name === 'keep-1.txt');
-  check('fs/list：jpg 标 blacklisted=true + layer=global', Boolean(jpgEntry && jpgEntry.blacklisted === true && jpgEntry.blacklistLayer === 'global'), JSON.stringify(jpgEntry || null));
+  check('fs/list：jpg 标 blacklisted=true + layer=user（用户规则命中）', Boolean(jpgEntry && jpgEntry.blacklisted === true && jpgEntry.blacklistLayer === 'user'), JSON.stringify(jpgEntry || null));
   check('fs/list：txt 不标黑名单', Boolean(txtEntry && txtEntry.blacklisted === false && txtEntry.blacklistLayer === null), JSON.stringify(txtEntry || null));
 
   // ===== ① 全 jpg → 创建任务被拦（不建任务）=====
@@ -177,7 +183,7 @@ async function main() {
   const bundleTask = await waitTask(bundleId);
   check('② 打包任务 done', Boolean(bundleTask && bundleTask.status === 'done'), `status=${bundleTask && bundleTask.status} code=${bundleTask && bundleTask.error && bundleTask.error.code}`);
   const skippedInTask = (bundleTask && bundleTask.result && bundleTask.result.skipped) || [];
-  check('② result.skipped 记录 2 个 jpg（含 path/pattern/layer）', skippedInTask.filter((item) => item.pattern === '*.jpg' && item.layer === 'global').length === 2, JSON.stringify(skippedInTask));
+  check('② result.skipped 记录 2 个 jpg（含 path/pattern/layer）', skippedInTask.filter((item) => item.pattern === '*.jpg' && item.layer === 'user').length === 2, JSON.stringify(skippedInTask));
   check('② result.skipped 不含 absPath（契约红线）', skippedInTask.every((item) => !item.absPath));
   const bundleOut = bundleTask && bundleTask.result && bundleTask.result.packages && bundleTask.result.packages[0] && bundleTask.result.packages[0].outputPath;
   check('② 产出压缩包路径存在', Boolean(bundleOut), String(bundleOut));
@@ -220,9 +226,9 @@ async function main() {
     user: { enabled: true, patterns: ['*.txt'] },
     global: { enabled: false },
   });
-  const jpgWhenGlobalOff = matchEntry(globalOffLayers, { name: 'photo-a.jpg' });
+  const jpgWhenGlobalOff = matchEntry(globalOffLayers, { name: 'Thumbs.db' });
   const txtWhenGlobalOff = matchEntry(globalOffLayers, { name: 'note.txt' });
-  check('只关 global：jpg 不再命中（全局层确实关了）', jpgWhenGlobalOff === null, JSON.stringify(jpgWhenGlobalOff));
+  check('只关 global：系统垃圾（Thumbs.db）不再命中（全局层确实关了）', jpgWhenGlobalOff === null, JSON.stringify(jpgWhenGlobalOff));
   check('只关 global：user 层的 *.txt 仍然命中（关的是层，不是全部）',
     Boolean(txtWhenGlobalOff && txtWhenGlobalOff.layer === 'user' && txtWhenGlobalOff.pattern === '*.txt'),
     JSON.stringify(txtWhenGlobalOff));
@@ -231,9 +237,9 @@ async function main() {
     user: { enabled: false, patterns: ['*.txt'] },
     global: { enabled: true },
   });
-  const jpgWhenUserOff = matchEntry(userOffLayers, { name: 'photo-a.jpg' });
+  const jpgWhenUserOff = matchEntry(userOffLayers, { name: 'Thumbs.db' });
   const txtWhenUserOff = matchEntry(userOffLayers, { name: 'note.txt' });
-  check('只关 user：jpg 仍被全局层命中（层之间互相独立）',
+  check('只关 user：系统垃圾仍被全局层命中（层之间互相独立）',
     Boolean(jpgWhenUserOff && jpgWhenUserOff.layer === 'global'), JSON.stringify(jpgWhenUserOff));
   check('只关 user：*.txt 不再命中（用户层确实关了）', txtWhenUserOff === null, JSON.stringify(txtWhenUserOff));
 
@@ -243,7 +249,7 @@ async function main() {
   const skippedUserOff = (previewUserOff.json.data && previewUserOff.json.data.skipped) || [];
   const patternsUserOff = skippedUserOff.map((item) => item.pattern);
   check('API：用户层关闭后 *.txt 不再被跳过', !patternsUserOff.includes('*.txt'), `patterns=${JSON.stringify([...new Set(patternsUserOff)])}`);
-  check('API：用户层关闭后 jpg 仍被全局层跳过', skippedUserOff.filter((item) => item.layer === 'global').length === 2, `skipped=${skippedUserOff.length}`);
+  check('API：用户层关闭后 jpg 不再被跳过（默认值已收敛为系统垃圾）', !patternsUserOff.includes('*.jpg'), `patterns=${JSON.stringify([...new Set(patternsUserOff)])}`);
   await api('PUT', '/blacklist/user', { patterns: [], enabled: true }); // 还原
 
   // ===== 开关语义：blacklist.enabled=false → 三层全部不生效（jpg 也会被打包）=====

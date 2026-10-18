@@ -104,6 +104,18 @@ async function main() {
     && configuredWithBad.roots.find((root) => root.id === 'bad').totalBytes === null,
     JSON.stringify(configuredWithBad.roots.map((root) => [root.id, root.totalBytes])));
 
+  // ===== 搜索（有界遍历；只在当前根内）=====
+  const emptyQuery = await api('/fs/search?q=');
+  check('搜索空 q → VALIDATION_FAILED', (emptyQuery.json.error || {}).code === 'VALIDATION_FAILED', JSON.stringify(emptyQuery.json.error));
+  const found = await api('/fs/search?q=m8&limit=5&rootId=default');
+  const foundData = (found.json && found.json.data) || {};
+  check('搜索能找到默认根里的目录（有界遍历生效，返回 elapsedMs）',
+    Array.isArray(foundData.items) && foundData.items.some((item) => item.name === 'm8-test') && Number.isFinite(foundData.elapsedMs),
+    `items=${(foundData.items || []).length} elapsed=${foundData.elapsedMs}`);
+  check('搜索结果不含 absPath（只回传用户路径）', (foundData.items || []).every((item) => typeof item.path === 'string' && item.path.startsWith('/') && !('absPath' in item)));
+  const limited = await api('/fs/search?q=m&limit=2&rootId=default');
+  check('limit 生效（结果数不超过 limit）', ((limited.json.data || {}).items || []).length <= 2, `items=${((limited.json.data || {}).items || []).length}`);
+
   const runSummary = reporter.summary();
   if (runSummary.fail > 0) process.exitCode = 1;
 }

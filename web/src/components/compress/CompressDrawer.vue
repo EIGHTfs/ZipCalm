@@ -15,6 +15,8 @@ import { COMPRESS_MODE, COMPRESS_MODE_HINTS, COMPRESS_MODE_LABELS } from '../../
 const props = defineProps({
   open: { type: Boolean, default: false },
   sources: { type: Array, default: () => [] },
+  /** 当前存储根（docs/16）：黑名单预览与任务创建都必须带它 */
+  rootId: { type: String, default: 'default' },
 });
 const emit = defineEmits(['close', 'submitted']);
 
@@ -46,7 +48,11 @@ async function runPreview() {
     return;
   }
   try {
-    const previewDoc = await api.post('/blacklist/preview', { paths: props.sources.map((source) => source.path), extraPatterns: [] });
+    const previewDoc = await api.post('/blacklist/preview', {
+      paths: props.sources.map((source) => source.path),
+      extraPatterns: [],
+      rootId: props.rootId,
+    });
     if (token !== previewToken.value) return; // 已有更新的请求，丢弃旧结果
     const skipped = (previewDoc && previewDoc.skipped) || [];
     skipInfo.value = {
@@ -88,6 +94,7 @@ async function submit() {
   try {
     const created = await api.post('/compress/tasks', {
       sources: props.sources.map((source) => source.path),
+      rootId: props.rootId,
       mode: mode.value,
       format: formatId.value,
       options: {

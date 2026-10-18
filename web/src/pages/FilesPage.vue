@@ -80,6 +80,9 @@ function applyTouchDefaultView() {
 const actionError = ref('');
 const activeTaskId = computed(() => submittedTaskId.value || (tasks.activeTask ? tasks.activeTask.id : null));
 
+/** 当前存储根（docs/16）：所有 fs 请求都带它；切根后路径/多选必须整体重置 */
+const rootId = computed(() => ui.currentRootId);
+
 const currentPath = computed(() => {
   const pathParam = route.query.path;
   return typeof pathParam === 'string' && pathParam.length > 0 ? pathParam : '/';
@@ -134,8 +137,9 @@ function applyListingPayload(listingPayload) {
     total: listingPayload && Number.isInteger(listingPayload.total) ? listingPayload.total : entries.value.length,
     truncated: Boolean(listingPayload && listingPayload.truncated),
   };
-  // 焦点行跟随新列表（否则上下箭头可能落在已不存在的索引上）
-  focusIndex.value = entries.value.length > 0 ? 0 : -1;
+  // 焦点行默认"无"：加载完就高亮第一行会让用户以为"第一项被选中了"（虚线框不是选中态）。
+  // 只有按了上下箭头才设置焦点（键盘导航仍然完整可用）。
+  focusIndex.value = -1;
 }
 
 /** 加载失败：把契约错误码与文案收进 errorInfo，并清空列表（避免展示上一目录的残留） */
@@ -156,6 +160,7 @@ async function load() {
       path: currentPath.value,
       sort: sortKey.value,
       order: order.value,
+      rootId: rootId.value,
     }));
     status.value = 'ready';
   } catch (error) {
@@ -383,7 +388,7 @@ function openRename(entry) {
     value: entry.name,
     submit: async (newName) => {
       if (newName === entry.name) return;
-      await api.post('/fs/rename', { path: entry.path, newName });
+      await api.post('/fs/rename', { path: entry.path, newName, rootId: rootId.value });
       notice(`已重命名为 ${newName}`);
       await load();
     },
@@ -400,7 +405,7 @@ function openDeleteConfirm() {
     label: `将把 ${summary} 移入回收站（可在 storage/trash 恢复）。确定删除？`,
     danger: true,
     submit: async () => {
-      const deleteOutcome = await api.post('/fs/delete', { paths: targets.map((target) => target.path) });
+      const deleteOutcome = await api.post('/fs/delete', { paths: targets.map((target) => target.path), rootId: rootId.value });
       const moved = (deleteOutcome && deleteOutcome.deleted && deleteOutcome.deleted.length) || 0;
       notice(`已移入回收站：${moved} 项`);
       clearSelection();
@@ -416,7 +421,7 @@ function openMkdir() {
     value: '',
     submit: async (name) => {
       const parent = currentPath.value === '/' ? '' : currentPath.value;
-      await api.post('/fs/mkdir', { path: `${parent}/${name}` });
+      await api.post('/fs/mkdir', { path: `${parent}/${name}`, rootId: rootId.value });
       notice(`已创建 ${name}`);
       await load();
     },
@@ -432,7 +437,7 @@ function openMove() {
     label: '目标目录（例如 /备份/2024）',
     value: currentPath.value,
     submit: async (targetDir) => {
-      const moveOutcome = await api.post('/fs/move', { paths: targets.map((target) => target.path), targetDir });
+      const moveOutcome = await api.post('/fs/move', { paths: targets.map((target) => target.path), targetDir, rootId: rootId.value });
       const movedCount = (moveOutcome && moveOutcome.moved && moveOutcome.moved.length) || 0;
       notice(`已移动 ${movedCount} 项到 ${targetDir}`);
       clearSelection();
@@ -443,7 +448,7 @@ function openMove() {
 
 async function onTreeDrop({ paths, targetDir }) {
   try {
-    const moveOutcome = await api.post('/fs/move', { paths, targetDir });
+    const moveOutcome = await api.post('/fs/move', { paths, targetDir, rootId: rootId.value });
     notice(`已移动 ${(moveOutcome && moveOutcome.moved && moveOutcome.moved.length) || 0} 项到 ${targetDir}`);
     clearSelection();
     await load();
@@ -597,6 +602,14 @@ function onCompressDropZone(event) {
   }
 }
 
+// 切根：路径与多选不能留上一个根的残留（docs/16 验收第 5 条）
+watch(rootId, () => {
+  clearSelection();
+  focusIndex.value = -1;
+  if (currentPath.value !== '/') goto('/');
+  else void load();
+});
+
 onMounted(() => {
   window.addEventListener('keydown', onGlobalKeyDown);
   syncViewportMode();
@@ -650,7 +663,7 @@ onUnmounted(() => {
 
     <div class="file-browser__split">
       <aside class="file-browser__tree-pane">
-        <DirectoryTree :current-path="currentPath" @navigate="goto" @drop-paths="onTreeDrop" />
+        <DirectoryTree :current-path="currentPath" :root-id="rootId" @navigate="goto" @drop-paths="onTreeDrop" />
       </aside>
       <div class="file-browser__content">
 
@@ -816,6 +829,7 @@ onUnmounted(() => {
 
   <CompressDrawer
     :open="showCompress"
+    :root-id="rootId"
     :sources="selectedEntries"
     @close="showCompress = false"
     @submitted="onSubmitted"
@@ -823,6 +837,7 @@ onUnmounted(() => {
 
   <ExtractDialog
     :open="showExtract"
+    :root-id="rootId"
     :archive-path="extractTarget ? extractTarget.path : ''"
     @close="showExtract = false"
     @submitted="onSubmitted"

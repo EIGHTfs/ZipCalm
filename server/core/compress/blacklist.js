@@ -28,18 +28,11 @@ export const BLACKLIST_LAYERS = Object.freeze({
  * 系统垃圾（Thumbs.db/.DS_Store/@eaDir）本来就不该进包。
  */
 export const GLOBAL_PATTERNS = Object.freeze([
-  '*.jpg',
-  '*.jpeg',
-  '*.png',
-  '*.mp4',
-  '*.mp3',
-  '*.zip',
-  '*.7z',
-  '*.rar',
-  '*.gz',
-  '*.docx',
-  '*.xlsx',
-  '*.pptx',
+  // 只放**系统垃圾**：这些文件进包没有任何意义（缩略图缓存、Finder 元数据、群晖元目录）。
+  //
+  // 曾经默认还包含 jpg/png/mp4/zip/docx 等 12 个"已压缩格式"，已移除 ——
+  // 原因：打包不总是为了省空间（"把照片打包发给别人"是常见需求），默认静默跳过会让打包结果
+  // 与预期不符。机制保留：这些规则可以显式加进用户层，或在任务级用 extraPatterns 临时加。
   'Thumbs.db',
   '.DS_Store',
   '@eaDir',

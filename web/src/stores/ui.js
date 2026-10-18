@@ -18,6 +18,8 @@ export const useUiStore = defineStore('ui', {
     pageHint: '',
     /** 文件页当前浏览路径（由 route.query.path 推导；null 表示当前页面不是文件页） */
     fsPath: null,
+    /** 当前存储根（docs/16）：侧栏切根后所有 fs 请求都带它；'default' = 配置里的 storage.root */
+    currentRootId: 'default',
     /** 视图模式：docs/08 §二 默认列表视图 */
     viewMode: VIEW_MODE.LIST,
     /** 底部任务条摘要：F1 恒为 0，M3 由 /api/v1/tasks 填充 */
@@ -55,6 +57,10 @@ export const useUiStore = defineStore('ui', {
       } else {
         this.fsPath = null;
       }
+    },
+    /** 切换存储根（docs/16）：只管 id，路径/多选的重置由文件页监听处理 */
+    setCurrentRoot(rootId) {
+      if (typeof rootId === 'string' && rootId.length > 0) this.currentRootId = rootId;
     },
     /** 切换列表/网格视图；非法值直接忽略，不抛错（UI 不该因脏输入崩） */
     setViewMode(mode) {

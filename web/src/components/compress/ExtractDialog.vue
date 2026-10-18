@@ -13,6 +13,8 @@ import { api } from '../../api/client.js';
 const props = defineProps({
   open: { type: Boolean, default: false },
   archivePath: { type: String, default: '' },
+  /** 当前存储根（docs/16） */
+  rootId: { type: String, default: 'default' },
 });
 const emit = defineEmits(['close', 'submitted']);
 
@@ -29,7 +31,7 @@ watch(
     errorText.value = '';
     if (!open) return;
     try {
-      const preflight = await api.post('/extract/preflight', { path: props.archivePath });
+      const preflight = await api.post('/extract/preflight', { path: props.archivePath, rootId: props.rootId });
       preflightInfo.value = preflight;
       if (preflight && preflight.targetDir) targetDir.value = preflight.targetDir;
     } catch (error) {
@@ -44,6 +46,7 @@ async function submit() {
   errorText.value = '';
   try {
     const created = await api.post('/extract/tasks', {
+      rootId: props.rootId,
       path: props.archivePath,
       targetDir: targetDir.value || undefined,
       options: { deleteArchiveAfterExtract: deleteArchive.value },

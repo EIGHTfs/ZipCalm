@@ -170,7 +170,10 @@ export async function listRoots({ storage, env = process.env }) {
  * @returns {{id: string, absPath: string}}
  */
 export function resolveRoot(fsContext, rootId) {
-  if (!rootId) return { id: DEFAULT_ROOT_ID, absPath: fsContext.rootAbs };
+  // 未指定或就是 default：用配置里的 storage.root。
+  // 注意 default **不一定出现在 /fs/volumes 的列表里**（C 模式默认只列共享），但请求必须能用它 ——
+  // 否则"不带 rootId 的请求能工作、带 rootId=default 反而 400"，自相矛盾。
+  if (!rootId || rootId === DEFAULT_ROOT_ID) return { id: DEFAULT_ROOT_ID, absPath: fsContext.rootAbs };
   const matched = (fsContext.roots || []).find((root) => root.id === rootId);
   if (!matched) {
     throw apiError(ERROR_CODES.VALIDATION_FAILED, `未知的 rootId：${rootId}`, { rootId });

@@ -15,6 +15,8 @@ import { api } from '../../api/client.js';
 const props = defineProps({
   /** 当前所在目录（用于高亮） */
   currentPath: { type: String, default: '/' },
+  /** 当前存储根（docs/16）：树只在当前根内展开 */
+  rootId: { type: String, default: 'default' },
 });
 const emit = defineEmits(['navigate', 'drop-paths']);
 
@@ -31,7 +33,7 @@ async function loadChildren(nodePath) {
   if (existing && existing.loaded) return;
   nodes.value.set(nodePath, { ...(existing || {}), loading: true, children: existing?.children || [], expanded: true, loaded: false });
   try {
-    const payload = await api.get('/fs/list', { path: nodePath, sort: 'name', order: 'asc' });
+    const payload = await api.get('/fs/list', { path: nodePath, sort: 'name', order: 'asc', rootId: props.rootId });
     const children = ((payload && payload.entries) || [])
       .filter((entry) => entry.type === 'dir')
       .map((entry) => ({ path: entry.path, name: entry.name }));
@@ -86,7 +88,7 @@ function onDragOver(nodePath, event) {
 
 // 进入目录后刷新根层：新目录可能刚建出来（右键"新建文件夹" / 压缩产物），树要能看见
 watch(
-  () => props.currentPath,
+  () => [props.currentPath, props.rootId],
   async () => {
     nodes.value.delete(ROOT_PATH);
     await loadChildren(ROOT_PATH);
