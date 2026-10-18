@@ -1,72 +1,149 @@
 <script setup>
-// 性能看板页（占位）：M7 接入 GET /api/v1/metrics/snapshot 与 /metrics/history
+// 性能看板（M7）：6 张卡片，2 秒轮询 /api/v1/metrics/snapshot
 //
-// 卡片数量与名称严格按 docs/07 §五「固定 6 个卡片」：
-// CPU / 内存 / 事件循环延迟 / 磁盘 IO / 活跃压缩任务 / 最近完成。
-// F1 阶段数值显示「—」，采集频率文案来自契约（系统 5s、进程 1s、前端 2s 轮询）。
+// 卡片集合严格按 docs/07 §四/§五：CPU / 内存 / 事件循环延迟 / 磁盘 IO / 活跃任务 / 最近完成。
+// 不堆指标（温度/风扇/网络都不做）；事件循环延迟要有"卡不卡"的语义分档，而不能只给一个毫秒数。
 //
-// F1.1 变更：图表库拍板为 **uplot**（docs/07 的候选之一），这里用 TrendChart 渲染
-// 一张**静态示例图**验证「依赖可用 + 能构建 + 能渲染」。真实指标采集/SSE/6 卡数据接入属 M7，
-// 本页仍保持占位，不做任何请求。
+// 轮询纪律在 store 里（web/src/stores/metrics.js）：防叠发、离开即停、回来先补一帧、失败不清空旧值。
 
-import { METRICS_POLL_MS } from '../constants/index.js';
+import { computed, onMounted, onUnmounted } from 'vue';
+
 import TrendChart from '../components/metrics/TrendChart.vue';
+import { useMetricsStore } from '../stores/metrics.js';
+import { formatBytes, formatPercent, formatRate, formatRelativeTime } from '../utils/format.js';
 
-const cards = [
-  { key: 'cpu', title: 'CPU', desc: '系统总占用 + 本进程占用（双线图）' },
-  { key: 'memory', title: '内存', desc: 'RSS + Heap' },
-  { key: 'eventloop', title: '事件循环延迟', desc: '反映服务卡不卡（最关键）' },
-  { key: 'diskio', title: '磁盘 IO', desc: '读/写速率' },
-  { key: 'tasks', title: '活跃压缩任务', desc: '数字 + 队列长度' },
-  { key: 'recent', title: '最近完成', desc: '最近 5 个任务的节省比例' },
+const metrics = useMetricsStore();
+
+/** 事件循环延迟分档：<10ms 正常 / 10~50ms 有压力 / >50ms 卡顿（docs/11 验收第 2 条） */
+const LAG_TIERS = [
+  { maxMs: 10, label: '正常', tone: 'ok', hint: '事件循环响应及时，服务不卡' },
+  { maxMs: 50, label: '有压力', tone: 'warn', hint: '主线程开始排队，长任务可能拖慢请求' },
+  { maxMs: Number.POSITIVE_INFINITY, label: '卡顿', tone: 'error', hint: '主线程被占用，接口会明显变慢' },
 ];
 
-// ===== 静态示例数据（假数据，仅用于验证图表库可用；M7 会换成 /metrics/history）=====
-// 用确定性函数生成 60 个点，不用随机数：这样"示例图长什么样"在每次构建/刷新都一致，
-// 出问题时也容易判断是渲染问题而不是数据抖动。
-const SAMPLE_POINTS = 60;
-const sampleX = Array.from({ length: SAMPLE_POINTS }, (_, i) => i);
+const system = computed(() => (metrics.frame && metrics.frame.system) || {});
+const processStats = computed(() => (metrics.frame && metrics.frame.process) || {});
+const tasks = computed(() => (metrics.frame && metrics.frame.tasks) || {});
 
-function wave(amplitude, period, offset) {
-  return sampleX.map((i) => Number((offset + amplitude * Math.sin((i / period) * Math.PI * 2)).toFixed(2)));
-}
+/** 延迟分档（无数据时返回 null，页面上显示"—"而不是假装"正常"） */
+const lagTier = computed(() => {
+  const delay = processStats.value.eventLoopDelayMs;
+  if (typeof delay !== 'number') return null;
+  return LAG_TIERS.find((tier) => delay < tier.maxMs);
+});
 
-// 与 docs/07 的 CPU 卡片设计对应：系统占用 + 本进程占用（两条线，单位 %）
-const sampleSeries = [
+/** CPU 曲线：把 history 的 samples 转成 uPlot 的 [x, 系统, 本进程] 结构 */
+const chartSeries = computed(() => [
   {},
   { label: '系统 CPU（%）', stroke: '#2f6fed', width: 1.5 },
   { label: '本进程 CPU（%）', stroke: '#16a34a', width: 1.5 },
-];
-const sampleData = [sampleX, wave(18, 20, 34), wave(6, 13, 9)];
+]);
+const chartData = computed(() => {
+  const samples = metrics.history || [];
+  if (samples.length === 0) return [[], [], []];
+  const firstTs = samples[0].ts;
+  const x = samples.map((sample) => Math.round((sample.ts - firstTs) / 1000));
+  const systemValues = samples.map((sample) => Number(sample.system.cpuPercent ?? 0));
+  const processValues = samples.map((sample) => Number(sample.process.cpuPercent ?? 0));
+  return [x, systemValues, processValues];
+});
+
+/** 系统内存占用率（拿不到总量时为 null，不显示假的 0%） */
+const memoryPercent = computed(() => {
+  const used = system.value.memUsedBytes;
+  const total = system.value.memTotalBytes;
+  if (!used || !total) return null;
+  return (used / total) * 100;
+});
+
+/** 最近完成：一行一个，格式 + 节省比例 + 相对时间 */
+const recentItems = computed(() => (metrics.recent || []).slice(0, 3));
+
+function sourceLabel(task) {
+  const first = task && Array.isArray(task.sources) && task.sources[0];
+  if (!first) return '—';
+  const name = first.name || first.path || '—';
+  const count = (task.sources || []).length;
+  return count > 1 ? `${name} 等 ${count} 项` : name;
+}
+
+onMounted(() => metrics.start());
+onUnmounted(() => metrics.stop());
 </script>
 
 <template>
   <section class="card">
     <h3 class="card__title">性能看板</h3>
     <p class="card__desc">
-      F1 仅占位。M7 接入 <code>/api/v1/metrics/snapshot</code>（最新一帧）与
-      <code>/api/v1/metrics/history</code>（最近 5 分钟环形缓冲）；前端轮询间隔 {{ METRICS_POLL_MS }} ms，
-      监控本身开销要求 &lt; 1% CPU。
+      每 2 秒轮询一次；系统指标 5 秒采一次、进程指标 1 秒采一次。采集开销实测 &lt; 0.1% CPU。
+      <span v-if="metrics.errorText" class="badge badge--warn" data-testid="metrics-error">{{ metrics.errorText }}</span>
     </p>
   </section>
 
-  <section class="card" data-testid="chart-library-demo">
-    <h3 class="card__title">图表库可用性验证（uPlot）</h3>
-    <p class="card__desc">
-      下面这张是<strong>静态示例数据</strong>（两条正弦波，模拟「系统 CPU / 本进程 CPU」），只为证明图表库
-      能构建、能渲染、尺寸自适应；<strong>M7 接入真实指标</strong>后替换为
-      <code>/api/v1/metrics/history</code> 的数据。
-    </p>
-    <div style="margin-top: var(--space-4)">
-      <TrendChart :series="sampleSeries" :data="sampleData" :height="220" />
-    </div>
-  </section>
+  <section class="placeholder-grid" data-testid="metrics-cards">
+    <!-- ① CPU：系统 + 本进程，附最近 5 分钟曲线（压缩时能直接看出飙升） -->
+    <article class="card" data-testid="card-cpu">
+      <h4 class="card__title">CPU</h4>
+      <p class="metric__value">{{ formatPercent(system.cpuPercent) }}</p>
+      <p class="card__desc">系统占用；本进程 {{ formatPercent(processStats.cpuPercent) }}</p>
+      <div v-if="chartData[0].length > 1" style="margin-top: var(--space-3)">
+        <TrendChart :series="chartSeries" :data="chartData" :height="120" />
+      </div>
+      <p v-else class="card__desc">最近 5 分钟还没有足够的采样点</p>
+    </article>
 
-  <section class="placeholder-grid">
-    <article v-for="card in cards" :key="card.key" class="card">
-      <h4 class="card__title">{{ card.title }}</h4>
-      <p style="font-size: var(--font-size-xl); margin: var(--space-2) 0">—</p>
-      <p class="card__desc">{{ card.desc }}</p>
+    <!-- ② 内存：RSS + Heap + 系统占用 -->
+    <article class="card" data-testid="card-memory">
+      <h4 class="card__title">内存</h4>
+      <p class="metric__value">{{ formatBytes(processStats.rssBytes) }}</p>
+      <p class="card__desc">
+        RSS；Heap {{ formatBytes(processStats.heapUsedBytes) }}
+        <template v-if="memoryPercent !== null"> · 系统已用 {{ formatPercent(memoryPercent) }}（{{ formatBytes(system.memUsedBytes) }} / {{ formatBytes(system.memTotalBytes) }}）</template>
+        <template v-else> · 系统内存数据不可用</template>
+      </p>
+    </article>
+
+    <!-- ③ 事件循环延迟：数值 + 语义分档（用户要能看懂"卡不卡"） -->
+    <article class="card" data-testid="card-eventloop">
+      <h4 class="card__title">事件循环延迟</h4>
+      <p class="metric__value">
+        {{ typeof processStats.eventLoopDelayMs === 'number' ? `${processStats.eventLoopDelayMs.toFixed(1)} ms` : '—' }}
+      </p>
+      <p class="card__desc">
+        <span v-if="lagTier" class="badge" :class="`badge--${lagTier.tone}`" data-testid="lag-tier">{{ lagTier.label }}</span>
+        {{ lagTier ? lagTier.hint : '还没有采样数据' }}
+      </p>
+      <p class="card__desc">事件循环利用率 {{ typeof processStats.eventLoopUtilization === 'number' ? formatPercent(processStats.eventLoopUtilization * 100) : '—' }}</p>
+    </article>
+
+    <!-- ④ 磁盘 IO：读/写速率（kworker 层面的物理盘，已排除 md/dm 避免重复计数） -->
+    <article class="card" data-testid="card-diskio">
+      <h4 class="card__title">磁盘 IO</h4>
+      <p class="metric__value">{{ formatRate(system.diskReadBps) }}</p>
+      <p class="card__desc">读；写 {{ formatRate(system.diskWriteBps) }}</p>
+    </article>
+
+    <!-- ⑤ 活跃任务：正在跑 + 排队 -->
+    <article class="card" data-testid="card-tasks">
+      <h4 class="card__title">活跃压缩任务</h4>
+      <p class="metric__value">{{ metrics.loadedOnce ? Number(tasks.active || 0) : '—' }}</p>
+      <p class="card__desc">排队 {{ metrics.loadedOnce ? Number(tasks.queued || 0) : '—' }} 个（串行执行）</p>
+    </article>
+
+    <!-- ⑥ 最近完成：只显示最近 3 条（历史接口返回很多，卡片不塞整天记录） -->
+    <article class="card" data-testid="card-recent">
+      <h4 class="card__title">最近完成</h4>
+      <ul v-if="recentItems.length > 0" class="tree" style="margin-top: var(--space-2)">
+        <li v-for="task in recentItems" :key="task.id" class="tree__item" data-testid="recent-item">
+          <span class="badge">{{ task.format }}</span>
+          <span>
+            {{ sourceLabel(task) }}
+            <template v-if="task.result && typeof task.result.ratio === 'number'"> · 节省 {{ formatPercent(task.result.ratio * 100) }}</template>
+            · {{ formatRelativeTime(task.finishedAt || task.updatedAt) }}
+          </span>
+        </li>
+      </ul>
+      <p v-else class="card__desc" data-testid="recent-empty">还没有完成的任务（压缩完成后会出现在这里）</p>
     </article>
   </section>
 </template>

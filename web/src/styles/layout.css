@@ -260,6 +260,15 @@
   font-size: var(--font-size-sm);
 }
 
+.metric__value {
+  /* 看板主数值：等宽数字避免每次轮询跳动时宽度抖动 */
+  font-size: var(--font-size-2xl, 1.5rem);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin: var(--space-1) 0;
+  line-height: 1.2;
+}
+
 .placeholder-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
