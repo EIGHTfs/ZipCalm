@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}" || exit 1
 
-WANT="${*:-build m1 m2 m3 crash probes retention m4 m6 m7 m8fs}"
+WANT="${*:-build m1 m2 m3 crash probes retention m4 m6 m7 m8fs hlscan hlexec}"
 LOGDIR="${TMPDIR:-/tmp}/zipcalm-suites"
 mkdir -p "${LOGDIR}"
 
@@ -71,6 +71,10 @@ if has m6; then run_one m6 node "${SCRIPT_DIR}/test-m6-blacklist.mjs"; fi
 if has m7; then run_one m7 node "${SCRIPT_DIR}/test-m7-metrics.mjs"; fi
 # M8 前置：fs 写端点（mkdir/rename/move/delete，删除进回收站）
 if has m8fs; then run_one m8fs node "${SCRIPT_DIR}/test-m8-fs.mjs"; fi
+# 硬链接去重·扫描：size 分组 → 抽样快筛 → 全量哈希终判；含「伪造重复」守门人（同大小+同头尾+中间不同 → 不得合并）
+if has hlscan; then run_one hlscan node "${SCRIPT_DIR}/test-hardlink-scan.mjs"; fi
+# 硬链接去重·执行：rename→link→unlink 三步替换 + link 失败回滚 + 执行前全量复核 + 日志
+if has hlexec; then run_one hlexec node "${SCRIPT_DIR}/test-hardlink-execute.mjs"; fi
 
 echo
 echo "── 汇总 ──"

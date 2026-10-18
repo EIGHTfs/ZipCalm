@@ -4,4 +4,4 @@
 // "接口报的版本与界面显示的版本不一致"这种最难查的漂移（审计的 duplicate-constant-def 会命中）。
 // 放置位置：项目根的 shared/ —— web 通过 vite 别名 @shared 引入，server 用相对路径引入。
 
-export const APP_VERSION = '0.8.0';
+export const APP_VERSION = '0.9.0';
