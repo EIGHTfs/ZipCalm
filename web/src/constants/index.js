@@ -76,6 +76,7 @@ export const ROUTES = Object.freeze({
   FILES: '/files',
   TASKS: '/tasks',
   METRICS: '/metrics',
+  HARDLINK: '/hardlink',
   SETTINGS: '/settings',
   LOGIN: '/login',
 });

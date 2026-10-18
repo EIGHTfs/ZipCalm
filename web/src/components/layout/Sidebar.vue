@@ -19,6 +19,7 @@ import { FORMATS, ROUTES } from '../../constants/index.js';
 const navItems = [
   { to: ROUTES.FILES, label: '文件浏览', icon: 'files' },
   { to: ROUTES.TASKS, label: '压缩任务', icon: 'tasks' },
+  { to: ROUTES.HARDLINK, label: '硬链接去重', icon: 'hardlink' },
   { to: ROUTES.METRICS, label: '性能看板', icon: 'metrics' },
   { to: ROUTES.SETTINGS, label: '设置', icon: 'settings' },
 ];

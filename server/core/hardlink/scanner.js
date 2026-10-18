@@ -97,9 +97,14 @@ async function sampleFingerprint(absPath, size) {
     await read(0);
     if (size > SAMPLE_CHUNK) await read(size - SAMPLE_CHUNK);
     if (size > SAMPLE_CHUNK * 3) {
-      // 中间随机段：以文件内容无关的 task 级随机偏移取 2 段（伪随机可复现性不需要，防"恰好都取到相同结构区"）
+      // 中间段偏移必须**确定性**（从 size 派生，禁止 Math.random）——
+      // 抽样快筛的指纹只在「同一位置读出的段」之间可比：相同文件必须读相同段才能同指纹。
+      // 实测踩过：随机偏移让两个内容相同的文件读到不同位置 → 指纹必不同 → 真重复被快筛
+      // 排除（端到端冒烟抓到：real1/real2 全同却 skippedBySample）。确定性偏移同样满足
+      // docs/15 的"防恰好都取到相同结构区"意图（位置由 size 变化，不同 size 组内不重叠）。
+      const span = size - SAMPLE_CHUNK * 3;
       for (let i = 0; i < SAMPLE_MID_SEGMENTS; i += 1) {
-        const pos = SAMPLE_CHUNK + Math.floor(Math.random() * (size - SAMPLE_CHUNK * 3)) + i * 1024;
+        const pos = SAMPLE_CHUNK + Math.floor((span / (SAMPLE_MID_SEGMENTS + 1)) * (i + 1)) + i * 1024;
         await read(Math.min(pos, size - SAMPLE_CHUNK));
       }
     }

@@ -11,6 +11,7 @@
 import { createRouter, createWebHashHistory } from 'vue-router';
 
 import FilesPage from '../pages/FilesPage.vue';
+import HardlinkPage from '../pages/HardlinkPage.vue';
 import LoginPage from '../pages/LoginPage.vue';
 import TasksPage from '../pages/TasksPage.vue';
 import MetricsPage from '../pages/MetricsPage.vue';
@@ -44,6 +45,12 @@ export const routes = [
     name: 'metrics',
     component: MetricsPage,
     meta: { title: '性能看板', hint: 'M7 接入 /api/v1/metrics/*' },
+  },
+  {
+    path: ROUTES.HARDLINK,
+    name: 'hardlink',
+    component: HardlinkPage,
+    meta: { title: '硬链接去重', hint: 'docs/15：POST /hardlink/scan（只读）+ execute（显式确认）' },
   },
   {
     path: ROUTES.SETTINGS,

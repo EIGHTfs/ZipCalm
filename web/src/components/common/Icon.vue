@@ -19,6 +19,7 @@ import {
   FileArchive,
   Folder,
   HardDrive,
+  Link2,
   Settings,
 } from 'lucide-vue-next';
 
@@ -40,6 +41,7 @@ const ICON_COMPONENTS = {
   metrics: ChartColumn,
   settings: Settings,
   storage: HardDrive,
+  hardlink: Link2,
   formats: FileArchive,
 };
 
