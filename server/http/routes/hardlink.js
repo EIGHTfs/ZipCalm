@@ -50,7 +50,7 @@ export default async function hardlinkRoutes(app) {
     const extensions = normalizeExtensions(body.extensions);
     // 白名单 + 符号链接复核（INV-06，与 fs 路由同源）
     const resolved = await app.fsGuard.resolveReal(body.path);
-    const result = await scanHardlinkDuplicates(resolved.absPath, extensions);
+    const scanPayload = await scanHardlinkDuplicates(resolved.absPath, extensions);
 
     // 响应路径统一转 userPath（绝对路径绝不进 API，INV-06 红线）
     const rootPrefix = resolved.absPath;
@@ -59,7 +59,7 @@ export default async function hardlinkRoutes(app) {
       const base = resolved.userPath === '/' ? '' : resolved.userPath.replace(/\/$/, '');
       return `${base}/${relative}`;
     };
-    const groups = result.groups.map((group) => ({
+    const groups = scanPayload.groups.map((group) => ({
       ...group,
       master: toUser(group.master),
       duplicates: group.duplicates.map(toUser),
@@ -69,7 +69,7 @@ export default async function hardlinkRoutes(app) {
       path: resolved.userPath,
       extensions,
       groups,
-      stats: result.stats,
+      stats: scanPayload.stats,
     });
   });
 
@@ -100,8 +100,8 @@ export default async function hardlinkRoutes(app) {
         throw apiError(ERROR_CODES.VALIDATION_FAILED, 'groups 每项需要 master 与非空 duplicates');
       }
       const toAbs = async (userPath) => {
-        const item = await app.fsGuard.resolveReal(userPath);
-        const rel = path.relative(resolved.absPath, item.absPath);
+        const resolvedEntry = await app.fsGuard.resolveReal(userPath);
+        const rel = path.relative(resolved.absPath, resolvedEntry.absPath);
         if (rel.startsWith('..') || path.isAbsolute(rel)) {
           throw apiError(ERROR_CODES.PATH_OUT_OF_ROOT, '分组路径不在扫描根下', { userPath });
         }
@@ -115,7 +115,7 @@ export default async function hardlinkRoutes(app) {
     };
     const resolvedGroups = await Promise.all(body.groups.map(resolveGroup));
 
-    const result = await executeHardlinkGroups(
+    const executeOutcome = await executeHardlinkGroups(
       { logDir: app.hardlinkLogDir, logger: app.appLogger },
       resolvedGroups,
       { confirmed: true },
@@ -128,10 +128,10 @@ export default async function hardlinkRoutes(app) {
       return `${base}/${rel}`;
     };
     reply.ok({
-      executed: result.executed,
-      savedBytes: result.savedBytes,
-      failed: result.failed.map((item) => ({ duplicate: toUser(item.duplicate), code: item.code })),
-      skippedGroups: result.skippedGroups.map((item) => ({ master: toUser(item.master), reason: item.reason })),
+      executed: executeOutcome.executed,
+      savedBytes: executeOutcome.savedBytes,
+      failed: executeOutcome.failed.map((item) => ({ duplicate: toUser(item.duplicate), code: item.code })),
+      skippedGroups: executeOutcome.skippedGroups.map((item) => ({ master: toUser(item.master), reason: item.reason })),
     });
   });
 }

@@ -416,12 +416,12 @@ async function compressOnePackage(record, deps, plugin, group, groupIndex, outpu
   });
 
   // 汇总本次包的黑名单跳过项：对外 userPath、对内 absPath（删除集合要用）
-  for (const item of created.skipped || []) {
-    record.internal.skippedEntries.push(item);
+  for (const skippedEntry of created.skipped || []) {
+    record.internal.skippedEntries.push(skippedEntry);
     info.result.skipped.push({
-      path: toUserPath(rootAbs, item.absPath),
-      pattern: item.pattern,
-      layer: item.layer,
+      path: toUserPath(rootAbs, skippedEntry.absPath),
+      pattern: skippedEntry.pattern,
+      layer: skippedEntry.layer,
     });
   }
 

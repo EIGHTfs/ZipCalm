@@ -88,17 +88,17 @@ async function onConfirmExecute() {
   executeError.value = '';
   executeNotice.value = '';
   try {
-    const result = await executeHardlinkGroups({
+    const executeOutcome = await executeHardlinkGroups({
       path: scanPath.value,
       extensions: extensionList.value,
       groups: selectedGroups.value,
       confirmed: true,
     });
-    executeResult.value = result;
+    executeResult.value = executeOutcome;
     // 执行后重扫一次，让界面反映最新状态（已合并的组消失）
     await runScan();
-    executeNotice.value = `已合并 ${result.executed} 个副本，释放 ${formatBytes(result.savedBytes)}`
-      + (result.failed.length > 0 ? `；失败 ${result.failed.length} 条` : '')
+    executeNotice.value = `已合并 ${executeOutcome.executed} 个副本，释放 ${formatBytes(executeOutcome.savedBytes)}`
+      + (executeOutcome.failed.length > 0 ? `；失败 ${executeOutcome.failed.length} 条` : '')
       + (result.skippedGroups.length > 0 ? `；跳过 ${result.skippedGroups.length} 组（内容已变化）` : '');
   } catch (error) {
     executeError.value = error.message || '执行失败';

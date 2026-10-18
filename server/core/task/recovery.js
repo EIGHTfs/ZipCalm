@@ -63,13 +63,13 @@ async function collectLoggedBatchIds(logDir) {
  */
 export async function reconcileAfterBoot(deps, tasks) {
   const { trashDir, logDir, rootAbs, logger } = deps;
-  const result = { orphanBatches: [], reconciledDeletes: 0 };
+  const reconcileReport = { orphanBatches: [], reconciledDeletes: 0 };
 
   // 1) trash 孤儿批次：有目录、无日志 → 补记
   const loggedIds = await collectLoggedBatchIds(logDir);
   for (const batchId of await listTrashBatches(trashDir)) {
     if (loggedIds.has(batchId)) continue;
-    result.orphanBatches.push(batchId);
+    reconcileReport.orphanBatches.push(batchId);
     try {
       // 把批次内的文件清单写进补记日志（人工复核用，只列相对路径不复制内容）
       const files = [];
@@ -108,9 +108,9 @@ export async function reconcileAfterBoot(deps, tasks) {
       at: Date.now(),
       details: { trashBatch: info.delete.batchId || info.delete.trashBatch || null },
     };
-    result.reconciledDeletes += 1;
+    reconcileReport.reconciledDeletes += 1;
     logger.warn('deleting 中断任务已对账为 delete.status=failed', { taskId: info.id, trashBatch: info.delete.batchId || null });
   }
 
-  return result;
+  return reconcileReport;
 }

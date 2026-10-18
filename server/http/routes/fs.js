@@ -33,11 +33,11 @@ export default async function fsRoutes(app) {
    */
   app.get('/fs/volumes', { preHandler: [app.requireAuth] }, async (request, reply) => {
     const storage = app.m2.config.storage;
-    const result = await listRoots({ storage, env: process.env });
+    const rootsPayload = await listRoots({ storage, env: process.env });
     // 回写缓存：新增/删除共享后，带 rootId 的请求不必等重启就能用
-    if (typeof app.refreshRoots === 'function') app.refreshRoots(result);
+    if (typeof app.refreshRoots === 'function') app.refreshRoots(rootsPayload);
     // 配置里显式给了 roots 时，把它们的 label 一并带上（自动发现的 label 已在 roots.js 里定好）
-    reply.ok(result);
+    reply.ok(rootsPayload);
   });
 
   app.get('/fs/list', { preHandler: [app.requireAuth, app.guardPath({ source: 'query' })] }, async (request, reply) => {
@@ -89,8 +89,8 @@ export default async function fsRoutes(app) {
   app.get('/fs/search', { preHandler: [app.requireAuth] }, async (request, reply) => {
     const context = app.requestContext(request);
     const layers = await app.blacklist.layersFor({ enabled: true, taskPatterns: [] });
-    const result = await searchFiles(context, request.query.q, { limit: request.query.limit, layers });
-    reply.ok(result);
+    const searchPayload = await searchFiles(context, request.query.q, { limit: request.query.limit, layers });
+    reply.ok(searchPayload);
   });
 
   app.get('/fs/stat', { preHandler: [app.requireAuth, app.guardPath({ source: 'query' })] }, async (request, reply) => {

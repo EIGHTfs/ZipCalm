@@ -51,9 +51,9 @@ assertCase('0. 未确认 → 拒绝执行（INVALID_STATE）', async () => {
 assertCase('1. 正常执行：副本变硬链接（同 inode、nlink=2）、内容可达、savedBytes 正确、日志落盘', async () => {
   const { dir, logDir } = await makeEnv();
   const { a, b, content } = await makeDuplicatePair(dir, 'main.mkv', 'copy.mkv');
-  const result = await executeHardlinkGroups(makeCtx(logDir), [{ size: 256 * 1024, master: a, duplicates: [b] }], { confirmed: true });
-  if (result.executed !== 1 || result.failed.length !== 0) throw new Error(`执行结果错：${JSON.stringify(result)}`);
-  if (result.savedBytes !== 256 * 1024) throw new Error('savedBytes 错');
+  const linkOutcome = await executeHardlinkGroups(makeCtx(logDir), [{ size: 256 * 1024, master: a, duplicates: [b] }], { confirmed: true });
+  if (linkOutcome.executed !== 1 || linkOutcome.failed.length !== 0) throw new Error(`执行结果错：${JSON.stringify(linkOutcome)}`);
+  if (linkOutcome.savedBytes !== 256 * 1024) throw new Error('savedBytes 错');
   const [statA, statB] = await Promise.all([fsp.stat(a), fsp.stat(b)]);
   if (statA.ino !== statB.ino) throw new Error('两文件不是同一 inode');
   if (statB.nlink !== 2) throw new Error(`nlink 应 2，实得 ${statB.nlink}`);
@@ -73,10 +73,10 @@ assertCase('2. 内容自扫描后变化 → 整组跳过（不硬链）、日志
   const { dir, logDir } = await makeEnv();
   const { a, b } = await makeDuplicatePair(dir, 'm.mkv', 'c.mkv');
   await fsp.writeFile(b, Buffer.alloc(256 * 1024, 0xEE)); // 扫描后被改动
-  const result = await executeHardlinkGroups(makeCtx(logDir), [{ size: 256 * 1024, master: a, duplicates: [b] }], { confirmed: true });
-  if (result.executed !== 0) throw new Error('变化组不应执行');
-  if (result.skippedGroups.length !== 1 || result.skippedGroups[0].reason !== 'content_changed_since_scan') {
-    throw new Error(`skip 原因错：${JSON.stringify(result.skippedGroups)}`);
+  const changedOutcome = await executeHardlinkGroups(makeCtx(logDir), [{ size: 256 * 1024, master: a, duplicates: [b] }], { confirmed: true });
+  if (changedOutcome.executed !== 0) throw new Error('变化组不应执行');
+  if (changedOutcome.skippedGroups.length !== 1 || changedOutcome.skippedGroups[0].reason !== 'content_changed_since_scan') {
+    throw new Error(`skip 原因错：${JSON.stringify(changedOutcome.skippedGroups)}`);
   }
   if ((await fsp.stat(b)).nlink !== 1) throw new Error('变化文件被硬链了！');
 });
@@ -86,7 +86,7 @@ assertCase('3. ENOENT（副本已被外部删除）→ 单条 failed、其余组
   const { a, b } = await makeDuplicatePair(dir, 'g1.mkv', 'g2.mkv');
   const { a: c, b: d } = await makeDuplicatePair(dir, 'h1.mkv', 'h2.mkv');
   await fsp.unlink(b); // 第一组副本被外部删除
-  const result = await executeHardlinkGroups(
+  const partialOutcome = await executeHardlinkGroups(
     makeCtx(logDir),
     [
       { size: 256 * 1024, master: a, duplicates: [b] },
@@ -95,7 +95,7 @@ assertCase('3. ENOENT（副本已被外部删除）→ 单条 failed、其余组
     { confirmed: true },
   );
   // 组1：verifyPair 内容哈希对已删除文件抛错 → catch → false → 整组 skip（不会硬链）；组2 正常
-  if (result.executed !== 1) throw new Error(`只有组2应执行，实得 ${result.executed}`);
+  if (partialOutcome.executed !== 1) throw new Error(`只有组2应执行，实得 ${partialOutcome.executed}`);
   if ((await fsp.stat(d)).nlink !== 2) throw new Error('组2未正确硬链');
 });
 
@@ -109,14 +109,14 @@ assertCase('4. 【守门人反例】「先 unlink 后 link」的原始错法 = �
   const linkNeverHappened = !(await fsp.stat(b).then(() => true).catch(() => false));
   if (!linkNeverHappened) throw new Error('模拟 setup 错');
   // 本实现执行同样的组：verifyPair 发现副本缺失 → 整组跳过（不产生"看似成功"的假象）
-  const result = await executeHardlinkGroups(makeCtx(path.join(dir, 'logs')), [{ size: 256 * 1024, master: a, duplicates: [b] }], { confirmed: true });
-  if (result.executed !== 0) throw new Error('副本缺失却被"执行成功"');
+  const brokenOutcome = await executeHardlinkGroups(makeCtx(path.join(dir, 'logs')), [{ size: 256 * 1024, master: a, duplicates: [b] }], { confirmed: true });
+  if (brokenOutcome.executed !== 0) throw new Error('副本缺失却被"执行成功"');
   // 主文件内容完整（数据一份可达 = 主文件本身）
   if (!(await fsp.readFile(a)).equals(content)) throw new Error('主文件损坏');
   // 而正确三步顺序的最坏状态验证：rename 后 link 前崩溃 → 原名消失但 .hl-tmp 在（数据可达）
-  const tmp = `${b}.hl-tmp-test`;
-  await fsp.rename(a, tmp).catch(() => {}); // 模拟 rename 步骤后的状态转移验证不需要真做——这里断言实现路径已由案例1覆盖
-  await fsp.rm(tmp, { force: true });
+  const stagedName = `${b}.hl-stagedName-test`;
+  await fsp.rename(a, stagedName).catch(() => {}); // 模拟 rename 步骤后的状态转移验证不需要真做——这里断言实现路径已由案例1覆盖
+  await fsp.rm(stagedName, { force: true });
 });
 
 assertCase('5. 主文件选择可复现：扫描排序 absPath 字典序最小（scanner 侧断言）', async () => {

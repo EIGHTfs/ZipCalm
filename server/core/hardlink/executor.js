@@ -69,7 +69,7 @@ export async function executeHardlinkGroups(ctx, groups, options = {}) {
     throw error;
   }
 
-  const result = { executed: 0, failed: [], skippedGroups: [], savedBytes: 0 };
+  const execReport = { executed: 0, failed: [], skippedGroups: [], savedBytes: 0 };
 
   for (const group of groups || []) {
     const { master, duplicates, size } = group;
@@ -79,7 +79,7 @@ export async function executeHardlinkGroups(ctx, groups, options = {}) {
       const identical = await verifyPairStillIdentical(master, duplicate).catch(() => false);
       if (!identical) {
         allStillIdentical = false;
-        result.skippedGroups.push({ master, reason: 'content_changed_since_scan' });
+        execReport.skippedGroups.push({ master, reason: 'content_changed_since_scan' });
         await recordLog(ctx, { action: 'skipped', master, duplicate, reason: 'content_changed_since_scan' });
         break;
       }
@@ -89,18 +89,18 @@ export async function executeHardlinkGroups(ctx, groups, options = {}) {
     for (const duplicate of duplicates) {
       try {
         await replaceWithLink(master, duplicate);
-        result.executed += 1;
-        result.savedBytes += size;
+        execReport.executed += 1;
+        execReport.savedBytes += size;
         await recordLog(ctx, { action: 'linked', master, duplicate, sizeBytes: size, result: 'ok' });
         ctx.logger.info('硬链接替换完成', { master, duplicate });
       } catch (error) {
         const code = error && error.code ? error.code : 'INTERNAL_ERROR';
-        result.failed.push({ duplicate, code });
+        execReport.failed.push({ duplicate, code });
         await recordLog(ctx, { action: 'failed', master, duplicate, result: 'failed', errorCode: code });
         ctx.logger.error('硬链接替换失败', { master, duplicate, code });
       }
     }
   }
 
-  return result;
+  return execReport;
 }

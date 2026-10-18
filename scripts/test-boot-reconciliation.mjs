@@ -45,9 +45,9 @@ assertCase('1. trash 孤儿批次 → 补写 reconciled-crash 日志（含批次
   await fsp.mkdir(deps.logDir, { recursive: true });
   await fsp.writeFile(path.join(deps.logDir, 'delete-20260101.jsonl'), `${JSON.stringify({ batchId: loggedBatch, action: 'trashed' })}\n`, 'utf8');
 
-  const result = await reconcileAfterBoot(deps, []);
-  if (result.orphanBatches.length !== 1 || result.orphanBatches[0] !== 'batch-orphan-1') {
-    throw new Error(`孤儿识别错：${JSON.stringify(result.orphanBatches)}`);
+  const reconcileSummary = await reconcileAfterBoot(deps, []);
+  if (reconcileSummary.orphanBatches.length !== 1 || reconcileSummary.orphanBatches[0] !== 'batch-orphan-1') {
+    throw new Error(`孤儿识别错：${JSON.stringify(reconcileSummary.orphanBatches)}`);
   }
   // 补记日志存在且含 batchId 与文件清单
   const logFiles = await fsp.readdir(deps.logDir);
@@ -74,8 +74,8 @@ assertCase('2. deleting 中断任务 → delete.status=failed + trashBatch 指�
     { info: { id: 't-normal', status: 'interrupted', delete: { status: 'pending' } } },
     { info: { id: 't-nodelete', status: 'interrupted' } },
   ];
-  const result = await reconcileAfterBoot(deps, tasks);
-  if (result.reconciledDeletes !== 1) throw new Error(`收敛数错：${result.reconciledDeletes}`);
+  const reconcileOutcome = await reconcileAfterBoot(deps, tasks);
+  if (reconcileOutcome.reconciledDeletes !== 1) throw new Error(`收敛数错：${reconcileOutcome.reconciledDeletes}`);
   const t = tasks[0].info;
   if (t.delete.status !== 'failed') throw new Error(`delete.status 应为 failed，实得 ${t.delete.status}`);
   if (t.delete.error.code !== 'INTERNAL_ERROR' || t.delete.error.details.trashBatch !== 'batch-x') {
@@ -87,9 +87,9 @@ assertCase('2. deleting 中断任务 → delete.status=failed + trashBatch 指�
 
 assertCase('3. 空 trash / 无日志目录 → 零孤儿零收敛（容错不炸）', async () => {
   const { deps } = await makeEnv();
-  const result = await reconcileAfterBoot(deps, []);
-  if (result.orphanBatches.length !== 0 || result.reconciledDeletes !== 0) {
-    throw new Error(`空环境结果错：${JSON.stringify(result)}`);
+  const emptyOutcome = await reconcileAfterBoot(deps, []);
+  if (emptyOutcome.orphanBatches.length !== 0 || emptyOutcome.reconciledDeletes !== 0) {
+    throw new Error(`空环境结果错：${JSON.stringify(emptyOutcome)}`);
   }
 });
 
