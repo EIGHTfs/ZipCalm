@@ -497,6 +497,76 @@
   padding-right: var(--space-3);
 }
 
+.root-item {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  width: 100%;
+  /* 触屏可点：根项是切根入口 */
+  min-height: 44px;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.root-item:hover {
+  background: var(--color-hover);
+}
+
+.root-item--active {
+  background: color-mix(in srgb, var(--color-primary) 12%, transparent);
+  border-color: color-mix(in srgb, var(--color-primary) 35%, transparent);
+  font-weight: 600;
+}
+
+.root-item__name {
+  font-size: var(--font-size-sm, 0.875rem);
+  word-break: break-all;
+}
+
+.root-item__size {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+/*
+ * 容量条：自写一个 3px 的 div，不复用任务进度组件（那是带状态色的任务进度，语义不同）。
+ * pointer-events:none 保证点进度条任意位置都能触发外层按钮的切根。
+ */
+.root-item__bar {
+  display: block;
+  width: 100%;
+  height: 3px;
+  margin-top: 2px;
+  border-radius: 999px;
+  background: var(--color-surface-muted);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.root-item__bar-fill {
+  display: block;
+  height: 100%;
+  /* 默认中性色（<80%）：容量健康时不该抢注意力 */
+  background: var(--color-text-muted);
+  border-radius: inherit;
+  transition: width 0.2s ease-out;
+}
+
+/* 80~90% 警告；>90% 危险 —— NAS 用户最关心"快满了"，颜色比数字先被看见 */
+.root-item__bar-fill--warn {
+  background: var(--color-warn);
+}
+
+.root-item__bar-fill--danger {
+  background: var(--color-error);
+}
+
 .dir-tree__caption {
   margin: 0 0 var(--space-2);
   color: var(--color-text-muted);

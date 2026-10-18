@@ -39,9 +39,11 @@ const rootsError = ref('');
 /** 标题随模式变：群晖是「位置」（用户心智是共享），其他是「存储卷」 */
 const rootsTitle = computed(() => (rootsMode.value === 'C' ? '位置' : '存储卷'));
 
+let rootsRetry = 0;
 async function loadRoots() {
   try {
     const payload = await api.get('/fs/volumes');
+    rootsRetry = 0;
     roots.value = (payload && payload.roots) || [];
     rootsMode.value = (payload && payload.mode) || '';
     // 当前根不在列表里（如默认根在 C 模式下被隐藏）→ 落到第一个可用项，避免"切了根但列表全不亮"
@@ -50,6 +52,14 @@ async function loadRoots() {
     }
     await ensureReadableRoot();
   } catch (error) {
+    // 登录瞬间的 AUTH_REQUIRED 是竞态（token 还没落到 store），不是真错误：
+    // 有限重试几次，避免侧栏永久停在"需要登录"（实测踩过）。
+    if (error.code === 'AUTH_REQUIRED' && rootsRetry < 5) {
+      rootsRetry += 1;
+      rootsError.value = '';
+      window.setTimeout(() => { void loadRoots(); }, 600);
+      return;
+    }
     rootsError.value = `[${error.code || 'ERROR'}] ${error.message}`;
   }
 }
@@ -72,6 +82,23 @@ async function ensureReadableRoot() {
       // 不可读：试下一个
     }
   }
+}
+
+/** 已用百分比（0~100 整数）；容量缺失时返回 0（调用方用 v-if 挡住不渲染） */
+function usedPercentOf(root) {
+  const total = Number(root.totalBytes);
+  const free = Number(root.freeBytes);
+  if (!(total > 0) || !Number.isFinite(free)) return 0;
+  const used = ((total - free) / total) * 100;
+  return Math.min(100, Math.max(0, Math.round(used)));
+}
+
+/** 容量分档：>90% 危险红，80~90% 警告黄，其余中性（颜色比数字先被看见） */
+function barToneOf(root) {
+  const percent = usedPercentOf(root);
+  if (percent > 90) return 'root-item__bar-fill--danger';
+  if (percent >= 80) return 'root-item__bar-fill--warn';
+  return '';
 }
 
 function switchRoot(rootId) {
@@ -130,6 +157,18 @@ watch(() => ui.route, () => { void loadRoots(); });
             <span class="root-item__name">{{ root.label }}</span>
             <span v-if="root.totalBytes" class="root-item__size">
               {{ formatBytes(root.freeBytes) }} 可用 / {{ formatBytes(root.totalBytes) }}
+            </span>
+            <!-- statfs 失败时 totalBytes 为 null：不渲染进度条，避免 NaN% -->
+            <span
+              v-if="root.totalBytes"
+              class="root-item__bar"
+              role="progressbar"
+              :aria-valuemin="0"
+              :aria-valuemax="100"
+              :aria-valuenow="usedPercentOf(root)"
+              :aria-label="`${root.label} 已用 ${usedPercentOf(root)}%`"
+            >
+              <i class="root-item__bar-fill" :class="barToneOf(root)" :style="{ width: `${usedPercentOf(root)}%` }"></i>
             </span>
           </button>
         </li>
