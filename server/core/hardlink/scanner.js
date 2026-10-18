@@ -165,6 +165,9 @@ export async function scanHardlinkDuplicates(rootAbs, extensions, options = {}) 
       }
       for (const [digest, digestGroup] of hashes.entries()) {
         if (digestGroup.length < 2) continue; // 抽样同但全量不同：终判正确排除（伪造重复守门人覆盖此路径）
+        // 主文件确定规则：**absPath 字典序最小**（docs/15 执行前评审补充）——同一批数据
+        // 重扫时组内顺序稳定，master 可复现；不按 mtime（会因访问/复制变化不可复现）
+        digestGroup.sort((a, b) => (a.absPath < b.absPath ? -1 : a.absPath > b.absPath ? 1 : 0));
         const [master, ...duplicates] = digestGroup;
         groups.push({
           size,

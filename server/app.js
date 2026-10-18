@@ -213,6 +213,9 @@ async function attachCompressAndTaskLayers(app, { config, logger, projectRoot })
   await blacklist.loadUser(); // 启动即加载一次用户层（坏文件只告警、不影响启动）
   app.decorate('blacklist', blacklist);
 
+  // 硬链接去重日志目录（docs/15：storage/logs/hardlink-*.jsonl）
+  app.decorate('hardlinkLogDir', config.storage.logDir);
+
   const taskLayer = await createTaskLayer({ config, logger });
   const compressLayer = await createCompressLayer({
     config,
