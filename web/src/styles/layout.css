@@ -523,6 +523,271 @@
   }
 }
 
+/* ===== M8：触屏侧栏抽屉（docs/08 §七：侧边抽屉不常驻） ===== */
+.topbar__menu,
+.sidebar__close {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  /* 窄屏只留一列：否则侧栏会占掉大半宽度，主内容被挤成竖排单字（实测踩过） */
+  .app-shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      'topbar'
+      'main'
+      'bottombar';
+  }
+
+  .topbar__menu {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 40px;
+    min-height: 40px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    color: var(--color-text);
+  }
+
+  .sidebar {
+    position: fixed;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    z-index: 2500;
+    width: min(78vw, 300px);
+    /* 默认移出屏幕；打开时滑入（不用 v-if：保留滚动位置与展开态） */
+    transform: translateX(-100%);
+    transition: transform 0.18s ease-out;
+    box-shadow: 8px 0 24px rgb(0 0 0 / 18%);
+  }
+
+  .sidebar--open {
+    transform: none;
+  }
+
+  .sidebar__close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    align-self: flex-end;
+    min-width: 40px;
+    min-height: 40px;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+    background: var(--color-surface);
+    color: var(--color-text);
+  }
+}
+
+/* M8 窄屏：顶栏与工具栏收起冗余控件（否则 390px 下会溢出/压成竖排） */
+@media (max-width: 760px) {
+  /* 顶栏：搜索框、面包屑、品牌副标题在手机上都不必要（页面内已有面包屑） */
+  .topbar__search,
+  .topbar__crumbs,
+  .topbar__brand-sub {
+    display: none;
+  }
+
+  .topbar {
+    gap: var(--space-2);
+    padding: 0 var(--space-2);
+    overflow: hidden;
+  }
+
+  .topbar__brand {
+    flex-shrink: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* 工具栏：允许换行，且按钮不参与压缩（被压窄会变成竖排单字） */
+  .file-browser__toolbar {
+    flex-wrap: wrap;
+    row-gap: var(--space-2);
+  }
+
+  .file-browser__toolbar button,
+  .file-browser__crumb {
+    flex-shrink: 0;
+  }
+
+  /* 任务条在窄屏会溢出（实测 390px 下把整页撑到 676px）：允许换行并收起指标区 */
+  .bottom-task-bar {
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
+    overflow: hidden;
+  }
+
+  .bottom-task-bar__metrics {
+    display: none;
+  }
+
+  .bottom-task-bar__actions {
+    flex-wrap: wrap;
+    margin-left: auto;
+  }
+
+  /* 窄屏一律给足点按尺寸（不只在 pointer:coarse 下）：手机、平板窄窗、触屏笔记本都覆盖 */
+  .file-browser__toolbar button,
+  .file-browser__crumb,
+  .bottom-task-bar__actions button,
+  .dir-tree__node,
+  .dir-tree__toggle {
+    min-height: 44px;
+  }
+
+  /* 手机上压缩/解压/刷新已有底部操作栏与右键菜单入口，工具栏不再重复占位 */
+  .file-browser__toolbar [data-testid='open-compress'],
+  .file-browser__toolbar [data-testid='open-extract'],
+  .file-browser__toolbar [data-testid='reload'],
+  .file-browser__toolbar [data-testid='selection-count'] {
+    display: none;
+  }
+}
+
+/* ===== M8：网格视图（触屏默认） ===== */
+.file-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.file-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-1);
+  /* 触屏卡片：卡片本身就是点目标，整块都可点（≥44px 起步） */
+  min-height: 96px;
+  padding: var(--space-3) var(--space-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  cursor: pointer;
+  text-align: center;
+  overflow: hidden;
+}
+
+.file-card--selected {
+  background: color-mix(in srgb, var(--color-primary, #2f6fed) 12%, transparent);
+  outline: 2px solid var(--color-primary, #2f6fed);
+  outline-offset: -2px;
+}
+
+.file-card--focused {
+  outline: 2px dashed var(--color-primary, #2f6fed);
+  outline-offset: -2px;
+}
+
+.file-card__icon {
+  color: var(--color-text-muted);
+}
+
+.file-card__name {
+  width: 100%;
+  font-size: var(--font-size-xs);
+  /* 长文件名最多两行，超出省略：卡片高度稳定，网格才不会参差 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
+}
+
+.file-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-1);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+/* ===== M8：触屏底部操作栏（主入口） ===== */
+.bottom-bar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3) calc(var(--space-2) + env(safe-area-inset-bottom, 0px));
+  background: var(--color-surface);
+  border-top: 1px solid var(--color-border);
+  box-shadow: 0 -6px 20px rgb(0 0 0 / 10%);
+}
+
+.bottom-bar__count {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.bottom-bar__actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.bottom-bar__actions button {
+  flex: 1;
+  /* 拇指点按的最小尺寸：40 是底线，44 更舒服 */
+  min-height: 44px;
+  padding: 0 var(--space-2);
+}
+
+.bottom-bar__danger {
+  color: var(--color-error, #dc2626);
+  border-color: currentcolor;
+}
+
+/* ===== M8：触屏尺寸达标（docs/11 §十一：按钮 ≥40px、行高 ≥44px） ===== */
+@media (pointer: coarse) {
+  .file-table__row {
+    height: 44px;
+  }
+
+  .file-table__row td {
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+
+  button,
+  .file-browser__crumb,
+  .dir-tree__node {
+    min-height: 44px;
+  }
+}
+
+/* 窄屏：网格每行 2~3 个（docs/08 §七） */
+@media (max-width: 760px) {
+  .file-grid {
+    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+  }
+
+  /* 底部操作栏会盖住最后一行，给内容留出空间 */
+  .file-browser {
+    padding-bottom: 96px;
+  }
+
+  /* 抽屉/对话框里的控件在手机上同样要够大（实测提交按钮只有 32px） */
+  .drawer button,
+  .drawer input,
+  .drawer select,
+  .dialog button,
+  .dialog input {
+    min-height: 44px;
+  }
+}
+
 .placeholder-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));

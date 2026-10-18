@@ -36,6 +36,15 @@ async function handleLogout() {
 
 <template>
   <header class="topbar" data-region="topbar">
+    <!-- 触屏：侧栏改为抽屉，这里提供开关（桌面隐藏，见 CSS） -->
+    <button
+      type="button"
+      class="topbar__menu"
+      data-testid="sidebar-toggle"
+      aria-label="打开导航"
+      :aria-expanded="ui.sidebarOpen ? 'true' : 'false'"
+      @click="ui.toggleSidebar()"
+    >☰</button>
     <div class="topbar__brand">
       {{ APP_NAME }}
       <span class="topbar__brand-sub">{{ APP_NAME_ZH }}</span>

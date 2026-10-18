@@ -7,6 +7,7 @@
 
 import { computed } from 'vue';
 
+import { useMetricsStore } from '../../stores/metrics.js';
 import { useTasksStore } from '../../stores/tasks.js';
 import { formatBytes, formatPercent } from '../../utils/format.js';
 import { taskStatusLabel, taskStatusTone } from '../../constants/index.js';
@@ -32,6 +33,18 @@ async function cancelActive() {
   if (!active.value) return;
   await tasks.cancel(active.value.id);
 }
+
+// 微型指标：复用 M7 的 store（它只在性能页轮询；这里只读"最近一帧"，不会额外打接口）
+const metrics = useMetricsStore();
+const memoryPercent = computed(() => {
+  const system = metrics.frame && metrics.frame.system;
+  if (!system || !system.memUsedBytes || !system.memTotalBytes) return null;
+  return (system.memUsedBytes / system.memTotalBytes) * 100;
+});
+const eventLoopText = computed(() => {
+  const processStats = (metrics.frame && metrics.frame.process) || {};
+  return typeof processStats.eventLoopDelayMs === 'number' ? `${processStats.eventLoopDelayMs.toFixed(1)} ms` : '—';
+});
 </script>
 
 <template>
@@ -63,11 +76,11 @@ async function cancelActive() {
       </template>
     </div>
 
-    <div class="bottom-task-bar__metrics" aria-label="微型指标">
-      <span>CPU —</span>
-      <span>内存 —</span>
-      <span>事件循环 —</span>
-      <span class="badge">M7 接入</span>
+    <!-- 微型指标：数据来自 M7 的指标 store；**没有数据就不显示**，而不是摆一堆「—」和过期徽标 -->
+    <div v-if="metrics.frame" class="bottom-task-bar__metrics" aria-label="微型指标" data-testid="task-bar-metrics">
+      <span>CPU {{ formatPercent(metrics.frame.system.cpuPercent) }}</span>
+      <span>内存 {{ formatPercent(memoryPercent) }}</span>
+      <span>事件循环 {{ eventLoopText }}</span>
     </div>
 
     <div class="bottom-task-bar__actions">

@@ -20,7 +20,8 @@ import CompressDrawer from '../components/compress/CompressDrawer.vue';
 import ExtractDialog from '../components/compress/ExtractDialog.vue';
 import TaskProgress from '../components/task/TaskProgress.vue';
 import { useTasksStore } from '../stores/tasks.js';
-import { ROUTES } from '../constants/index.js';
+import { useUiStore } from '../stores/ui.js';
+import { ROUTES, VIEW_MODE } from '../constants/index.js';
 import { formatBytes, formatDateTime } from '../utils/format.js';
 import { breadcrumbsOf, parentPath } from '../utils/path.js';
 
@@ -42,6 +43,7 @@ const showExtract = ref(false);
 /** 页面内展示的任务：优先最近提交的；否则跟随 store 里当前活动任务（刷新/重开页面也能看到进度） */
 const submittedTaskId = ref(null);
 const tasks = useTasksStore();
+const ui = useUiStore();
 
 // ===== M8：右键菜单 / 快捷键 / 拖拽（桌面侧）=====
 const rootRef = ref(null);
@@ -54,6 +56,27 @@ const dragPaths = ref([]);
 const dropActive = ref(false);
 /** 操作结果提示（成功/失败都走这一条，避免页面里到处散落 alert） */
 const actionNotice = ref('');
+
+// ===== M8：触屏（网格默认 / 底部操作栏 / 长按=右键）=====
+/** 视图模式单一来源 = ui store（顶栏的「列表/网格」按钮已在用它，两套状态必然打架） */
+/** 粗指针（触屏）判定：pointer:coarse 比宽度更准（平板横屏也是触屏） */
+const isTouch = ref(false);
+/** 长按阈值：500ms 是 iOS/Android 的常见值，太短会与滚动冲突 */
+const LONG_PRESS_MS = 500;
+let longPressTimer = null;
+
+function syncViewportMode() {
+  const coarse = typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches;
+  isTouch.value = coarse || window.innerWidth < 760;
+}
+
+/**
+ * 首次进入时给触屏用户切到网格（docs/08 §七：手机上网格点击区域大）。
+ * **只做一次**：之后用户用顶栏切回列表，resize/旋转屏幕都不能再把它强行改回网格。
+ */
+function applyTouchDefaultView() {
+  if (isTouch.value && ui.viewMode === VIEW_MODE.LIST) ui.setViewMode(VIEW_MODE.GRID);
+}
 const actionError = ref('');
 const activeTaskId = computed(() => submittedTaskId.value || (tasks.activeTask ? tasks.activeTask.id : null));
 
@@ -449,6 +472,47 @@ async function onTreeDrop({ paths, targetDir }) {
   }
 }
 
+// ===== M8：触屏手势（长按 = 右键；点=打开，选择态下点=切换选中）=====
+
+function cancelLongPress() {
+  if (longPressTimer) {
+    clearTimeout(longPressTimer);
+    longPressTimer = null;
+  }
+}
+
+/** 触屏按下：500ms 不走开就当成右键（长按期间一旦移动/抬起就取消，避免与滚动打架） */
+function onRowPointerDown(entry, event) {
+  if (!isTouch.value) return;
+  cancelLongPress();
+  const { clientX, clientY } = event;
+  longPressTimer = window.setTimeout(() => {
+    longPressTimer = null;
+    if (isSelected(entry)) {
+      const next = new Map(selected.value);
+      next.delete(entry.path);
+      selected.value = next;
+    } else {
+      selectOnly(entry);
+    }
+    contextMenu.value = { open: true, x: clientX, y: clientY, target: entry };
+  }, LONG_PRESS_MS);
+}
+
+/**
+ * 行/卡片的点击语义：
+ * - 桌面：目录进入（原有行为）
+ * - 触屏：**处于选择态**时点=切换选中；否则点=打开（选择态由长按进入，docs/08 §七 关键点 1）
+ */
+function onRowActivate(entry) {
+  cancelLongPress();
+  if (isTouch.value && selected.value.size > 0) {
+    toggleSelect(entry);
+    return;
+  }
+  openEntry(entry);
+}
+
 // ===== M8：快捷键（不碰鼠标也能走完 浏览 → 多选 → 压缩）=====
 
 /** 输入框里按快捷键不能劫持（否则回车/删除都乱掉） */
@@ -555,10 +619,15 @@ function onCompressDropZone(event) {
 
 onMounted(() => {
   window.addEventListener('keydown', onGlobalKeyDown);
+  syncViewportMode();
+  applyTouchDefaultView();
+  window.addEventListener('resize', syncViewportMode);
 });
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onGlobalKeyDown);
+  window.removeEventListener('resize', syncViewportMode);
+  cancelLongPress();
 });
 </script>
 
@@ -626,7 +695,7 @@ onUnmounted(() => {
       </div>
     </template>
 
-    <table v-else class="file-table" data-testid="files-table">
+    <table v-if="ui.viewMode === VIEW_MODE.LIST" class="file-table" data-testid="files-table">
       <thead>
         <tr>
           <th scope="col" class="file-table__col-check"></th>
@@ -655,8 +724,12 @@ onUnmounted(() => {
           :data-name="entry.name"
           :data-type="entry.type"
           draggable="true"
-          @click="openEntry(entry)"
+          @click="onRowActivate(entry)"
           @contextmenu.prevent.stop="openContextMenu($event, entry)"
+          @pointerdown="onRowPointerDown(entry, $event)"
+          @pointerup="cancelLongPress"
+          @pointermove="cancelLongPress"
+          @pointercancel="cancelLongPress"
           @dragstart="onRowDragStart(entry, $event)"
           @dragend="onRowDragEnd"
         >
@@ -690,6 +763,35 @@ onUnmounted(() => {
       </tbody>
     </table>
 
+    <!-- 网格视图（触屏默认）：卡片式，点击区域 ≥44px；手势逻辑与列表行完全一致 -->
+    <div v-if="ui.viewMode === VIEW_MODE.GRID" class="file-grid" data-testid="files-grid">
+      <article
+        v-for="(entry, index) in entries"
+        :key="entry.path"
+        class="file-card"
+        :class="{
+          'file-card--focused': index === focusIndex,
+          'file-card--selected': isSelected(entry),
+        }"
+        :data-name="entry.name"
+        :data-type="entry.type"
+        data-testid="file-card"
+        @click="onRowActivate(entry)"
+        @contextmenu.prevent.stop="openContextMenu($event, entry)"
+        @pointerdown="onRowPointerDown(entry, $event)"
+        @pointerup="cancelLongPress"
+        @pointermove="cancelLongPress"
+        @pointercancel="cancelLongPress"
+      >
+        <span class="file-card__icon"><Icon :name="rowIcon(entry)" :size="28" /></span>
+        <span class="file-card__name" :title="entry.name">{{ entry.name }}</span>
+        <span class="file-card__meta">
+          {{ entry.type === 'dir' ? '目录' : formatBytes(entry.size) }}
+          <span v-if="entry.blacklisted" class="badge">已压缩格式</span>
+        </span>
+      </article>
+    </div>
+
     <p v-if="status === 'ready'" class="file-browser__hint">
       共 {{ listing.total }} 项<template v-if="listing.truncated">（已截断，仅显示前 {{ entries.length }} 项）</template>
     </p>
@@ -717,6 +819,18 @@ onUnmounted(() => {
     @confirm="confirmPrompt"
     @cancel="closePrompt"
   />
+
+  <!-- 触屏底部操作栏：选中后从底部滑出（拇指在屏幕下半部，这是主入口不是补充） -->
+  <div v-if="isTouch && selectedEntries.length > 0" class="bottom-bar" data-testid="bottom-action-bar">
+    <span class="bottom-bar__count">已选 {{ selectedEntries.length }} 项</span>
+    <div class="bottom-bar__actions">
+      <button type="button" data-testid="bar-compress" @click="showCompress = true">压缩</button>
+      <button type="button" data-testid="bar-move" @click="openMove">移动</button>
+      <button type="button" class="bottom-bar__danger" data-testid="bar-delete" @click="openDeleteConfirm">删除</button>
+      <button type="button" data-testid="bar-select-all" @click="selectAll">全选</button>
+      <button type="button" data-testid="bar-cancel" @click="clearSelection">取消</button>
+    </div>
+  </div>
 
   <TaskProgress :task-id="activeTaskId" @finished="onTaskFinished" @dismiss="dismissTaskPanel" />
 

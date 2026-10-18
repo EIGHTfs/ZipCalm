@@ -12,6 +12,7 @@
 import { RouterLink } from 'vue-router';
 
 import Icon from '../common/Icon.vue';
+import { useUiStore } from '../../stores/ui.js';
 import { FORMATS, ROUTES } from '../../constants/index.js';
 
 // 导航项：icon 存**语义名**（不存组件），模板里交给 <Icon name="..." />
@@ -21,10 +22,15 @@ const navItems = [
   { to: ROUTES.METRICS, label: '性能看板', icon: 'metrics' },
   { to: ROUTES.SETTINGS, label: '设置', icon: 'settings' },
 ];
+
+// 触屏抽屉的开关状态与 TopBar 共用同一个 store（避免两处各自维护 open 状态）
+const ui = useUiStore();
 </script>
 
 <template>
-  <aside class="sidebar scroll-area" data-region="sidebar">
+  <aside class="sidebar scroll-area" :class="{ 'sidebar--open': ui.sidebarOpen }" data-region="sidebar">
+    <!-- 触屏抽屉的关闭按钮：只在窄屏显示（桌面常驻不需要） -->
+    <button type="button" class="sidebar__close" data-testid="sidebar-close" aria-label="关闭导航" @click="ui.toggleSidebar()">✕</button>
     <section class="sidebar__section">
       <h2 class="sidebar__title">导航</h2>
       <nav class="nav-list" aria-label="主导航">
