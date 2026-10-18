@@ -25,7 +25,7 @@ export default async function healthRoutes(app, options) {
         seq: taskStats.seq,
       },
       // M2 已实现压缩/解压；M3 补齐任务系统；指标看板在 M7
-      features: { fs: true, auth: true, compress: true, tasks: true, metrics: false },
+      features: { fs: true, auth: true, compress: true, tasks: true, metrics: true },
     });
   });
 }

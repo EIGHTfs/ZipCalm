@@ -105,32 +105,43 @@ async function annotateWithBlacklist(items, sources, layers) {
   const annotated = [];
 
   for (let index = 0; index < items.length; index += 1) {
-    const item = items[index];
-    const source = sources[index];
-    const next = { ...item, willSkip: false, skipReason: null, keptFiles: Number(item.fileCount) || 0 };
-    annotated.push(next);
-    if (!item.exists || !source || layers.length === 0) continue;
-
-    const files = await collectFilesUnder(source.absPath);
-    let keptFiles = 0;
-    for (const file of files) {
-      const hit = matchEntry(layers, { name: file.name, segments: file.segments });
-      if (!hit) {
-        keptFiles += 1;
-        continue;
-      }
-      skipped.push({ path: joinUserPath(item.path, file.relative), pattern: hit.pattern, layer: hit.layer });
-      skippedBytes += Number(file.size) || 0;
-    }
-    next.keptFiles = keptFiles;
-    // 整个源都被跳过（且确实有文件）：前端据此提示"该目录没有可压缩文件"，single 模式据此不建空包
-    if (files.length > 0 && keptFiles === 0) {
-      next.willSkip = true;
-      next.skipReason = 'blacklisted';
-    }
+    const one = await annotateOneSource(items[index], sources[index], layers);
+    annotated.push(one.item);
+    skipped.push(...one.skipped);
+    skippedBytes += one.skippedBytes;
   }
 
   return { items: annotated, skipped, skippedBytes };
+}
+
+/**
+ * 单个源的标注：返回标注后的条目、命中清单与命中字节数。
+ * 抽出来是为了让 annotateWithBlacklist 只做"遍历 + 汇总"（圈复杂度压在阈值内）。
+ */
+async function annotateOneSource(sourceItem, sourceRef, layers) {
+  const item = { ...sourceItem, willSkip: false, skipReason: null, keptFiles: Number(sourceItem.fileCount) || 0 };
+  if (!sourceItem.exists || !sourceRef || layers.length === 0) return { item, skipped: [], skippedBytes: 0 };
+
+  const files = await collectFilesUnder(sourceRef.absPath);
+  const skipped = [];
+  let keptFiles = 0;
+  let skippedBytes = 0;
+  for (const file of files) {
+    const hit = matchEntry(layers, { name: file.name, segments: file.segments });
+    if (!hit) {
+      keptFiles += 1;
+      continue;
+    }
+    skipped.push({ path: joinUserPath(sourceItem.path, file.relative), pattern: hit.pattern, layer: hit.layer });
+    skippedBytes += Number(file.size) || 0;
+  }
+  item.keptFiles = keptFiles;
+  // 整个源都被跳过（且确实有文件）：前端据此提示"该目录没有可压缩文件"，single 模式据此不建空包
+  if (files.length > 0 && keptFiles === 0) {
+    item.willSkip = true;
+    item.skipReason = 'blacklisted';
+  }
+  return { item, skipped, skippedBytes };
 }
 
 /** 用户路径拼接（POSIX 风格；relative 为空表示源本身就是文件） */

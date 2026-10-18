@@ -7,6 +7,7 @@ import blacklistRoutes from './routes/blacklist.js';
 import compressRoutes from './routes/compress.js';
 import fsRoutes from './routes/fs.js';
 import healthRoutes from './routes/health.js';
+import metricsRoutes from './routes/metrics.js';
 import taskRoutes from './routes/tasks.js';
 
 export default async function router(app, options) {
@@ -18,6 +19,7 @@ export default async function router(app, options) {
   await app.register(fsRoutes, {});
   await app.register(compressRoutes, {});
   await app.register(blacklistRoutes, {});
+  await app.register(metricsRoutes, {});
   await app.register(taskRoutes, {});
   await app.register(healthRoutes, { meta });
 }

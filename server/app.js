@@ -18,6 +18,7 @@ import { createAuthStore } from './core/auth/store.js';
 import { verifyPassword } from './core/auth/password.js';
 import { createDeleteService } from './core/compress/deleter.js';
 import { createBlacklistService } from './core/compress/blacklist.js';
+import { createMetricsCollector } from './core/metrics/collector.js';
 import { createOrchestrator } from './core/compress/orchestrator.js';
 import { createRegistry } from './core/compress/registry.js';
 import { createTaskEvents } from './core/task/events.js';
@@ -166,7 +167,11 @@ async function createCompressLayer({ config, logger, projectRoot, manager, black
  *   否则服务器会一直等这些 hijack 的连接，导致优雅停止超时被 KILL；
  * - onClose：服务器关闭后收尾，把节流中的任务状态落盘（避免丢最后 500ms 的进度）。
  */
-function registerShutdownHooks(app, { sseClients, manager, authStore }) {
+function registerShutdownHooks(app, { sseClients, manager, authStore, metrics }) {
+  // 指标定时器必须先停：它们已 unref、但明确 clearInterval 才能保证"停了就是停了"
+  app.addHook('onClose', async () => {
+    if (metrics) metrics.stop();
+  });
   app.addHook('preClose', async () => {
     for (const response of sseClients) {
       try {
@@ -255,7 +260,13 @@ export async function buildApp(options) {
   const authStore = await registerSecurityLayer(app, { config, logger });
 
   const { taskLayer, sseClients } = await attachCompressAndTaskLayers(app, { config, logger, projectRoot });
-  registerShutdownHooks(app, { sseClients, manager: taskLayer.manager, authStore });
+
+  // M7 指标采集：两个定时器（系统 5s / 进程 1s），随服务启停
+  const metrics = createMetricsCollector({ logger, taskStats: () => taskLayer.manager.stats() });
+  metrics.start();
+  app.decorate('metrics', metrics);
+
+  registerShutdownHooks(app, { sseClients, manager: taskLayer.manager, authStore, metrics });
 
   const meta = {
     version: APP_VERSION,

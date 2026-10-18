@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}" || exit 1
 
-WANT="${*:-build m1 m2 m3 crash probes retention m4 m6}"
+WANT="${*:-build m1 m2 m3 crash probes retention m4 m6 m7}"
 LOGDIR="${TMPDIR:-/tmp}/zipcalm-suites"
 mkdir -p "${LOGDIR}"
 
@@ -67,6 +67,8 @@ if has retention; then run_one retention node "${SCRIPT_DIR}/test-task-retention
 if has m4; then run_one m4 node "${SCRIPT_DIR}/test-m4-formats.mjs"; fi
 # M6：黑名单三层 + 端点 + 预检 + 「跳过项不被删」（自己管理服务？否 —— 依赖已启动的服务，放在 m4 之后）
 if has m6; then run_one m6 node "${SCRIPT_DIR}/test-m6-blacklist.mjs"; fi
+# M7：指标端点 + 环形缓冲 + /proc 降级 + 开销双口径自证 + 定时器 unref（依赖已启动的服务）
+if has m7; then run_one m7 node "${SCRIPT_DIR}/test-m7-metrics.mjs"; fi
 
 echo
 echo "── 汇总 ──"
