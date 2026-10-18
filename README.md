@@ -1,8 +1,40 @@
 # ZipCalm 压压惊
 
-> 一个跑在 NAS 上的 Node.js 网页服务端：浏览文件目录、选择文件/文件夹压缩（多算法多格式）、带性能监控看板。
+> 一个跑在 NAS 上的 Node.js 网页服务端：浏览文件目录、选择文件/文件夹压缩（多算法多格式）、按类型去重（硬链接）、带性能监控看板。
 >
-> 本仓库当前处于**开发中**：设计文档（`docs/`）与实现代码（`server/` + `web/`）并行推进，里程碑 M0~M4 已完成（见下方「当前进展」）。
+> 当前状态：**M0~M8 已完成 + 硬链接去重已上线**（版本 `0.9.0`），13 套验收全绿。手机端 PWA（M9）待做。
+
+## 快速开始
+
+**访问**（局域网，需先启动服务）：
+
+```
+http://<本机IP>:3010
+```
+
+**启停**（服务不会开机自启，重启 NAS 后需手动启动）：
+
+```bash
+bash scripts/start.sh start     # 启动
+bash scripts/start.sh status    # 状态
+bash scripts/start.sh stop      # 停止
+bash scripts/start.sh restart   # 重启（已在跑时改配置用这个）
+```
+
+**首次登录**：默认账号 `admin` / `zipcalm`。
+
+> ⚠️ **上线前请改密码**（默认密码等于把删除权限交给所有知道它的人）：
+> ```bash
+> node scripts/hash-password.js '你的新密码'   # 输出 scrypt 哈希
+> # 把哈希写进 storage/config.json 的 auth.passwordHash，然后 restart
+> ```
+
+**安全边界**：
+
+- 默认监听 `0.0.0.0:3010`（局域网可访问）。**要做公网访问必须先加 HTTPS 反代** —— 当前是明文 HTTP，直接暴露等于公开密码。
+- `storage/` 存着凭据与运行数据（已 gitignore），**不要整个目录打包分享**。
+- 删除原文件默认走 `log-only`（只记账不算），手动删除进回收站 `storage/trash/` 可找回。
+- **硬链接去重是信息合并**（不可逆）：请先用 dry-run 看清"能省多少"，确认弹窗里的警告再执行。
 
 ## 名字的由来
 
