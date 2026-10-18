@@ -42,14 +42,14 @@ async function recordLog(ctx, entry) {
 }
 
 /** 每条目标共用的日志字段（各分支再补 action 与结果字段） */
-function logBaseOf(ctx, input, target, ts, batchId) {
+function logBaseOf(ctx, input, target, ts, batchId, mode = ctx.mode) {
   return {
     ts,
     batchId,
     taskId: input.taskId,
     kind: input.kind,
     reason: input.reason,
-    mode: ctx.mode,
+    mode,
     source: target.userPath,
     sizeBytes: Number.isFinite(target.size) ? target.size : null,
   };
@@ -123,12 +123,17 @@ async function moveToTrash(ctx, input, target, deleteRecord, base, batchId) {
  * @param {{taskId: string, kind: 'compress'|'extract', reason: string, targets: Array<{userPath: string, absPath: string, kind: string, size?: number}>}} input
  */
 async function deleteTargets(ctx, input) {
+  // 按调用覆盖 mode（缺省沿用服务配置）：
+  // 压缩后自动删除默认走 log-only（安全默认，需要用户可回到"只记账"）；
+  // 但**用户手动删除**（fs/delete）语义不同 —— 他明确点了删除，log-only 会表现为"点了没反应"，
+  // 所以那条路径显式传 mode:'trash'（仍然进回收站可恢复，不是永真删除）。
+  const mode = input.mode && VALID_MODES.has(input.mode) ? input.mode : ctx.mode;
   const batchId = crypto.randomUUID();
   const ts = new Date().toISOString();
   const logFile = path.join(ctx.logDir, logFileName(new Date()));
   const deleteRecord = {
     batchId,
-    mode: ctx.mode,
+    mode,
     requested: input.targets.length,
     deleted: [],
     skipped: [],
@@ -161,8 +166,8 @@ async function deleteTargets(ctx, input) {
   }
 
   for (const target of verifiedTargets) {
-    const base = logBaseOf(ctx, input, target, ts, batchId);
-    if (ctx.mode === 'log-only') {
+    const base = logBaseOf(ctx, input, target, ts, batchId, mode);
+    if (mode === 'log-only') {
       await skipInLogOnly(ctx, input, target, deleteRecord, base);
       continue;
     }

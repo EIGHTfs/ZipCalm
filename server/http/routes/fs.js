@@ -8,6 +8,7 @@
 
 import { ERROR_CODES, apiError } from '../../lib/errors.js';
 import { listDirectory } from '../../core/fs/list.js';
+import { deleteEntries, makeDirectory, moveEntries, renameEntry } from '../../core/fs/writeOps.js';
 import { statEntry } from '../../core/fs/stat.js';
 
 /** 查询串里的数字参数解析（非法值→undefined，由 core 用默认值） */
@@ -39,6 +40,29 @@ export default async function fsRoutes(app) {
       offset: toInt(query.offset),
     });
     reply.ok(listing);
+  });
+
+  // ===== 写操作（M8 右键菜单/快捷键/拖拽的后端支撑，形状照 API 规范 §4.2）=====
+  // 路径校验在这里**不做 preHandler**：四个端点都可能是"源 + 目标"或数组路径，
+  // 统一交给 core/fs/writeOps 逐条走 safePath（含符号链接复核），避免半套校验。
+  app.post('/fs/mkdir', { preHandler: [app.requireAuth] }, async (request, reply) => {
+    reply.ok(await makeDirectory(app.fsContext, request.body || {}));
+  });
+
+  app.post('/fs/rename', { preHandler: [app.requireAuth] }, async (request, reply) => {
+    reply.ok(await renameEntry(app.fsContext, request.body || {}));
+  });
+
+  app.post('/fs/move', { preHandler: [app.requireAuth] }, async (request, reply) => {
+    reply.ok(await moveEntries(app.fsContext, request.body || {}));
+  });
+
+  app.post('/fs/delete', { preHandler: [app.requireAuth] }, async (request, reply) => {
+    reply.ok(await deleteEntries(app.fsContext, request.body || {}, {
+      // 与 M5 删除原文件同一机制：进回收站（delete.mode 决定是 trash 还是 log-only 记账）
+      deleter: app.m2.deleteService,
+      maxDeleteItems: app.fsContext.maxDeleteItems,
+    }));
   });
 
   app.get('/fs/stat', { preHandler: [app.requireAuth, app.guardPath({ source: 'query' })] }, async (request, reply) => {

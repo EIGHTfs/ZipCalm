@@ -17,6 +17,8 @@ export function registerPathGuard(app, { config, logger }) {
     maxPathSegmentLength: config.limits.maxPathSegmentLength,
     maxListEntries: config.limits.maxListEntries,
     defaultPageSize: config.limits.defaultPageSize,
+    maxMoveItems: config.limits.maxMoveItems,
+    maxDeleteItems: config.limits.maxDeleteItems,
   };
 
   app.decorate('fsContext', fsContext);

@@ -89,6 +89,11 @@ function validateStorage(config, errors) {
 /** 路径长度相关（含两者之间的相对关系） */
 function validatePathLimits(limits, errors) {
   const { maxPathLength, maxPathSegmentLength } = limits;
+  for (const key of ['maxMoveItems', 'maxDeleteItems']) {
+    if (limits[key] !== undefined && (!Number.isInteger(limits[key]) || limits[key] < 1)) {
+      errors.push(`limits.${key} 必须是 ≥1 的整数`);
+    }
+  }
   if (!Number.isInteger(maxPathLength) || maxPathLength < 64) errors.push('limits.maxPathLength 必须是 ≥64 的整数');
   if (
     !Number.isInteger(maxPathSegmentLength)

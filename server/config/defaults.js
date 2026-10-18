@@ -87,6 +87,13 @@ export const DEFAULT_CONFIG = {
     maxListEntries: DEFAULT_MAX_LIST_ENTRIES,
     /** 单次压缩任务最多源条目数 */
     maxSourcesPerTask: 200,
+    /**
+     * 单次「移动」最多条目数（API 规范 §4.2：超限 VALIDATION_FAILED）。
+     * 为什么要有上限：v1 是同步操作，一次几百个 rename 会让请求超时；超过应分批或改用复制任务。
+     */
+    maxMoveItems: 200,
+    /** 单次「删除」最多条目数（同上，删除还要逐条走回收站，代价更高） */
+    maxDeleteItems: 200,
     /** 前端默认分页大小 */
     defaultPageSize: 200,
     /**
