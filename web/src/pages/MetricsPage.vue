@@ -88,6 +88,15 @@ onUnmounted(() => metrics.stop());
       <p class="card__desc">系统占用；本进程 {{ formatPercent(processStats.cpuPercent) }}</p>
       <div v-if="chartData[0].length > 1" style="margin-top: var(--space-3)">
         <TrendChart :series="chartSeries" :data="chartData" :height="120" />
+        <!-- 自绘图例：颜色与曲线一致，文案中文；不用 uPlot 自带 legend（英文 Value + 悬停才填值） -->
+        <p class="chart-legend" data-testid="cpu-chart-legend">
+          <span class="chart-legend__item">
+            <i class="chart-legend__dot" :style="{ background: '#2f6fed' }"></i>系统 CPU
+          </span>
+          <span class="chart-legend__item">
+            <i class="chart-legend__dot" :style="{ background: '#16a34a' }"></i>本进程 CPU
+          </span>
+        </p>
       </div>
       <p v-else class="card__desc">最近 5 分钟还没有足够的采样点</p>
     </article>

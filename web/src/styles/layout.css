@@ -260,6 +260,28 @@
   font-size: var(--font-size-sm);
 }
 
+.chart-legend {
+  display: flex;
+  gap: var(--space-4);
+  margin-top: var(--space-1);
+  font-size: var(--font-size-xs);
+}
+
+.chart-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--color-text-muted);
+}
+
+/* 色块必须与曲线的 stroke 同值，否则图例比没有更误导 */
+.chart-legend__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
 .metric__value {
   /* 看板主数值：等宽数字避免每次轮询跳动时宽度抖动 */
   font-size: var(--font-size-2xl, 1.5rem);

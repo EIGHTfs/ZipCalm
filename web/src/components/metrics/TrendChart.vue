@@ -22,6 +22,12 @@ const props = defineProps({
   height: { type: Number, default: 220 },
   /** 图例/轴颜色等可选覆盖（保持最小，需要的场景再扩展） */
   scales: { type: Object, default: () => ({ x: { time: false } }) },
+  /**
+   * 是否显示 uPlot 自带图例。默认 **关**：
+   * uPlot 的 legend 是"悬停才填值"的（无光标时显示 `--`），而且默认文案是英文 `Value`，
+   * 放在中文卡片里既突兀又容易被误读成"数据没绑上"。标签交给卡片自己画。
+   */
+  showLegend: { type: Boolean, default: false },
 });
 
 // shallowRef：uPlot 实例是大对象，不需要 Vue 深度代理（避免性能与递归问题）
@@ -44,7 +50,7 @@ function createChart() {
       height: props.height,
       series: props.series,
       scales: props.scales,
-      legend: { show: true },
+      legend: { show: props.showLegend },
       cursor: { drag: { x: false, y: false } },
     },
     props.data,
