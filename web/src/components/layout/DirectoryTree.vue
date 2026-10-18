@@ -90,7 +90,10 @@ function onDragOver(nodePath, event) {
 watch(
   () => [props.currentPath, props.rootId],
   async () => {
-    nodes.value.delete(ROOT_PATH);
+    // 换根必须**整棵树清空**：节点键是 userPath，不同根下 '/' 是同一个键，
+    // 只删根节点会让子节点继续显示上一个根的内容（实测踩过）。
+    nodes.value = new Map();
+    nodes.value.set(ROOT_PATH, { loading: false, children: [], expanded: true, loaded: false });
     await loadChildren(ROOT_PATH);
   },
 );

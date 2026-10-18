@@ -9,7 +9,7 @@
 // 现在本文件**不再 import 任何图标库**，只写业务语义名（files/tasks/metrics/settings/storage/formats）；
 // 「语义名 → 图标库组件」的映射只在 components/common/Icon.vue 一处，换库时调用方零改动。
 
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { RouterLink, useRouter } from 'vue-router';
 
 import Icon from '../common/Icon.vue';
@@ -48,8 +48,29 @@ async function loadRoots() {
     if (!roots.value.some((root) => root.id === ui.currentRootId) && roots.value.length > 0) {
       ui.setCurrentRoot(roots.value[0].id);
     }
+    await ensureReadableRoot();
   } catch (error) {
     rootsError.value = `[${error.code || 'ERROR'}] ${error.message}`;
+  }
+}
+
+/**
+ * 保证当前根可读：群晖上共享的权限各不相同，首个共享未必允许本应用访问。
+ * 做法是逐个探测（只读 1 条），把用户落到**第一个能读的**位置；全不可读时保持原样（页面会给出权限提示）。
+ */
+async function ensureReadableRoot() {
+  const candidates = [
+    ...roots.value.filter((root) => root.id === ui.currentRootId),
+    ...roots.value.filter((root) => root.id !== ui.currentRootId),
+  ];
+  for (const root of candidates) {
+    try {
+      await api.get('/fs/list', { path: '/', limit: 1, rootId: root.id });
+      if (ui.currentRootId !== root.id) ui.setCurrentRoot(root.id);
+      return;
+    } catch {
+      // 不可读：试下一个
+    }
   }
 }
 
@@ -61,6 +82,10 @@ function switchRoot(rootId) {
 }
 
 onMounted(loadRoots);
+
+// 登录前就挂着侧栏时，首次 /fs/volumes 会 401（且之后不会自动重试）。
+// 路由变化实际等价于"用户已进入应用"，这时重拉一次即可；另外登录后停留原页也会有 route 变化。
+watch(() => ui.route, () => { void loadRoots(); });
 </script>
 
 <template>

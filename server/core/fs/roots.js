@@ -119,6 +119,9 @@ async function discoverShares() {
   for (const volumeAbs of volumes.sort()) {
     for (const name of await listSubdirs(volumeAbs)) {
       if (SYSTEM_DIR_PREFIX.test(name)) continue;
+      // 点开头的目录（.pnpm-store / .git / .Trash …）对用户是噪音：
+      // DSM 的共享文件夹本来就不会以点开头，列出来只会让列表变脏。
+      if (name.startsWith('.')) continue;
       shares.push({ id: name, label: name, path: path.posix.join(volumeAbs, name) });
     }
   }

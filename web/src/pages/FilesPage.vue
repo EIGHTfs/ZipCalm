@@ -80,6 +80,34 @@ function applyTouchDefaultView() {
 const actionError = ref('');
 const activeTaskId = computed(() => submittedTaskId.value || (tasks.activeTask ? tasks.activeTask.id : null));
 
+/** 搜索态（docs/16 批次②需求①）：关键字非空时主区改渲染搜索结果 */
+const searching = computed(() => ui.searchQuery.trim().length > 0);
+const searchItems = computed(() => (ui.searchState && ui.searchState.items) || []);
+/** 从搜索结果点进文件后，回到父目录时要选中它 */
+const pendingSelectPath = ref('');
+
+/** 结果项的父目录（用户路径） */
+function parentOf(userPath) {
+  const parent = String(userPath || '').split('/').slice(0, -1).join('/');
+  return parent.length === 0 ? '/' : parent;
+}
+
+/**
+ * 点击搜索结果：目录 → 直接进入；文件 → 进父目录并选中它。
+ * 为什么不直接"跳转就完事"：用户搜文件是想**看到它并决定做什么**（压缩/删除），
+ * 落到父目录并高亮能把下一步动作接上。
+ */
+function openSearchResult(item) {
+  // 点结果 = 明确"去这个位置"：退出搜索态，回到正常浏览（输入框也一起清空，否则状态自相矛盾）
+  ui.clearSearch();
+  if (item.type === 'dir') {
+    goto(item.path);
+    return;
+  }
+  pendingSelectPath.value = item.path;
+  goto(parentOf(item.path));
+}
+
 /** 当前存储根（docs/16）：所有 fs 请求都带它；切根后路径/多选必须整体重置 */
 const rootId = computed(() => ui.currentRootId);
 
@@ -140,6 +168,20 @@ function applyListingPayload(listingPayload) {
   // 焦点行默认"无"：加载完就高亮第一行会让用户以为"第一项被选中了"（虚线框不是选中态）。
   // 只有按了上下箭头才设置焦点（键盘导航仍然完整可用）。
   focusIndex.value = -1;
+
+  // 从搜索结果点进来的文件：**只在其父目录加载完成时**消费待选路径。
+  // 不能只看"有 pending 就消费"：clearSearch 会先触发一次旧目录的加载，那一次会把 pending 提前吃掉（实测踩过）。
+  // 用**本次响应里的 path** 判断，而不是当前路由：清空搜索会先发一次旧目录请求，
+  // 那个响应可能在导航之后才回来（拿当前路由比较会误判、把 pending 吃掉）。
+  const loadedPath = listingPayload && typeof listingPayload.path === 'string' ? listingPayload.path : currentPath.value;
+  if (pendingSelectPath.value && loadedPath === parentOf(pendingSelectPath.value)) {
+    const matched = entries.value.find((entry) => entry.path === pendingSelectPath.value);
+    pendingSelectPath.value = '';
+    if (matched) {
+      selectOnly(matched);
+      focusIndex.value = entries.value.indexOf(matched);
+    }
+  }
 }
 
 /** 加载失败：把契约错误码与文案收进 errorInfo，并清空列表（避免展示上一目录的残留） */
@@ -155,6 +197,7 @@ function applyListingError(error) {
 async function load() {
   status.value = 'loading';
   errorInfo.value = null;
+  const requestedRootId = rootId.value;
   try {
     applyListingPayload(await api.get('/fs/list', {
       path: currentPath.value,
@@ -164,6 +207,12 @@ async function load() {
     }));
     status.value = 'ready';
   } catch (error) {
+    // 首屏竞态：侧栏可能刚把当前根换成"可读的那个"，而本次请求用的还是旧根 →
+    // 根已经变了就立刻按新根重试一次（而不是把一次过期的权限错误甩给用户）。
+    if (rootId.value !== requestedRootId) {
+      void load();
+      return;
+    }
     applyListingError(error);
   }
 }
@@ -602,6 +651,14 @@ function onCompressDropZone(event) {
   }
 }
 
+// 退出搜索态：恢复当前目录列表（面包屑路径本来就没动过，所以天然"回到搜索前的路径"）
+watch(
+  () => ui.searchQuery,
+  (keyword, previous) => {
+    if (previous && !keyword) void load();
+  },
+);
+
 // 切根：路径与多选不能留上一个根的残留（docs/16 验收第 5 条）
 watch(rootId, () => {
   clearSelection();
@@ -666,6 +723,58 @@ onUnmounted(() => {
         <DirectoryTree :current-path="currentPath" :root-id="rootId" @navigate="goto" @drop-paths="onTreeDrop" />
       </aside>
       <div class="file-browser__content">
+    <!-- 搜索态：主区直接变成结果列表（顶栏只是入口；不再用下拉框） -->
+    <div v-if="searching" class="search-panel" data-testid="search-panel">
+      <p class="file-browser__hint" data-testid="search-summary">
+        搜索「<strong>{{ ui.searchQuery }}</strong>」·
+        <template v-if="ui.searchState.running">搜索中…</template>
+        <template v-else>
+          {{ searchItems.length }} 项<template v-if="ui.searchState.truncated">（已达上限，结果被截断）</template>
+          · {{ ui.searchState.elapsedMs }}ms · 扫描 {{ ui.searchState.scannedDirs }} 个目录
+        </template>
+      </p>
+      <p v-if="ui.searchState.error" class="login-form__error" role="alert">{{ ui.searchState.error }}</p>
+      <div v-else-if="!ui.searchState.running && searchItems.length === 0" class="file-browser__empty" data-testid="search-empty">
+        <p>没有匹配的文件。</p>
+        <p class="card__desc">换个关键字试试；搜索只匹配文件名，且只在当前存储根内。</p>
+      </div>
+      <table v-else class="file-table" data-testid="search-table">
+        <thead>
+          <tr>
+            <th scope="col">名称</th>
+            <th scope="col" class="file-table__col-type">类型</th>
+            <th scope="col">大小</th>
+            <th scope="col">修改时间</th>
+            <th scope="col">所在路径</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="item in searchItems"
+            :key="item.path"
+            class="file-table__row"
+            :class="{ 'file-table__row--dir': item.type === 'dir' }"
+            :data-name="item.name"
+            :data-type="item.type"
+            data-testid="search-row"
+            @click="openSearchResult(item)"
+          >
+            <td>
+              <span class="file-table__name">
+                <Icon :name="item.type === 'dir' ? 'files' : 'file'" :size="15" />
+                <span>{{ item.name }}</span>
+              </span>
+            </td>
+            <td class="file-table__col-type">{{ item.type === 'dir' ? '目录' : '文件' }}</td>
+            <td class="file-table__size">{{ item.type === 'dir' ? '—' : formatBytes(item.size) }}</td>
+            <td class="file-table__mtime">{{ formatDateTime(item.mtime) }}</td>
+            <td class="file-table__mtime">{{ parentOf(item.path) }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <template v-if="!searching">
 
     <p v-if="actionNotice" class="file-browser__hint" data-testid="action-notice">✅ {{ actionNotice }}</p>
     <p v-if="actionError" class="login-form__error" role="alert" data-testid="action-error">{{ actionError }}</p>
@@ -677,6 +786,9 @@ onUnmounted(() => {
         <strong>加载失败</strong>
         <span class="badge badge--error">{{ errorInfo.code }}</span>
         <p>{{ errorInfo.message }}</p>
+        <p v-if="errorInfo.code === 'PERMISSION_DENIED'" class="card__desc" data-testid="root-hint">
+          当前存储位置不可访问：请从左侧换一个位置，或检查该目录权限。
+        </p>
         <button type="button" @click="load">重试</button>
       </div>
     </template>
@@ -788,6 +900,7 @@ onUnmounted(() => {
     <p v-if="status === 'ready'" class="file-browser__hint">
       共 {{ listing.total }} 项<template v-if="listing.truncated">（已截断，仅显示前 {{ entries.length }} 项）</template>
     </p>
+    </template>
       </div>
     </div>
   </section>

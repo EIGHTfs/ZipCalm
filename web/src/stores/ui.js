@@ -6,6 +6,8 @@
 
 import { defineStore } from 'pinia';
 
+import { api } from '../api/client.js';
+
 import { VIEW_MODE, VIEW_MODES, DEFAULT_ROUTE, ROUTES } from '../constants/index.js';
 import { breadcrumbsOf } from '../utils/path.js';
 
@@ -18,6 +20,10 @@ export const useUiStore = defineStore('ui', {
     pageHint: '',
     /** 文件页当前浏览路径（由 route.query.path 推导；null 表示当前页面不是文件页） */
     fsPath: null,
+    /** 搜索关键字（空 = 不在搜索态；文件列表按它切换成结果视图） */
+    searchQuery: '',
+    /** 搜索状态：结果集与元信息（边界由后端保证：深度/条数/超时） */
+    searchState: { running: false, error: '', items: [], truncated: false, elapsedMs: 0, scannedDirs: 0 },
     /** 当前存储根（docs/16）：侧栏切根后所有 fs 请求都带它；'default' = 配置里的 storage.root */
     currentRootId: 'default',
     /** 视图模式：docs/08 §二 默认列表视图 */
@@ -57,6 +63,41 @@ export const useUiStore = defineStore('ui', {
       } else {
         this.fsPath = null;
       }
+    },
+    /** 设置搜索关键字（只改 UI 态；真正请求由 runSearch 触发） */
+    setSearchQuery(value) {
+      this.searchQuery = typeof value === 'string' ? value : '';
+    },
+    /**
+     * 执行搜索（只在当前根内、有界遍历）。空关键字 = 清空并退出搜索态。
+     * @param {string} rootId
+     * @param {number} [limit]
+     */
+    async runSearch(rootId, limit = 500) {
+      const keyword = this.searchQuery.trim();
+      if (keyword.length === 0) {
+        this.clearSearch();
+        return;
+      }
+      this.searchState = { ...this.searchState, running: true, error: '' };
+      try {
+        const payload = await api.get('/fs/search', { q: keyword, rootId, limit });
+        this.searchState = {
+          running: false,
+          error: '',
+          items: (payload && payload.items) || [],
+          truncated: Boolean(payload && payload.truncated),
+          elapsedMs: Number((payload && payload.elapsedMs) || 0),
+          scannedDirs: Number((payload && payload.scannedDirs) || 0),
+        };
+      } catch (error) {
+        this.searchState = { running: false, error: `[${error.code || 'ERROR'}] ${error.message}`, items: [], truncated: false, elapsedMs: 0, scannedDirs: 0 };
+      }
+    },
+    /** 退出搜索态（文件列表恢复原目录） */
+    clearSearch() {
+      this.searchQuery = '';
+      this.searchState = { running: false, error: '', items: [], truncated: false, elapsedMs: 0, scannedDirs: 0 };
     },
     /** 切换存储根（docs/16）：只管 id，路径/多选的重置由文件页监听处理 */
     setCurrentRoot(rootId) {
