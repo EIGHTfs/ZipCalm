@@ -31,9 +31,17 @@ const VALID_MODES = new Set(['log-only', 'trash']);
  */
 const VALID_BACKENDS = new Set(['auto', 'system', 'project', 'none']);
 
-/** 解析出实际要用的后端（system/project/none） */
-function resolveBackend(configured, systemAvailable) {
-  const wanted = VALID_BACKENDS.has(configured) ? configured : 'auto';
+/**
+ * 解析出实际要用的后端（system/project/none）。
+ * 优先级：**环境变量 ZIPCALM_TRASH_BACKEND > 配置 delete.trashBackend > auto**。
+ * 为什么环境变量最高：它是进程级临时覆盖，用来让测试/演练固定到项目 trash，
+ * 而不必去改用户的 config（改配置会影响真实使用）。非法值回落配置值，不报错。
+ */
+function resolveBackend(configured, systemAvailable, envOverride) {
+  let wanted = VALID_BACKENDS.has(configured) ? configured : 'auto';
+  if (typeof envOverride === 'string' && envOverride.length > 0) {
+    if (VALID_BACKENDS.has(envOverride)) wanted = envOverride;
+  }
   if (wanted === 'none') return 'none';
   if (wanted === 'project') return 'project';
   if (wanted === 'system') return systemAvailable ? 'system' : 'project';
@@ -248,7 +256,11 @@ export function createDeleteService(options) {
   if (configuredBackend !== undefined && !VALID_BACKENDS.has(configuredBackend)) {
     options.logger.warn('delete.trashBackend 非法，已回落 auto', { configured: String(configuredBackend) });
   }
-  const backend = resolveBackend(configuredBackend, systemAvailable);
+  const envBackend = process.env.ZIPCALM_TRASH_BACKEND;
+  if (typeof envBackend === 'string' && envBackend.length > 0 && VALID_BACKENDS.has(envBackend) && envBackend !== configuredBackend) {
+    options.logger.warn('delete.trashBackend 被环境变量覆盖（进程级临时生效）', { env: envBackend, configured: String(configuredBackend) });
+  }
+  const backend = resolveBackend(configuredBackend, systemAvailable, envBackend);
 
   const ctx = {
     mode,

@@ -21,6 +21,12 @@ PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}" || exit 1
 
 WANT="${*:-build m1 m2 m3 crash probes retention m4 m6 m7 m8fs hlscan hlexec volumes multiroot}"
+
+# 测试卫生：把删除后端固定到项目 storage/trash（进程级覆盖，不改用户 config）。
+# 为什么必须：本项目目录就在共享内，auto 后端会把测试删除送进用户的 #recycle，
+# 跑一次 15 套就在 File Station 里堆一堆 zipcalm-*/m8-* 垃圾（实测踩过）。
+# 注意用 export：套件是子进程，必须继承（`VAR=x cmd` 只作用于那一条命令）。
+export ZIPCALM_TRASH_BACKEND=project
 LOGDIR="${TMPDIR:-/tmp}/zipcalm-suites"
 mkdir -p "${LOGDIR}"
 
@@ -51,8 +57,10 @@ echo
 if has build; then run_one build npm run build; fi
 
 # 依赖服务已在跑的三套：先统一起服务，跑完再停
+# 用 restart 而不是 start：start 对"已在运行"的服务是 no-op，环境变量（如
+# ZIPCALM_TRASH_BACKEND）就传不进已存在的进程，测试仍会写用户回收站。
 if has m1 || has m2 || has m3; then
-  bash "${SCRIPT_DIR}/start.sh" start >/dev/null 2>&1
+  bash "${SCRIPT_DIR}/start.sh" restart >/dev/null 2>&1
   sleep 2
   if has m1; then run_one m1 bash "${SCRIPT_DIR}/test-invariants-m1.sh"; fi
   if has m2; then run_one m2 node "${SCRIPT_DIR}/test-m2-roundtrip.mjs"; fi
