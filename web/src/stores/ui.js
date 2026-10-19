@@ -26,6 +26,8 @@ export const useUiStore = defineStore('ui', {
     searchState: { running: false, error: '', items: [], truncated: false, elapsedMs: 0, scannedDirs: 0 },
     /** 当前存储根（docs/16）：侧栏切根后所有 fs 请求都带它；'default' = 配置里的 storage.root */
     currentRootId: 'default',
+    /** 根列表（侧栏拉 /fs/volumes 后写入）：主区/抽屉要显示"我在哪个位置"，不能只有 id 没有名字 */
+    roots: [],
     /** 视图模式：docs/08 §二 默认列表视图 */
     viewMode: VIEW_MODE.LIST,
     /** 底部任务条摘要：F1 恒为 0，M3 由 /api/v1/tasks 填充 */
@@ -35,6 +37,19 @@ export const useUiStore = defineStore('ui', {
   }),
 
   getters: {
+    /**
+     * 当前根对用户可见的名字（C 模式=共享名，B 模式=卷名）。
+     * 根列表还没拉到时退回 id —— 宁可显示 'default' 也不显示空白。
+     */
+    currentRootLabel(state) {
+      const matched = state.roots.find((root) => root.id === state.currentRootId);
+      return matched && matched.label ? matched.label : state.currentRootId;
+    },
+    /** 当前目录的展示名：'/' 显示成「根目录」（与面包屑一致）；目录来自 fsPath，不是路由原文 */
+    currentDirLabel(state) {
+      const dir = state.fsPath || '/';
+      return dir === '/' ? '根目录' : dir;
+    },
     /**
      * 面包屑：
      * - 文件页 → 跟随真实浏览路径（/文档/子目录）；
@@ -63,6 +78,10 @@ export const useUiStore = defineStore('ui', {
       } else {
         this.fsPath = null;
       }
+    },
+    /** 写入根列表（侧栏 loadRoots 后调用；主区/抽屉据此显示位置名） */
+    setRoots(list) {
+      this.roots = Array.isArray(list) ? list : [];
     },
     /** 设置搜索关键字（只改 UI 态；真正请求由 runSearch 触发） */
     setSearchQuery(value) {

@@ -80,6 +80,12 @@ function applyTouchDefaultView() {
 const actionError = ref('');
 const activeTaskId = computed(() => submittedTaskId.value || (tasks.activeTask ? tasks.activeTask.id : null));
 
+/**
+ * 触屏底部操作栏：**暂时隐藏，等重新设计后开启**（功能已由工具栏按钮 + 长按菜单覆盖）。
+ * 这是显式开关而不是删代码 —— 保留实现便于以后重做，不要在重设计前删掉这段。
+ */
+const SHOW_TOUCH_BOTTOM_BAR = false;
+
 /** 搜索态（docs/16 批次②需求①）：关键字非空时主区改渲染搜索结果 */
 const searching = computed(() => ui.searchQuery.trim().length > 0);
 const searchItems = computed(() => (ui.searchState && ui.searchState.items) || []);
@@ -687,6 +693,15 @@ onUnmounted(() => {
       <button type="button" data-testid="go-up" :disabled="!upLevel" @click="goto(upLevel)">← 上级</button>
 
       <nav class="file-browser__crumbs" aria-label="面包屑" data-testid="files-breadcrumb">
+        <!-- 当前存储位置放在面包屑最前面：否则主区只有「/ 根目录」，用户看不出自己在哪个共享里 -->
+        <button
+          type="button"
+          class="file-browser__crumb file-browser__crumb--root"
+          data-testid="crumb-root"
+          :title="`当前存储位置：${ui.currentRootLabel}（点它回到该位置根目录）`"
+          @click="goto('/')"
+        >{{ ui.currentRootLabel }}</button>
+        <span aria-hidden="true">/</span>
         <template v-for="(crumb, index) in crumbs" :key="crumb.path">
           <span v-if="index > 0" aria-hidden="true">/</span>
           <button
@@ -927,7 +942,7 @@ onUnmounted(() => {
   />
 
   <!-- 触屏底部操作栏：选中后从底部滑出（拇指在屏幕下半部，这是主入口不是补充） -->
-  <div v-if="isTouch && selectedEntries.length > 0" class="bottom-bar" data-testid="bottom-action-bar">
+  <div v-if="SHOW_TOUCH_BOTTOM_BAR && isTouch && selectedEntries.length > 0" class="bottom-bar" data-testid="bottom-action-bar">
     <span class="bottom-bar__count">已选 {{ selectedEntries.length }} 项</span>
     <div class="bottom-bar__actions">
       <button type="button" data-testid="bar-compress" @click="showCompress = true">压缩</button>

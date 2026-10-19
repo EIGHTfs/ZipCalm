@@ -46,6 +46,8 @@ async function loadRoots() {
     rootsRetry = 0;
     roots.value = (payload && payload.roots) || [];
     rootsMode.value = (payload && payload.mode) || '';
+    // 存进 store：主区面包屑与压缩抽屉要显示"当前在哪个位置"，不能只靠侧栏自己知道
+    ui.setRoots(roots.value);
     // 当前根不在列表里（如默认根在 C 模式下被隐藏）→ 落到第一个可用项，避免"切了根但列表全不亮"
     if (!roots.value.some((root) => root.id === ui.currentRootId) && roots.value.length > 0) {
       ui.setCurrentRoot(roots.value[0].id);

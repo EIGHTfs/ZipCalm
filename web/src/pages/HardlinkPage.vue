@@ -21,7 +21,7 @@ const DEFAULT_EXTENSIONS = 'mp4, mkv, avi, mov, iso, zip, 7z';
 
 const ui = useUiStore();
 /** 扫描目录默认 = 当前浏览目录（多根下不能再默认 '/'，那会指到别的根） */
-const scanPath = ref(ui.currentPath || '/');
+const scanPath = ref(ui.fsPath || '/');
 const extensionsDraft = ref(DEFAULT_EXTENSIONS);
 const scanning = ref(false);
 const scanError = ref('');
@@ -64,7 +64,7 @@ function toggleAll() {
 }
 
 function useCurrentPath() {
-  scanPath.value = ui.currentPath || '/';
+  scanPath.value = ui.fsPath || '/';
 }
 
 async function runScan() {

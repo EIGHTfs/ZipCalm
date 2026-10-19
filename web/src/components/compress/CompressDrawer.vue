@@ -10,6 +10,7 @@
 import { computed, ref, watch } from 'vue';
 
 import { api } from '../../api/client.js';
+import { useUiStore } from '../../stores/ui.js';
 import { COMPRESS_MODE, COMPRESS_MODE_HINTS, COMPRESS_MODE_LABELS } from '../../constants/index.js';
 
 const props = defineProps({
@@ -40,6 +41,8 @@ const canSubmit = computed(() => props.sources.length > 0 && !submitting.value);
  * 为什么用 token：打开抽屉后用户可能连续改选择，慢请求返回晚就会覆盖新结果。
  * 预览失败不阻断压缩（它只是提示），所以这里静默降级为"没有跳过项"。
  */
+const ui = useUiStore();
+
 async function runPreview() {
   const token = previewToken.value + 1;
   previewToken.value = token;
@@ -121,7 +124,9 @@ async function submit() {
       </header>
 
       <div class="drawer__body">
-        <p class="card__desc">已选 {{ sources.length }} 项</p>
+        <p class="card__desc" data-testid="compress-dest">
+          已选 {{ sources.length }} 项 · 产物将保存到「{{ ui.currentRootLabel }}」的 {{ ui.currentDirLabel }}
+        </p>
 
         <fieldset class="field">
           <legend>格式</legend>
