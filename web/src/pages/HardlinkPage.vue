@@ -12,13 +12,16 @@
 import { computed, ref } from 'vue';
 
 import { scanHardlinkDuplicates, executeHardlinkGroups } from '../api/hardlink.js';
+import { useUiStore } from '../stores/ui.js';
 import { formatBytes } from '../utils/format.js';
 import PromptDialog from '../components/common/PromptDialog.vue';
 
 /** 默认扩展名（docs/15：mp4/mkv/avi/mov/iso/zip/7z） */
 const DEFAULT_EXTENSIONS = 'mp4, mkv, avi, mov, iso, zip, 7z';
 
-const scanPath = ref('/');
+const ui = useUiStore();
+/** 扫描目录默认 = 当前浏览目录（多根下不能再默认 '/'，那会指到别的根） */
+const scanPath = ref(ui.currentPath || '/');
 const extensionsDraft = ref(DEFAULT_EXTENSIONS);
 const scanning = ref(false);
 const scanError = ref('');
@@ -60,6 +63,10 @@ function toggleAll() {
   selectedGroupIndexes.value = allSelected.value ? [] : scanResult.value.groups.map((_, index) => index);
 }
 
+function useCurrentPath() {
+  scanPath.value = ui.currentPath || '/';
+}
+
 async function runScan() {
   scanning.value = true;
   scanError.value = '';
@@ -67,7 +74,11 @@ async function runScan() {
   selectedGroupIndexes.value = [];
   executeResult.value = null;
   try {
-    scanResult.value = await scanHardlinkDuplicates({ path: scanPath.value, extensions: extensionList.value });
+    scanResult.value = await scanHardlinkDuplicates({
+      path: scanPath.value,
+      extensions: extensionList.value,
+      rootId: ui.currentRootId,
+    });
     if (scanResult.value.groups.length === 0) selectedGroupIndexes.value = [];
   } catch (error) {
     scanError.value = error.message || '扫描失败';
@@ -93,6 +104,7 @@ async function onConfirmExecute() {
       extensions: extensionList.value,
       groups: selectedGroups.value,
       confirmed: true,
+      rootId: ui.currentRootId,
     });
     executeResult.value = executeOutcome;
     // 执行后重扫一次，让界面反映最新状态（已合并的组消失）
@@ -126,7 +138,14 @@ async function onConfirmExecute() {
           data-testid="hardlink-path"
           placeholder="/media/movies"
         >
+        <!-- 保留手填（大目录未必是当前浏览目录），但给一个"回到当前目录"的快捷方式 -->
+        <button type="button" class="hardlink-form__pick" data-testid="hardlink-use-current" @click="useCurrentPath">
+          用当前目录
+        </button>
       </label>
+      <p class="card__desc" data-testid="hardlink-root-hint">
+        当前存储位置：<strong>{{ ui.currentRootId }}</strong>（扫描只在这个位置内解析路径）
+      </p>
       <label class="hardlink-form__row">
         <span>扩展名白名单（逗号分隔）</span>
         <input

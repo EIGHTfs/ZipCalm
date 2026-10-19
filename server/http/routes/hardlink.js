@@ -37,6 +37,26 @@ function normalizeExtensions(raw) {
   return cleaned;
 }
 
+/**
+ * 在当前请求所属存储根内解析路径（docs/16 多根：与 fs 路由同源，用 app.requestContext）。
+ * 错误文案要能区分两种"扫不了"：
+ * - PATH_NOT_FOUND：当前根里没有这个目录（可能是手填错了）
+ * - PATH_OUT_OF_ROOT：路径不在当前根内（例如没切根就去扫别的共享）→ 提示先切根
+ */
+async function resolveInRoot(app, context, rawPath) {
+  try {
+    return await app.fsGuard.resolveRealIn(context.rootAbs, rawPath);
+  } catch (error) {
+    if (error && error.code === ERROR_CODES.PATH_NOT_FOUND) {
+      throw apiError(ERROR_CODES.PATH_NOT_FOUND, '该目录在当前存储根内不存在', { path: rawPath, rootId: context.rootId });
+    }
+    if (error && error.code === ERROR_CODES.PATH_OUT_OF_ROOT) {
+      throw apiError(ERROR_CODES.PATH_OUT_OF_ROOT, '不在当前根内，请先从左侧切换存储位置', { path: rawPath, rootId: context.rootId });
+    }
+    throw error;
+  }
+}
+
 export default async function hardlinkRoutes(app) {
   /**
    * 扫描重复分组（只读；永不改文件）。
@@ -48,8 +68,9 @@ export default async function hardlinkRoutes(app) {
       throw apiError(ERROR_CODES.VALIDATION_FAILED, 'path 必须是非空字符串');
     }
     const extensions = normalizeExtensions(body.extensions);
-    // 白名单 + 符号链接复核（INV-06，与 fs 路由同源）
-    const resolved = await app.fsGuard.resolveReal(body.path);
+    // 白名单 + 符号链接复核（INV-06，与 fs 路由同源），基准是**本请求的存储根**
+    const context = app.requestContext(request);
+    const resolved = await resolveInRoot(app, context, body.path);
     const scanPayload = await scanHardlinkDuplicates(resolved.absPath, extensions);
 
     // 响应路径统一转 userPath（绝对路径绝不进 API，INV-06 红线）
@@ -92,7 +113,8 @@ export default async function hardlinkRoutes(app) {
       throw apiError(ERROR_CODES.VALIDATION_FAILED, 'groups 必须是非空数组（来自 scan 响应）');
     }
     const extensions = normalizeExtensions(body.extensions);
-    const resolved = await app.fsGuard.resolveReal(body.path);
+    const context = app.requestContext(request);
+    const resolved = await resolveInRoot(app, context, body.path);
 
     // 组路径白名单复核（INV-06：执行面是写路径，比 scan 更严——逐个 resolveReal 并限定在扫描根下）
     const resolveGroup = async (group) => {
@@ -100,12 +122,12 @@ export default async function hardlinkRoutes(app) {
         throw apiError(ERROR_CODES.VALIDATION_FAILED, 'groups 每项需要 master 与非空 duplicates');
       }
       const toAbs = async (userPath) => {
-        const resolvedEntry = await app.fsGuard.resolveReal(userPath);
+        const resolvedEntry = await resolveInRoot(app, context, userPath);
         const rel = path.relative(resolved.absPath, resolvedEntry.absPath);
         if (rel.startsWith('..') || path.isAbsolute(rel)) {
           throw apiError(ERROR_CODES.PATH_OUT_OF_ROOT, '分组路径不在扫描根下', { userPath });
         }
-        return item.absPath;
+        return resolvedEntry.absPath;
       };
       return {
         size: Number(group.size) || 0,

@@ -740,7 +740,19 @@
   }
 
   /* 工具栏：允许换行，且按钮不参与压缩（被压窄会变成竖排单字） */
-  .file-browser__toolbar {
+  .file-browser__toolbar button:disabled {
+  /*
+   * 禁用但**看得见**：全局 button:disabled 是 opacity 0.5，白底上近乎隐形，
+   * 实测用户以为"没有压缩按钮"。这里改成实底 + 中性字色：一眼能看出"有这个功能，只是现在还不可点"。
+   */
+  opacity: 1;
+  color: var(--color-text-muted);
+  border-color: var(--color-border);
+  background: var(--color-surface-muted);
+  cursor: not-allowed;
+}
+
+.file-browser__toolbar {
     flex-wrap: wrap;
     row-gap: var(--space-2);
   }
@@ -1192,7 +1204,8 @@
   background: rgba(15, 23, 42, 0.35);
   display: flex;
   justify-content: flex-end;
-  z-index: 40;
+  /* 必须高于 .bottom-bar（2000）：抽屉是模态层，底部操作栏不能盖住它的按钮 */
+  z-index: 3000;
 }
 
 .drawer {
@@ -1202,6 +1215,8 @@
   box-shadow: var(--shadow-pop);
   display: flex;
   flex-direction: column;
+  /* 手机上手势条/圆角会吃掉底部空间，给页脚留出安全区 */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 .drawer__header,

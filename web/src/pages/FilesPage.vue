@@ -708,7 +708,7 @@ onUnmounted(() => {
         :disabled="!canCompress"
         :class="{ 'drop-target': dropActive }"
         data-testid="open-compress"
-        title="把文件拖到这里可直接压缩"
+        :title="canCompress ? '压缩选中项（也可把文件拖到此处）' : '先选中文件，或把文件拖到此处'"
         @click="showCompress = true"
         @dragover.prevent="dropActive = true"
         @dragleave="dropActive = false"
