@@ -36,5 +36,16 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/EIGHTfs/ZipCalm.git"
-  }
+  },
+  "license": "MIT",
+  "author": "EIGHTfs",
+  "keywords": [
+    "nas",
+    "compression",
+    "zip",
+    "tar",
+    "zstd",
+    "synology",
+    "self-hosted"
+  ]
 }
