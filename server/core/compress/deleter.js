@@ -18,8 +18,27 @@ import path from 'node:path';
 
 import { toApiError, apiError, ERROR_CODES } from '../../lib/errors.js';
 import { resolveWithinRoot } from '../fs/safePath.js';
+import { detect as detectSystemTrash, rmdirDir, unlinkFile } from '../fs/systemTrash.js';
 
 const VALID_MODES = new Set(['log-only', 'trash']);
+
+/**
+ * 回收站后端（delete.trashBackend）：
+ * - auto（默认）：探测到群晖 synorecycle 就用系统回收站，否则项目 storage/trash
+ * - system：强制系统回收站；**不可用/失败一律回退项目 trash，不报错**
+ * - project：强制项目 trash
+ * - none：不启用回收站 —— 删除会被拒绝并记 failed（绝不退化成真删）
+ */
+const VALID_BACKENDS = new Set(['auto', 'system', 'project', 'none']);
+
+/** 解析出实际要用的后端（system/project/none） */
+function resolveBackend(configured, systemAvailable) {
+  const wanted = VALID_BACKENDS.has(configured) ? configured : 'auto';
+  if (wanted === 'none') return 'none';
+  if (wanted === 'project') return 'project';
+  if (wanted === 'system') return systemAvailable ? 'system' : 'project';
+  return systemAvailable ? 'system' : 'project';
+}
 
 /** 删除日志文件名（按**本地日期**分文件；测试脚本拼这个名字时也要用本地日期） */
 function logFileName(date = new Date()) {
@@ -94,6 +113,25 @@ async function moveCrossDevice(ctx, target, destination) {
   });
 }
 
+/**
+ * 系统回收站（群晖 #recycle）：只报告结果，**失败不在这里兜底** —— 由调用方回退项目 trash。
+ * 目录用 rmdirDir、文件用 unlinkFile；先用 unlinkFile 试，返回 is_directory 再换 rmdirDir
+ * （fs/delete 的 targets 不一定带 kind，用模块自己的类型判定更可靠）。
+ */
+async function moveToSystemRecycle(ctx, input, target, deleteRecord, base, batchId) {
+  let recycled = await unlinkFile(target.absPath);
+  if (!recycled.ok && recycled.reason === 'is_directory') {
+    recycled = await rmdirDir(target.absPath);
+  }
+  if (!recycled.ok) return recycled;
+
+  // 群晖模式下 batchId 只进日志，不建目录（回收站由 DSM 管理）
+  deleteRecord.deleted.push({ path: target.userPath, backend: 'system-recycle', batchId });
+  await recordLog(ctx, { ...base, action: 'recycled', backend: 'system-recycle', batchId });
+  ctx.logger.info('原文件已移入群晖系统回收站', { taskId: input.taskId, source: target.userPath, batchId });
+  return { ok: true };
+}
+
 /** trash：移动到回收站（保留相对结构，可恢复；跨分区走 copy+verify 回退，零 unlink） */
 async function moveToTrash(ctx, input, target, deleteRecord, base, batchId) {
   try {
@@ -110,13 +148,13 @@ async function moveToTrash(ctx, input, target, deleteRecord, base, batchId) {
       }
     }
     const trashRel = ['trash', batchId, ...segments].join('/');
-    deleteRecord.deleted.push({ path: target.userPath, trashPath: trashRel });
-    await recordLog(ctx, { ...base, action: 'trashed', trashPath: trashRel });
+    deleteRecord.deleted.push({ path: target.userPath, trashPath: trashRel, backend: 'project-trash', batchId });
+    await recordLog(ctx, { ...base, action: 'trashed', backend: 'project-trash', trashPath: trashRel });
     ctx.logger.info('原文件已移入回收站', { taskId: input.taskId, source: target.userPath, trashPath: trashRel });
   } catch (error) {
     const code = toApiError(error).code;
     deleteRecord.failed.push({ path: target.userPath, code });
-    await recordLog(ctx, { ...base, action: 'failed', error: code });
+    await recordLog(ctx, { ...base, action: 'failed', backend: 'project-trash', error: code });
     ctx.logger.error('删除失败', { taskId: input.taskId, source: target.userPath, code });
   }
 }
@@ -177,6 +215,21 @@ async function deleteTargets(ctx, input) {
       await skipInLogOnly(ctx, input, target, deleteRecord, base);
       continue;
     }
+    if (ctx.backend === 'none') {
+      // 明确关掉了回收站：拒绝删除并记账 —— 宁可"没删掉"，也绝不退化成真删
+      deleteRecord.failed.push({ path: target.userPath, code: 'TRASH_DISABLED' });
+      await recordLog(ctx, { ...base, action: 'failed', backend: 'none', error: 'TRASH_DISABLED' });
+      ctx.logger.error('回收站后端为 none，删除被拒绝（未动文件）', { taskId: input.taskId, source: target.userPath });
+      continue;
+    }
+    if (ctx.backend === 'system') {
+      const recycled = await moveToSystemRecycle(ctx, input, target, deleteRecord, base, batchId);
+      if (recycled.ok) continue;
+      // 回退：系统回收站失败（权限/共享名/命令异常）→ 项目 trash，**绝不直接删**
+      ctx.logger.warn('系统回收站不可用，回退项目回收站', {
+        taskId: input.taskId, source: target.userPath, reason: recycled.reason, detail: recycled.detail,
+      });
+    }
     await moveToTrash(ctx, input, target, deleteRecord, base, batchId);
   }
 
@@ -190,8 +243,16 @@ export function createDeleteService(options) {
     options.logger.warn('delete.mode 非法，已回落 log-only（安全默认）', { configured: String(configuredMode) });
   }
 
+  const configuredBackend = options.config && options.config.delete ? options.config.delete.trashBackend : undefined;
+  const systemAvailable = detectSystemTrash().available;
+  if (configuredBackend !== undefined && !VALID_BACKENDS.has(configuredBackend)) {
+    options.logger.warn('delete.trashBackend 非法，已回落 auto', { configured: String(configuredBackend) });
+  }
+  const backend = resolveBackend(configuredBackend, systemAvailable);
+
   const ctx = {
     mode,
+    backend,
     logger: options.logger,
     logDir: options.logDir,
     trashDir: options.trashDir,
@@ -202,6 +263,8 @@ export function createDeleteService(options) {
 
   return {
     mode,
+    /** 实际生效的回收站后端（system / project / none），验收与日志用 */
+    backend,
     deleteTargets: (input) => deleteTargets(ctx, input),
     logFileName,
     /** 便于测试/验收直接读当天的删除日志路径 */

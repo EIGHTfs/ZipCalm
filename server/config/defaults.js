@@ -70,7 +70,16 @@ export const DEFAULT_CONFIG = {
      * - trash：真删并进 storage/trash/<batchId>/（可恢复），正式部署用；
      * 未知值 → 告警并回落 log-only（安全默认：绝不因配置写错而真删数据）。
      */
+    /**
+     * 回收站后端（mode=trash 时生效）：
+     * - auto（默认）：探测到群晖 `/usr/syno/bin/synorecycle` 就用系统回收站（删除进 DSM 的 #recycle，
+     *   用户可在 File Station 里恢复/清空），否则用项目 storage/trash；
+     * - system：强制系统回收站，不可用/失败时**回退项目 trash**（不报错、绝不真删）；
+     * - project：强制项目 storage/trash；
+     * - none：不启用回收站 —— 删除会被拒绝并记 failed（绝不退化成真删）。
+     */
     mode: 'log-only',
+    trashBackend: 'auto',
     /**
      * waiting_confirm 最长等待（数据模型 §八 / §3.3 硬要求 1）：
      * 默认 30 分钟；0 = 不超时；非法值（负数/非数字）→ 告警并回落默认。
