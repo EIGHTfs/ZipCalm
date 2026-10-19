@@ -9,7 +9,7 @@
 // - 任务进度面板（M2 用轮询，M3 换 SSE）；任务结束自动刷新目录（新产物/新解压目录立即可见）。
 
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
+import { RouterLink, useRoute, useRouter } from 'vue-router';
 
 import { api } from '../api/client.js';
 import Icon from '../components/common/Icon.vue';
@@ -200,9 +200,46 @@ function applyListingError(error) {
   status.value = 'error';
 }
 
+/** 服务运行身份：读 /health.runtime（权限提示里要显示"服务以谁的身份在跑"） */
+async function refreshRuntime() {
+  try {
+    const health = await api.get('/health');
+    ui.setRuntime(health && health.runtime);
+  } catch {
+    // 拿不到就保持空：提示会降级成 uid 或通用文案，不阻断
+  }
+}
+
+/** 身份展示：有用户名用用户名（附 uid），只有 uid 就只显示 uid */
+const runtimeIdentityLabel = computed(() => {
+  if (ui.runtimeUser && ui.runtimeUid !== null) return `${ui.runtimeUser}（uid=${ui.runtimeUid}）`;
+  if (ui.runtimeUser) return ui.runtimeUser;
+  if (ui.runtimeUid !== null) return `uid=${ui.runtimeUid}`;
+  return '未知用户';
+});
+
+/** 首屏最多等根结论这么久；超时按当前根先加载（宁可显示"可能不对"的目录，也不白屏） */
+const ROOTS_READY_TIMEOUT_MS = 3000;
+
+/**
+ * 等侧栏把"根已确定（含可读性探测）"写进 store。
+ * 为什么要等：刷新时若先按第一个根（可能是不可读的 Download）加载，就会弹 PERMISSION_DENIED，
+ * 而侧栏其实能探测出 VirtualDSM 可读 —— 这是纯竞态，不是权限问题。
+ */
+async function waitForRootsReady() {
+  if (ui.rootsReady) return true;
+  const deadline = Date.now() + ROOTS_READY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => { window.setTimeout(resolve, 50); });
+    if (ui.rootsReady) return true;
+  }
+  return false;
+}
+
 async function load() {
   status.value = 'loading';
   errorInfo.value = null;
+  await waitForRootsReady();
   const requestedRootId = rootId.value;
   try {
     applyListingPayload(await api.get('/fs/list', {
@@ -219,6 +256,7 @@ async function load() {
       void load();
       return;
     }
+    if (error && error.code === 'PERMISSION_DENIED') void refreshRuntime();
     applyListingError(error);
   }
 }
@@ -674,6 +712,7 @@ watch(rootId, () => {
 });
 
 onMounted(() => {
+  void refreshRuntime();
   window.addEventListener('keydown', onGlobalKeyDown);
   syncViewportMode();
   applyTouchDefaultView();
@@ -801,9 +840,30 @@ onUnmounted(() => {
         <strong>加载失败</strong>
         <span class="badge badge--error">{{ errorInfo.code }}</span>
         <p>{{ errorInfo.message }}</p>
-        <p v-if="errorInfo.code === 'PERMISSION_DENIED'" class="card__desc" data-testid="root-hint">
-          当前存储位置不可访问：请从左侧换一个位置，或检查该目录权限。
-        </p>
+        <p v-if="ui.rootsError" class="card__desc" data-testid="roots-error-hint">存储位置探测：{{ ui.rootsError }}</p>
+        <div v-if="errorInfo.code === 'PERMISSION_DENIED'" class="file-browser__permission" data-testid="root-hint">
+          <p>
+            网页服务当前以「<strong>{{ runtimeIdentityLabel }}</strong>」身份访问文件，
+            这可能与你登录 DSM 的账号不同。
+          </p>
+          <p>修复方式（任选其一）：</p>
+          <ul>
+            <li>
+              DSM → 控制面板 → 共享文件夹 → 选中该文件夹 → 编辑 → 权限 →
+              给「<strong>{{ runtimeIdentityLabel }}</strong>」读写权限
+            </li>
+            <li>或给该文件夹 everyone 读权限（更省事，但范围更宽）</li>
+          </ul>
+          <p class="card__desc">
+            提示：手动执行 <code>scripts/start.sh</code> 启动时服务以你的账号运行；
+            由 DSH 等套件代启时则是套件用户身份。
+          </p>
+          <p>
+            <RouterLink :to="ROUTES.SETTINGS" data-testid="root-hint-settings">去设置看看</RouterLink>
+            <span aria-hidden="true">·</span>
+            <button type="button" class="file-browser__crumb" @click="load">重试</button>
+          </p>
+        </div>
         <button type="button" @click="load">重试</button>
       </div>
     </template>

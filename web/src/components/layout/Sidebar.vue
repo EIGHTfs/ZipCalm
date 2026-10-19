@@ -52,7 +52,9 @@ async function loadRoots() {
     if (!roots.value.some((root) => root.id === ui.currentRootId) && roots.value.length > 0) {
       ui.setCurrentRoot(roots.value[0].id);
     }
-    await ensureReadableRoot();
+    const readable = await ensureReadableRoot();
+    // 放行文件页首屏：探测结果（含"全不可读"）必须写进 store，否则页面会一直等
+    ui.setRootsResolved({ roots: roots.value, mode: rootsMode.value, rootId: readable || ui.currentRootId, error: '' });
   } catch (error) {
     // 登录瞬间的 AUTH_REQUIRED 是竞态（token 还没落到 store），不是真错误：
     // 有限重试几次，避免侧栏永久停在"需要登录"（实测踩过）。
@@ -63,6 +65,8 @@ async function loadRoots() {
       return;
     }
     rootsError.value = `[${error.code || 'ERROR'}] ${error.message}`;
+    // 失败也要放行（带原因）：文件页按默认根加载并显示提示，好过白屏
+    ui.setRootsResolved({ roots: roots.value, rootId: ui.currentRootId, error: rootsError.value });
   }
 }
 
@@ -79,7 +83,7 @@ async function ensureReadableRoot() {
     try {
       await api.get('/fs/list', { path: '/', limit: 1, rootId: root.id });
       if (ui.currentRootId !== root.id) ui.setCurrentRoot(root.id);
-      return;
+      return root.id;
     } catch {
       // 不可读：试下一个
     }

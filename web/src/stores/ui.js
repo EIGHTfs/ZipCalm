@@ -28,6 +28,17 @@ export const useUiStore = defineStore('ui', {
     currentRootId: 'default',
     /** 根列表（侧栏拉 /fs/volumes 后写入）：主区/抽屉要显示"我在哪个位置"，不能只有 id 没有名字 */
     roots: [],
+    /**
+     * 根是否已"定下来"（含可读性探测）。
+     * 文件页首屏必须等它：否则可能先按不可读的第一个根加载 → PERMISSION_DENIED（实测踩过）。
+     * 探测失败/超时也必须置 true（带 rootsError），否则文件页会永远等下去。
+     */
+    rootsReady: false,
+    /** 探测过程中是否有错误（页面据此给提示，但不阻断加载） */
+    rootsError: '',
+    /** 服务进程的实际运行身份（来自 /health.runtime）：权限提示据此说清"给谁授权" */
+    runtimeUser: '',
+    runtimeUid: null,
     /** 视图模式：docs/08 §二 默认列表视图 */
     viewMode: VIEW_MODE.LIST,
     /** 底部任务条摘要：F1 恒为 0，M3 由 /api/v1/tasks 填充 */
@@ -82,6 +93,23 @@ export const useUiStore = defineStore('ui', {
     /** 写入根列表（侧栏 loadRoots 后调用；主区/抽屉据此显示位置名） */
     setRoots(list) {
       this.roots = Array.isArray(list) ? list : [];
+    },
+    /**
+     * 写入"根已确定"的结论（侧栏探测完可读根后调用）。
+     * 无论成功失败都要调用 —— 这是文件页首屏的放行信号。
+     * @param {{roots?: Array, mode?: string, rootId?: string, error?: string}} outcome
+     */
+    setRootsResolved(outcome = {}) {
+      if (Array.isArray(outcome.roots)) this.roots = outcome.roots;
+      if (typeof outcome.rootId === 'string' && outcome.rootId.length > 0) this.currentRootId = outcome.rootId;
+      this.rootsError = typeof outcome.error === 'string' ? outcome.error : '';
+      this.rootsReady = true;
+    },
+    /** 写入服务运行身份（/health.runtime）；拿不到用户名时只有 uid */
+    setRuntime(runtime) {
+      const source = runtime || {};
+      this.runtimeUser = typeof source.user === 'string' ? source.user : '';
+      this.runtimeUid = Number.isInteger(source.uid) ? source.uid : null;
     },
     /** 设置搜索关键字（只改 UI 态；真正请求由 runSearch 触发） */
     setSearchQuery(value) {

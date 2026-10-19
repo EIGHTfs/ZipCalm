@@ -352,7 +352,8 @@ async function main() {
 
   // ===== 二、SSE：首帧快照 =====
   const baselineHealth = await api('GET', '/health');
-  const baselineSubscribers = (baselineHealth.json && baselineHealth.json.data.tasks.subscribers) || 0;
+  /** 脚本开跑时的外部订阅数（仅供参考：用户可能中途打开页面，不能当常量断言） */
+  const initialSubscribers = (baselineHealth.json && baselineHealth.json.data.tasks.subscribers) || 0;
   const sse1 = await sseConnect();
   const firstFrame = await sse1.waitFor(() => true, 5000);
   check('SSE 首帧是 snapshot（INV-05 连接即发状态）', Boolean(firstFrame && firstFrame.event === 'snapshot'), `首帧 event=${firstFrame && firstFrame.event}`);
@@ -378,10 +379,14 @@ async function main() {
   // 断开期间任务继续跑（INV-04）：同时用 /health 证明本脚本的订阅已释放
   const healthWhileDetached = await api('GET', '/health');
   const subscribersWhileDetached = healthWhileDetached.json.data.tasks.subscribers;
+  // 增量断言：基线取**断言前**的一次读数，而不是脚本开头。
+  // 原因：用户随时可能打开页面 → 外部订阅数在测试中途变大，拿开头基线比必然误红（实测踩过）。
+  const detachedBaseline = await api('GET', '/health');
+  const subscribersBaseline = detachedBaseline.json.data.tasks.subscribers;
   check(
     '断开 SSE 后任务照常执行（本脚本订阅已释放）',
-    subscribersWhileDetached <= baselineSubscribers,
-    `subscribers=${subscribersWhileDetached}（脚本未连接时基线 ${baselineSubscribers}）`,
+    subscribersWhileDetached <= Math.max(subscribersBaseline, initialSubscribers),
+    `subscribers=${subscribersWhileDetached}（断言前基线 ${subscribersBaseline} / 开跑时 ${initialSubscribers}）`,
   );
 
   // ===== 四、since 续传：首帧仍是快照 =====
@@ -511,10 +516,13 @@ async function main() {
     Boolean(bgDone && bgDone.status === 'done'),
     bgDone ? `status=${bgDone.status} subscribers=${healthAfterBg.json.data.tasks.subscribers}` : 'timeout',
   );
+  // 同样是增量断言：用**断言前**重读的基线，容忍"用户此刻可能开着页面"
+  const finalBaselineHealth = await api('GET', '/health');
+  const finalBaseline = finalBaselineHealth.json.data.tasks.subscribers;
   check(
-    '全程没有本脚本的订阅（执行与订阅零耦合，INV-02/INV-04）',
-    healthAfterBg.json.data.tasks.subscribers <= baselineSubscribers,
-    `subscribers=${healthAfterBg.json.data.tasks.subscribers}（基线 ${baselineSubscribers}）`,
+    '本脚本全程没有建立订阅（执行与订阅零耦合，INV-02/INV-04）',
+    healthAfterBg.json.data.tasks.subscribers <= Math.max(finalBaseline, initialSubscribers),
+    `subscribers=${healthAfterBg.json.data.tasks.subscribers}（断言前基线 ${finalBaseline} / 开跑时 ${initialSubscribers}）`,
   );
 
   // ===== 十、历史查询 + 文件上限 =====
