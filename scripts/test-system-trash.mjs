@@ -25,7 +25,39 @@ import { detect, rmdirDir, toSharePath, unlinkFile } from '../server/core/fs/sys
 
 /** 夹具放在一个真实共享里（/volume1/VirtualDSM 是本机确认可写的共享） */
 const FIXTURE_ROOT = '/volume1/VirtualDSM';
-const FIXTURE_DIR = path.join(FIXTURE_ROOT, `zipcalm-systemtrash-test-${process.pid}-${Date.now()}`);
+const FIXTURE_NAME = `zipcalm-systemtrash-test-${process.pid}-${Date.now()}`;
+const FIXTURE_DIR = path.join(FIXTURE_ROOT, FIXTURE_NAME);
+/** 群晖回收站根（权限放开时可读）：夹具被删进这里后，finally 必须把那一份也清掉 */
+const RECYCLE_ROOT = path.join(FIXTURE_ROOT, '#recycle');
+const RECYCLE_COPY = path.join(RECYCLE_ROOT, FIXTURE_NAME);
+
+/**
+ * 清理：先删原路径，再删回收站里那份（**这是本次修的重点**）。
+ * 为什么必须删回收站那份：夹具是"删进系统回收站"来验证功能的，原路径已经不存在，
+ * 只删原路径等于把垃圾永久留在用户的 File Station 回收站里 —— 测试污染用户环境。
+ * 两处都删不掉时**明确打印清理提示**，不静默留垃圾。
+ */
+async function cleanupFixture() {
+  const leftovers = [];
+  await fsp.rm(FIXTURE_DIR, { recursive: true, force: true }).catch(() => {});
+  try {
+    if (fs.existsSync(RECYCLE_COPY)) await fsp.rm(RECYCLE_COPY, { recursive: true, force: true });
+  } catch (error) {
+    leftovers.push(`${RECYCLE_COPY}（${error.code || error.message}）`);
+  }
+  // 兜底检查：回收站里是否还有本测试前缀的条目
+  try {
+    for (const name of await fsp.readdir(RECYCLE_ROOT)) {
+      if (name.startsWith('zipcalm-systemtrash-test-')) {
+        const full = path.join(RECYCLE_ROOT, name);
+        if (full !== RECYCLE_COPY) leftovers.push(full);
+      }
+    }
+  } catch {
+    // 回收站不可读：无从检查（不算失败，但下面的提示会说明）
+  }
+  return leftovers;
+}
 
 let pass = 0;
 let fail = 0;
@@ -41,6 +73,8 @@ function check(name, condition, detail = '') {
     console.log(`FAIL | ${name}${detail ? ` | ${detail}` : ''}`);
   }
 }
+
+let cleanupLeftovers = [];
 
 async function main() {
   // ===== toSharePath 边界 =====
@@ -109,8 +143,15 @@ async function main() {
     check('synorecycle 失败 → command_failed', failed.ok === false && failed.reason === 'command_failed', JSON.stringify(failed));
     check('失败后文件仍在原地（模块内绝不 rm）', fs.existsSync(survivor) === true);
   } finally {
-    // 自建夹具自清（这里删的是本测试自己的目录，不是用户数据）
-    await fsp.rm(FIXTURE_DIR, { recursive: true, force: true });
+    cleanupLeftovers = await cleanupFixture();
+  }
+
+  // 测试卫生本身也是断言：跑完不该在回收站里留下 zipcalm-* 垃圾
+  check('跑完回收站零残留（夹具已从 #recycle 清掉）', cleanupLeftovers.length === 0,
+    cleanupLeftovers.length === 0 ? '' : `残留：${cleanupLeftovers.join('；')}`);
+  if (cleanupLeftovers.length > 0) {
+    console.log('\n⚠️  请手动清理以下残留（测试夹具已删除进回收站，但自动清理失败）：');
+    for (const item of cleanupLeftovers) console.log(`   - ${item}`);
   }
 
   console.log(`\nPASS ${pass} / FAIL ${fail}`);
@@ -122,6 +163,10 @@ async function main() {
 
 main().catch(async (error) => {
   console.error(`系统回收站单测异常：${error.message}`);
-  await fsp.rm(FIXTURE_DIR, { recursive: true, force: true }).catch(() => {});
+  const leftovers = await cleanupFixture();
+  if (leftovers.length > 0) {
+    console.log('⚠️  请手动清理以下残留：');
+    for (const item of leftovers) console.log(`   - ${item}`);
+  }
   process.exitCode = 1;
 });

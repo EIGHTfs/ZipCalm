@@ -8,8 +8,9 @@
 //   synorecycle --rmdir  share=<共享名> rpath=<共享内相对路径>   # 目录 → #recycle
 //
 // 两个实测事实（决定了本模块的边界）：
-// 1. `#recycle` 是 `root:root d---------`，普通用户读不了 → **校验只能靠"原位置是否消失"**，
-//    不能去回收站里核实；
+// 1. `#recycle` 的权限**可能可读也可能不可读**（取决于部署方是否放开）：
+//    - 可读 → 删后校验可以更强：确认目标真的出现在 `#recycle/<rpath>`；
+//    - 不可读 → 退回只看"原位置是否消失"（不能因为读不到回收站就判失败）；
 // 2. synorecycle 失败时什么都不会发生 → 调用方必须能回退到项目 trash，
 //    所以本模块**只报告失败、绝不自己兜底删除**（函数内没有任何 rm/unlink 作为"补救"）。
 
@@ -72,6 +73,54 @@ export function toSharePath(absPath) {
   if (rest.length === 0) return null;
 
   return { share, rpath: rest };
+}
+
+/**
+ * 回收站里"这份文件应该在哪"：`/volumeN/<共享>/#recycle/<rpath>`。
+ * 实测映射：删 /volume1/VirtualDSM/a/b.txt → /volume1/VirtualDSM/#recycle/a/b.txt
+ */
+function recyclePathOf(absPath) {
+  const normalized = path.posix.normalize(String(absPath).replace(/\\/g, '/'));
+  const matched = normalized.match(VOLUME_SHARE_PATTERN);
+  if (!matched) return null;
+  const shareName = matched[1];
+  const shareRoot = normalized.slice(0, normalized.indexOf(shareName) + shareName.length);
+  const rpath = matched[2] || '';
+  if (rpath.length === 0) return null;
+  return path.posix.join(shareRoot, '#recycle', rpath);
+}
+
+/** 回收站可读才做加强校验（不可读时返回 null，表示"无法判断"，不当作失败） */
+async function recycleDirReadable(absPath) {
+  const normalized = path.posix.normalize(String(absPath).replace(/\\/g, '/'));
+  const matched = normalized.match(VOLUME_SHARE_PATTERN);
+  if (!matched) return null;
+  const shareName = matched[1];
+  const shareRoot = normalized.slice(0, normalized.indexOf(shareName) + shareName.length);
+  const recycleRoot = path.posix.join(shareRoot, '#recycle');
+  try {
+    await fsp.readdir(recycleRoot);
+    return recycleRoot;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 删后加强校验：目标是否真的出现在回收站里。
+ * synorecycle 返回后落点可能有毫秒级延迟，所以**轮询**而不是只看一次。
+ * @returns {Promise<{verifiable: boolean, found: boolean}>}
+ */
+async function verifyInRecycle(absPath) {
+  const candidate = recyclePathOf(absPath);
+  if (!candidate) return { verifiable: false, found: false };
+  const recycleRoot = await recycleDirReadable(absPath);
+  if (!recycleRoot) return { verifiable: false, found: false };
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (await exists(candidate)) return { verifiable: true, found: true };
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return { verifiable: true, found: false };
 }
 
 /** 原位置是否还在（stat 成功即存在；权限错误按"存在"处理，宁可判失败也不误报成功） */
@@ -138,9 +187,15 @@ async function recycle(flag, absPath, expectType, options = {}) {
   const run = await runSynorecycle(flag, target, binary);
   if (!run.ok) return run;
 
-  // 删后校验：**只能看原位置是否消失**（#recycle 不可读，见文件头注释）
+  // 删后校验第一层：原位置必须消失（返回成功却还在 = 假成功，必须按失败上报）
   if (await exists(absPath)) return { ok: false, reason: 'still_exists', detail: 'synorecycle 返回成功但原位置仍在' };
-  return { ok: true };
+
+  // 删后校验第二层（能读回收站时）：确认它真的躺在 #recycle 里；读不到就退回只看原位消失
+  const recycled = await verifyInRecycle(absPath);
+  if (recycled.verifiable && !recycled.found) {
+    return { ok: false, reason: 'not_in_recycle', detail: '原位已消失，但回收站里找不到目标（可能被其他策略清理）' };
+  }
+  return { ok: true, verifiedInRecycle: recycled.verifiable ? recycled.found : null };
 }
 
 /**
