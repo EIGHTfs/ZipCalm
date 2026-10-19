@@ -87,26 +87,20 @@ async function main() {
   const { app, authStore, meta } = await buildApp({ config, logger, projectRoot: PROJECT_ROOT });
   const stopCleanup = authStore.startCleanup();
 
-  // ===== 3. 监听 =====
-  try {
-    await app.listen({ host: config.server.host, port: config.server.port });
-  } catch (error) {
-    logger.error('listen failed', { error: error.message, port: config.server.port, host: config.server.host });
-    process.stderr.write(`[ZipCalm] 端口监听失败：${error.message}\n`);
-    process.exit(1);
-  }
-
-  logger.info('ZipCalm server ready', { port: config.server.port, bootId: meta.bootId });
-
-  // 监听成功后再写 PID 文件：这样"PID 文件存在"就等于"服务已就绪"
-  writePidFile();
-
-  // ===== 4. 优雅退出 =====
+  // ===== 3. 信号与异常处理器（**必须在 listen 之前注册**）=====
+  // 为什么提前：启动期收到 SIGTERM 时若还没有处理器，Node 走默认行为**直接退出且不留任何日志**，
+  // 表现为"日志停在半路、进程消失"，排查时看不出是谁杀的（实测踩过）。
+  let listening = false;
   let shuttingDown = false;
   const shutdown = async (reason) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    logger.info('shutting down', { reason });
+    if (listening) {
+      logger.info('shutting down', { reason });
+    } else {
+      // 启动未完成就收到退出信号：单独一条，便于区分"被外部杀掉"和"启动失败"
+      logger.warn('shutting down during startup', { reason, phase: 'before-listen' });
+    }
     try {
       await app.close();
     } catch (error) {
@@ -131,6 +125,21 @@ async function main() {
     });
     shutdown('uncaughtException');
   });
+
+  // ===== 4. 监听 =====
+  try {
+    await app.listen({ host: config.server.host, port: config.server.port });
+  } catch (error) {
+    logger.error('listen failed', { error: error.message, port: config.server.port, host: config.server.host });
+    process.stderr.write(`[ZipCalm] 端口监听失败：${error.message}\n`);
+    process.exit(1);
+  }
+  listening = true;
+
+  logger.info('ZipCalm server ready', { port: config.server.port, bootId: meta.bootId });
+
+  // 监听成功后再写 PID 文件：这样"PID 文件存在"就等于"服务已就绪"
+  writePidFile();
 }
 
 main();

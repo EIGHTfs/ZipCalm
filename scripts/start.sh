@@ -27,6 +27,29 @@ LOG_FILE="${LOG_DIR}/server.log"
 
 STOP_WAIT_SECONDS=10
 HEALTH_WAIT_TICKS=40   # 40 × 0.5s = 20s
+# 等 PID 文件（boot 在 listen 成功后才写，所以它出现=已就绪）。
+# 为什么不是 5s：冷启动（尤其刚 build 完、磁盘忙）实测会超过 5s，
+# 旧值 5s 会把**正在正常启动**的进程判死并 TERM 掉，表现为"日志停在半路、进程消失"。
+PID_WAIT_TICKS="${ZIPCALM_PID_WAIT_TICKS:-75}"      # 75 × 0.2s = 15s
+PID_GRACE_TICKS="${ZIPCALM_PID_GRACE_TICKS:-25}"    # 超时后再宽限 25 × 0.2s = 5s
+START_LOG="${LOG_DIR}/start.log"
+
+# 失败原因同时写 stderr 与 storage/logs/start.log：
+# 调用方常把 start.sh 输出重定向到 /dev/null，只写 stderr 会让"这次为什么失败"不可追溯（实测踩过）。
+fail_log() {
+  local message="$*"
+  printf '%s\n' "${message}" >&2
+  mkdir -p "${LOG_DIR}" 2>/dev/null || true
+  printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${message}" >> "${START_LOG}" 2>/dev/null || true
+}
+
+# 把服务日志尾部一并写进 start.log（现场证据不能只留在终端）
+dump_recent_log() {
+  local tail_text
+  tail_text="$(tail -n 15 "${LOG_FILE}" 2>/dev/null || true)"
+  printf '%s\n' "${tail_text}" >&2
+  printf '[%s] --- server.log tail ---\n%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "${tail_text}" >> "${START_LOG}" 2>/dev/null || true
+}
 
 # ===== node 自探测 =====
 resolve_node() {
@@ -130,7 +153,7 @@ do_start() {
   fi
 
   if [ ! -f "${BOOT_ENTRY}" ]; then
-    printf '启动失败：找不到入口 %s\n' "${BOOT_ENTRY}" >&2
+    fail_log "启动失败：找不到入口 ${BOOT_ENTRY}"
     exit 1
   fi
 
@@ -138,8 +161,8 @@ do_start() {
   # 这时必须报错退出，否则新进程会 EADDRINUSE 秒退，而健康检查却因旧实例而"通过"，
   # 造成"启动成功但跑的是旧代码"的假象（本项目真实踩过）。
   if [ "$(health_probe)" = "ok" ]; then
-    printf '启动失败：端口 %s 上已有服务在响应，但 PID 文件 %s 指向的进程不存在。\n' "${PORT}" "${PID_FILE}" >&2
-    printf '请先确认并停止占用该端口的进程（或用 ZIPCALM_PORT 换端口）后再启动。\n' >&2
+    fail_log "启动失败：端口 ${PORT} 上已有服务在响应，但 PID 文件 ${PID_FILE} 指向的进程不存在。"
+    fail_log "请先确认并停止占用该端口的进程（或用 ZIPCALM_PORT 换端口）后再启动。"
     exit 1
   fi
 
@@ -158,22 +181,42 @@ do_start() {
   LAUNCHED_PID=$!
   popd >/dev/null
 
-  # 等 PID 文件出现（最多 5s）：boot.js 监听成功后才写，所以它出现即代表已就绪
+  # 等 PID 文件出现：boot.js 监听成功后才写，所以它出现即代表已就绪。
+  # 超时不再"立刻杀掉"——慢启动（刚 build 完/磁盘忙）会超过预算，
+  # 旧实现直接 TERM 会让一个**正在正常启动**的进程静默消失（实测踩过）。
   local waited=0
   while [ ! -f "${PID_FILE}" ]; do
     sleep 0.2
     waited=$((waited + 1))
-    if [ "${waited}" -ge 25 ]; then
-      printf '启动失败：等待 PID 文件超时（PID 文件 %s）。最近日志：\n' "${PID_FILE}" >&2
-      tail -n 15 "${LOG_FILE}" >&2 || true
-      [ -n "${LAUNCHED_PID}" ] && kill -TERM "${LAUNCHED_PID}" 2>/dev/null || true
-      exit 1
-    fi
+
     if ! kill -0 "${LAUNCHED_PID}" 2>/dev/null; then
-      printf '启动失败：进程已退出（很可能是端口占用或配置错误）。最近日志：\n' >&2
-      tail -n 15 "${LOG_FILE}" >&2 || true
+      fail_log "启动失败：进程已退出（很可能是端口占用或配置错误）。最近日志："
+      dump_recent_log
       rm -f "${PID_FILE}"
       exit 1
+    fi
+
+    if [ "${waited}" -ge "${PID_WAIT_TICKS}" ]; then
+      # 超时前再探一次健康：可能刚好就绪（只是 PID 文件还没落盘）
+      if [ "$(health_probe)" = "ok" ]; then
+        break
+      fi
+      fail_log "启动较慢：${PID_WAIT_TICKS} 个 tick（约 $((PID_WAIT_TICKS / 5))s）内未见 PID 文件，进程仍在启动中，再宽限 $((PID_GRACE_TICKS / 5))s……"
+      local grace=0
+      while [ ! -f "${PID_FILE}" ] && [ "${grace}" -lt "${PID_GRACE_TICKS}" ]; do
+        sleep 0.2
+        grace=$((grace + 1))
+      done
+      if [ ! -f "${PID_FILE}" ]; then
+        if [ "$(health_probe)" = "ok" ]; then
+          break
+        fi
+        fail_log "启动失败：等待 PID 文件超时（已等 $((PID_WAIT_TICKS + PID_GRACE_TICKS)) 个 tick，PID 文件 ${PID_FILE}）。最近日志："
+        dump_recent_log
+        [ -n "${LAUNCHED_PID}" ] && kill -TERM "${LAUNCHED_PID}" 2>/dev/null || true
+        exit 1
+      fi
+      break
     fi
   done
 
@@ -182,8 +225,8 @@ do_start() {
   for tick in $(seq 1 "${HEALTH_WAIT_TICKS}"); do
     sleep 0.5
     if ! is_running; then
-      printf '启动失败：进程已退出。最近日志：\n' >&2
-      tail -n 15 "${LOG_FILE}" >&2 || true
+      fail_log "启动失败：进程已退出。最近日志："
+      dump_recent_log
       rm -f "${PID_FILE}"
       exit 1
     fi
@@ -196,8 +239,8 @@ do_start() {
     fi
   done
 
-  printf '启动超时（进程在跑但健康检查未通过）。最近日志：\n' >&2
-  tail -n 15 "${LOG_FILE}" >&2 || true
+  fail_log "启动超时（进程在跑但健康检查未通过）。最近日志："
+  dump_recent_log
   exit 1
 }
 
