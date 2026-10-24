@@ -11,3 +11,4 @@ ZipCalm.pid
 *.tmp
 .DS_Store
 @eaDir/
+node_modules.orig/
