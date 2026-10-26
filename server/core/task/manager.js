@@ -42,6 +42,8 @@ function buildContext(deps) {
     logger: deps.logger,
     store: deps.store,
     events: deps.events,
+    // PW-1：任务落盘前的能力参数脱敏器（由 capRegistry 提供通用实现；单测未注入时跳过）
+    sanitizeOptionsForPersist: typeof deps.sanitizeOptionsForPersist === 'function' ? deps.sanitizeOptionsForPersist : null,
     bootId: crypto.randomUUID(),
     /**
      * 保留策略参数（来自配置，不写死；数据模型 §六 规则 6）：
@@ -167,12 +169,22 @@ function needsDeleteState(input) {
   return Boolean(input.options && input.options.keepOriginal === false);
 }
 
+/**
+ * API 视图用的能力参数脱敏器。由压缩层在装配完成后注入（见 __setCapabilitySanitizer）。
+ *
+ * 为什么 API 出口也要脱敏：正常路径上 stageCapabilityVerify 会把脱敏值写回 options，
+ * 但 failed/interrupted 等提前退出的任务走不到那一步 —— 若这里直接透传 info.options，
+ * 明文密码就会出现在响应里（PW-1）。所以出口统一过一遍，不依赖执行阶段。
+ */
+let apiOptionsSanitizer = null;
+
 /** 完整任务视图（剥离 internal；契约 §2.4 的"完整 Task"）—— 也可用于任意 info 快照 */
 function publicTask(info) {
+  const rawOptions = { ...info.options };
   return {
     ...info,
     sources: info.sources.map(toPublicSource),
-    options: { ...info.options },
+    options: apiOptionsSanitizer ? apiOptionsSanitizer(rawOptions) : rawOptions,
     progress: { ...info.progress },
     result: info.result ? { ...info.result, packages: info.result.packages.map((pkg) => ({ ...pkg })) } : null,
     delete: info.delete ? { ...info.delete, targets: info.delete.targets.map(toPublicDeleteTarget) } : null,
@@ -210,16 +222,37 @@ function toSummary(record) {
 
 // ===== 落盘 / 发布 =====
 
+/**
+ * 剔除 internal 里「只该活在进程内存」的能力参数（PW-1）。
+ *
+ * capabilityParams 存的是明文密码，用于压缩后自测（cap.verify）与删除前复核；
+ * 它一旦落盘，options 侧的脱敏就失去意义。重启后需要密码的场景（重试）由用户重新输入。
+ */
+function withoutCapabilityParams(internal) {
+  if (!internal || typeof internal !== 'object') return internal || {};
+  const { capabilityParams: _dropped, ...rest } = internal;
+  return rest;
+}
+
 /** 当前需要落盘的任务集合（非终态 + failed/interrupted） */
 function persistedTasks(ctx) {
   const list = [];
   for (const record of ctx.tasks.values()) {
     const { status } = record.info;
     if (!TERMINAL_STATUSES.has(status) || PERSISTED_TERMINAL_STATUSES.has(status)) {
+      // PW-1：落盘前通用脱敏——capabilities 里的 secret 字段（明文密码）永不落 tasks.json
+      const infoForPersist = ctx.sanitizeOptionsForPersist
+        ? { ...record.info, options: ctx.sanitizeOptionsForPersist(record.info.options) }
+        : record.info;
       list.push({
-        info: toApiTask(record),
-        // internal 里额外带上源的绝对路径（重启后重试要用；API 视图已剥离）
-        internal: { ...record.internal, sourceAbsPaths: record.info.sources.map((source) => source.absPath || null) },
+        info: { ...toApiTask({ ...record, info: infoForPersist }), options: infoForPersist.options },
+        // internal 里额外带上源的绝对路径（重启后重试要用；API 视图已剥离）。
+        // PW-1：capabilityParams 存的是**明文密码**（只该活在进程内存），绝不能落盘——
+        // 否则 options 那边脱敏了、internal 这边又漏一遍，等于白做。
+        internal: {
+          ...withoutCapabilityParams(record.internal),
+          sourceAbsPaths: record.info.sources.map((source) => source.absPath || null),
+        },
       });
     }
   }
@@ -274,6 +307,11 @@ function normalizeOptions(raw) {
     deleteArchiveAfterExtract: Boolean(options.deleteArchiveAfterExtract),
     outputDir: options.outputDir || null,
     parallel: false,
+    // 能力参数（docs/19 §六）：原样透传（明文只在内存存活到压缩完成），
+    // 落盘时 store.js 会用能力插件的 redact() 剔除明文——这里不认识具体能力。
+    ...(options.capabilities && typeof options.capabilities === 'object'
+      ? { capabilities: options.capabilities }
+      : {}),
     // 只有调用方显式给了 blacklist 才写入（解压任务不该凭空多出这个字段）
     ...(options.blacklist ? { blacklist: normalizeBlacklist(options.blacklist) } : {}),
   };
@@ -927,6 +965,13 @@ export function createTaskManager(deps) {
     toSummary,
     toApiTask,
     flush: () => ctx.store.flush(),
+    /** PW-1：压缩层创建 capRegistry 后补挂脱敏器（manager 先于能力层装配）。
+     *  同时挂到落盘路径（ctx）与 API 出口（模块级），两条路都不能漏。 */
+    __setCapabilitySanitizer: (fn) => {
+      if (typeof fn !== 'function') return;
+      ctx.sanitizeOptionsForPersist = fn;
+      apiOptionsSanitizer = fn;
+    },
     stats: () => ({
       total: ctx.tasks.size,
       active: ctx.activeId,

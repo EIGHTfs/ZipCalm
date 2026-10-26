@@ -21,6 +21,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 
 import archiver from 'archiver';
+import zipEncrypted from 'archiver-zip-encrypted';
 import unzipper from 'unzipper';
 
 import { ERROR_CODES, apiError } from '../../../lib/errors.js';
@@ -42,6 +43,8 @@ const meta = {
   mime: 'application/zip',
   levelRange: [0, 9],
   defaultLevel: 6,
+  // 能力声明（docs/19 §4.1）：ZIP 规范有加密 → 支持密码能力；TAR 系列声明空数组
+  capabilities: ['password'],
 };
 
 // ===== available =====
@@ -219,10 +222,26 @@ function resolveLevel(options) {
   return Number.isInteger(options && options.level) ? options.level : meta.defaultLevel;
 }
 
-/** 建立"归档 → 输出流"管道（archiver 写、file stream 落盘） */
-function openArchivePipeline(tempPath, level) {
+/**
+ * 能力注册（docs/19）：archiver-zip-encrypted 提供 zip-encrypted 格式（AES-256/ZipCrypto）。
+ * registerFormat 每进程只能注册一次（重复抛错）——模块加载期执行一次，天然幂等。
+ */
+let zipEncryptedRegistered = false;
+function ensureZipEncryptedFormat() {
+  if (zipEncryptedRegistered) return;
+  archiver.registerFormat('zip-encrypted', zipEncrypted);
+  zipEncryptedRegistered = true;
+}
+
+/** 建立"归档 → 输出流"管道（archiver 写、file stream 落盘）。
+ *  能力装配点（docs/19 图 1 ★ 只改 2 行）：archiverFormat/encryption 由编排层的能力
+ *  装配循环（capRegistry.prepareCreate）注入 options —— 本插件不认识任何具体能力。
+ */
+function openArchivePipeline(tempPath, level, options = {}) {
+  const archiverFormat = options.archiverFormat ?? 'zip';
+  if (archiverFormat !== 'zip') ensureZipEncryptedFormat();
   const output = fs.createWriteStream(tempPath);
-  const archive = archiver('zip', { zlib: { level } });
+  const archive = archiver(archiverFormat, { zlib: { level }, ...options.archiverExtra });
   archive.pipe(output);
   return { output, archive };
 }
@@ -317,7 +336,7 @@ function runCreateStream(ctx, fileItems, summary, stats) {
 
   return new Promise((resolve, reject) => {
     const state = { settled: false, outputClosed: false, archiveFinished: false };
-    const { output, archive } = openArchivePipeline(ctx.tempPath, stats.level);
+    const { output, archive } = openArchivePipeline(ctx.tempPath, stats.level, ctx.options);
     const finish = createSettler(state);
 
     const resolveIfComplete = () => {

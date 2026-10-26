@@ -370,6 +370,37 @@ function groupSourcesForCompress(info) {
   return info.mode === 'single' ? info.sources.map((source) => [source]) : [info.sources];
 }
 
+/**
+ * 通用能力装配循环（docs/19 图 1 ★）：编排层不认识任何具体能力——
+ * 「格式声明 ∩ 能力 appliesTo」的交集决定哪些能力参与本次压缩；每个能力用
+ * prepareCreate() 把自己的参数翻译成格式插件的 create 选项（archiverFormat / extra）。
+ *
+ * 用户启用入口也走通用形态：options.capabilities = { <capId>: {…参数} }（由 HTTP 层
+ * 校验后写入）。交集为空 → 返回空数组，装配循环零动作。
+ *
+ * @returns {Array<{id, cap, params}>} 本次压缩实际启用的能力（verify 阶段复用）
+ */
+function assembleCapabilities(record, deps, plugin) {
+  const { capRegistry } = deps;
+  const info = record.info;
+  const declared = Array.isArray(plugin.capabilities) ? plugin.capabilities : [];
+  const userEnabled = info.options && typeof info.options.capabilities === 'object' ? info.options.capabilities : {};
+  const assembled = [];
+  for (const capId of declared) {
+    const cap = capRegistry && capRegistry.get(capId);
+    if (!cap) continue; // 声明了但能力未加载：按「无此能力」处理（前端不展示，用户不会传参）
+    if (!cap.appliesTo.includes(plugin.id)) continue;
+    const rawParams = userEnabled[capId];
+    if (rawParams === undefined) continue; // 用户未启用该能力
+    const verdict = cap.validateParams(rawParams, { formatId: plugin.id });
+    if (!verdict.ok) {
+      throw apiError(verdict.error.code, verdict.error.message, verdict.error.details);
+    }
+    assembled.push({ id: capId, cap, params: verdict.value });
+  }
+  return assembled;
+}
+
 /** 单个包的名字：单源用源名，多源用「首个源名 等 N 项」 */
 function packageBaseName(group) {
   return group.length === 1 ? group[0].name : `${group[0].name} 等 ${group.length} 项`;
@@ -398,6 +429,17 @@ async function compressOnePackage(record, deps, plugin, group, groupIndex, outpu
   manager.updateProgress(info.id, { totalBytes: groupBytes, totalFiles: groupFiles, processedBytes: 0, processedFiles: 0 });
 
   const layers = await resolveBlacklistLayers(deps, info);
+  // 通用能力装配循环（docs/19 图 1）：prepareCreate 的产物并进 create 选项——
+  // archiverFormat 决定 archiver 工厂形态，archiverExtra 是能力专属参数（透传给引擎）。
+  const assembledCapabilities = assembleCapabilities(record, deps, plugin);
+  const capabilityOptions = {};
+  for (const { cap, params } of assembledCapabilities) {
+    const translated = cap.prepareCreate({ params, formatId: info.format });
+    capabilityOptions.archiverFormat = translated.archiverFormat;
+    capabilityOptions.archiverExtra = { ...(capabilityOptions.archiverExtra || {}), ...translated.extra };
+  }
+  // 能力参数存 internal（含明文，仅进程内存；PW-1：store.js 落盘时剔除，verify 阶段复用）
+  record.internal.capabilityParams = assembledCapabilities.map((item) => ({ id: item.id, params: item.params }));
   const created = await plugin.create({
     taskId: info.id,
     format: info.format,
@@ -411,6 +453,7 @@ async function compressOnePackage(record, deps, plugin, group, groupIndex, outpu
       signal: manager.getAbortSignal(info.id),
       // 格式包在"收集条目"阶段就跳过命中项（省 CPU/磁盘，且它们不会进 entryPaths → 不会被删）
       shouldSkip: shouldSkipMatcher(layers),
+      ...capabilityOptions,
     },
     onProgress: (payload) => manager.updateProgress(info.id, payload),
   });
@@ -470,12 +513,64 @@ async function stageVerifyPackages(record, deps, plugin) {
   const rootAbs = rootAbsOf(record, deps);
   manager.setPhase(record.info.id, 'verifying');
 
+  // 加密包不走通用 CRC 校验：那一步没有密码，读条目会直接报 MISSING_PASSWORD，
+  // 结果必然是「校验未通过」（假阴性）。改由能力自测覆盖 —— cap.verify() 的定义
+  // 就是「用同一密码试解一次」，强度等价（真要校验 CRC 也必须先解密）。
+  // 注意：这里只要求「有启用的能力」，能力自测失败会在 stageCapabilityVerify 抛 VERIFY_FAILED。
+  const capabilityCovered = Array.isArray(record.internal.capabilityParams)
+    && record.internal.capabilityParams.length > 0;
+
   for (const pkg of record.info.result.packages) {
+    if (capabilityCovered) {
+      pkg.verified = true;
+      pkg.verifyStrategy = 'capability';
+      pkg.checkedEntries = 0;
+      continue;
+    }
     const verification = await verifyArchive(plugin, archiveAbsOf(rootAbs, pkg.outputPath));
     assertVerified(verification);
     pkg.verified = true;
     pkg.verifyStrategy = verification.strategy;
     pkg.checkedEntries = verification.checked;
+  }
+}
+
+/**
+ * 能力自测阶段（PW-2）：装配循环里启用的能力逐个 verify——
+ * 任一失败抛 VERIFY_FAILED（任务 failed，INV-01 拦住删除，原文件一个不删）。
+ * 通用形态：编排层不知道能力具体自测什么（加密包是"同密码试解"，未来能力自测各自定义）。
+ */
+async function stageCapabilityVerify(record, deps) {
+  const capabilityParams = record.internal.capabilityParams || [];
+  if (capabilityParams.length === 0) return;
+  const { manager } = deps;
+  const rootAbs = rootAbsOf(record, deps);
+  const info = record.info;
+
+  for (const { id, params } of capabilityParams) {
+    const cap = deps.capRegistry.get(id);
+    if (!cap || typeof cap.verify !== 'function') continue;
+    for (const pkg of info.result.packages) {
+      const verdict = await cap.verify({
+        archivePath: archiveAbsOf(rootAbs, pkg.outputPath),
+        params,
+        formatApi: null,
+      });
+      if (!verdict.ok) {
+        throw apiError(ERROR_CODES.VERIFY_FAILED, `能力 ${id} 自测未通过：${verdict.error || '未知原因'}`, {
+          capability: id,
+          package: pkg.outputPath,
+        });
+      }
+    }
+  }
+  // 脱敏后写入 options（PW-1：明文只在内存 internal；对外只有布尔+方法名）
+  for (const { id, params } of capabilityParams) {
+    const cap = deps.capRegistry.get(id);
+    if (!cap) continue;
+    const redacted = cap.redact(params);
+    info.options.capabilities = info.options.capabilities || {};
+    info.options.capabilities[id] = { ...redacted };
   }
 }
 
@@ -503,6 +598,7 @@ async function runCompressTask(record, deps) {
   const outputDirAbs = await stageCompressPrecheck(record, deps);
   const { bytesIn, bytesOut, createdPackages } = await stageCompressPackages(record, deps, plugin, outputDirAbs);
   await stageVerifyPackages(record, deps, plugin);
+  await stageCapabilityVerify(record, deps); // PW-2：能力自测（加密包同密码试解），失败 → failed 且不删原文件
   summarizeCompressResult(record, bytesIn, bytesOut);
 
   // 删除原文件：仅当 keepOriginal=false（管理器已据此建好 delete 状态）。

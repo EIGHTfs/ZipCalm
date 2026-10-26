@@ -20,6 +20,7 @@ import { createDeleteService } from './core/compress/deleter.js';
 import { createBlacklistService } from './core/compress/blacklist.js';
 import { createMetricsCollector } from './core/metrics/collector.js';
 import { createOrchestrator } from './core/compress/orchestrator.js';
+import { createCapabilityRegistry } from './core/compress/capRegistry.js';
 import { createRegistry } from './core/compress/registry.js';
 import { createTaskEvents } from './core/task/events.js';
 import { createTaskManager } from './core/task/manager.js';
@@ -139,6 +140,13 @@ async function createCompressLayer({ config, logger, projectRoot, manager, black
   const registry = createRegistry({ logger });
   await registry.discover();
 
+  // 能力注册表（docs/19）：扫描能力包 + 与格式包 capabilities 声明对账（PW-4 数据面）
+  const capRegistry = createCapabilityRegistry({ logger, formatIds: registry.ids() });
+  await capRegistry.rescan();
+  for (const failure of capRegistry.loadFailures()) {
+    logger.warn('能力插件加载失败（该能力禁用，不影响其他包）', { failure });
+  }
+
   const deleteService = createDeleteService({
     config,
     logger,
@@ -151,6 +159,7 @@ async function createCompressLayer({ config, logger, projectRoot, manager, black
     config,
     logger,
     registry,
+    capRegistry,
     manager,
     deleteService,
     // M6：打包阶段用它解析黑名单层（与预检同一套判定）
@@ -158,7 +167,7 @@ async function createCompressLayer({ config, logger, projectRoot, manager, black
     rootAbs: config.storage.root,
   });
 
-  return { registry, deleteService, orchestrator };
+  return { registry, capRegistry, deleteService, orchestrator };
 }
 
 /**
@@ -225,8 +234,14 @@ async function attachCompressAndTaskLayers(app, { config, logger, projectRoot })
     blacklist,
   });
 
+  // PW-1：把 capRegistry 的通用脱敏器注入 manager（落盘前剔除 capabilities 里的明文）。
+  // compressLayer 在 taskLayer 之后创建，这里补挂（manager 的 ctx 是闭包，走公开方法不可行——
+  // 直接改 deps 引用不行，所以 createTaskLayer 接受可选注入参数）。
+  taskLayer.manager.__setCapabilitySanitizer(compressLayer.capRegistry.sanitizeOptionsForPersist);
+
   app.decorate('m2', {
     registry: compressLayer.registry,
+    capRegistry: compressLayer.capRegistry,
     manager: taskLayer.manager,
     orchestrator: compressLayer.orchestrator,
     deleteService: compressLayer.deleteService,

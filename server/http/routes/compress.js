@@ -20,9 +20,26 @@ const COMPRESS_MODES = ['single', 'bundle'];
 
 // ===== 端点 handler =====
 
-/** GET /formats —— 格式列表 + 可用性（UI 置灰依据） */
+/** GET /formats —— 格式列表 + 可用性 + 能力声明（UI 置灰依据） */
 async function handleListFormats(app, request, reply) {
-  reply.ok({ formats: await app.m2.registry.list() });
+  const formats = await app.m2.registry.list();
+  // 能力声明：前端据此决定「密码开关能否点」。取值口径是
+  // 「格式声明的 capabilities ∩ 能力插件的 appliesTo ∩ 能力已成功加载」，
+  // 由 capRegistry 统一算，避免前端自己拼条件。
+  // 注意 PW-4：这里只影响 UI，后端仍在建任务时独立校验（不信前端）。
+  const capRegistry = app.m2.capRegistry;
+  if (capRegistry) {
+    for (const format of formats) {
+      // 不能直接把能力模块塞进响应：它内部的 methods 是 Map（JSON 会变成 {}），
+      // 还带着 verify/prepareCreate 等函数。统一走 describe() 取可序列化视图，
+      // 再补上 params（前端要靠它渲染密码输入框的 schema）。
+      format.capabilities = capRegistry.capabilitiesForFormat(format.id).map((cap) => ({
+        ...(typeof cap.describe === 'function' ? cap.describe() : { id: cap.id, name: cap.name }),
+        params: cap.params,
+      }));
+    }
+  }
+  reply.ok({ formats });
 }
 
 /** POST /compress/preflight —— 压缩预检（不建任务） */
@@ -76,6 +93,12 @@ async function handleCompressTaskCreate(app, request, reply) {
           ? parsed.options.blacklist.extraPatterns
           : [],
       },
+      // 能力参数（docs/19 §六）：原样交给编排层，由 capRegistry 校验并装配成 create 选项。
+      // 明文只活到压缩完成；落盘前 store.js 按各能力插件的 redact() 剔除（PW-1）。
+      // 注意：这里必须透传，否则装配循环拿不到参数 → 加密静默不生效。
+      ...(parsed.options.capabilities && typeof parsed.options.capabilities === 'object'
+        ? { capabilities: parsed.options.capabilities }
+        : {}),
     },
     // 绝对路径只走 internal（不会出现在 API 响应里）
     // rootAbs 必须随任务落盘：执行/删除阶段的 INV-06 复核要用**任务自己的根**，不能用服务默认根

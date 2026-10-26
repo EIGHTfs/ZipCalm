@@ -4,6 +4,7 @@
 
 import authRoutes from './routes/auth.js';
 import blacklistRoutes from './routes/blacklist.js';
+import capabilityRoutes from './routes/capabilities.js';
 import compressRoutes from './routes/compress.js';
 import fsRoutes from './routes/fs.js';
 import hardlinkRoutes from './routes/hardlink.js';
@@ -20,6 +21,7 @@ export default async function router(app, options) {
   await app.register(fsRoutes, {});
   await app.register(compressRoutes, {});
   await app.register(blacklistRoutes, {});
+  await app.register(capabilityRoutes, {});
   await app.register(hardlinkRoutes, {});
   await app.register(metricsRoutes, {});
   await app.register(taskRoutes, {});

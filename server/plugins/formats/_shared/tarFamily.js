@@ -194,6 +194,8 @@ export function createTarPlugin(spec) {
     mime: spec.mime,
     levelRange: spec.levelRange,
     defaultLevel: spec.defaultLevel,
+    // 能力声明（docs/19 §4.1）：TAR/gzip/zstd 规范无加密 → 空数组（前端据此置灰密码开关）
+    capabilities: spec.capabilities || [],
     available: () => pluginAvailable(spec),
     unavailableReason: () => pluginUnavailableReason(spec),
     estimate: (inputBytes, options) => pluginEstimate(spec, inputBytes, options),
