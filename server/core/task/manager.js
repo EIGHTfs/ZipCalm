@@ -312,6 +312,10 @@ function normalizeOptions(raw) {
     ...(options.capabilities && typeof options.capabilities === 'object'
       ? { capabilities: options.capabilities }
       : {}),
+    // P4：解压加密包的密码（明文仅内存；落盘脱敏走 PW-1 通道）
+    ...(typeof options.password === 'string' && options.password.length > 0
+      ? { password: options.password }
+      : {}),
     // 只有调用方显式给了 blacklist 才写入（解压任务不该凭空多出这个字段）
     ...(options.blacklist ? { blacklist: normalizeBlacklist(options.blacklist) } : {}),
   };

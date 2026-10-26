@@ -214,7 +214,7 @@ function resolve7zBinary() {
  * 用 7z 试解一次加密包（PW-2 的实现）。
  * 7z t 会校验 CRC 并要求正确密码 —— 等价于「用这个密码完整读一遍」。
  */
-async function verifyWith7z(archivePath, password) {
+export async function verifyWith7z(archivePath, password) {
   const binary = resolve7zBinary();
   if (!binary) {
     return { ok: false, error: '未找到 7z，无法自测加密包（可设置 ZC_7Z_BIN 指定路径）' };
@@ -240,4 +240,59 @@ async function unzipperOpen(archivePath) {
 
 function isDirectoryEntry(entry) {
   return /\/$/.test(String(entry.path)) || entry.type === 'Directory';
+}
+
+/**
+ * 7z 实际解包（P4：AES-256 与 ZipCrypto 的统一解压通道——unzipper 只认 ZipCrypto，
+ * AES 走它必假阴性，所以加密包解压统一走 7z，一个实现两种算法）。
+ *
+ * 解到 **指定输出目录**（调用方传入临时目录），zip-slip 由两层防护：
+ * ① 7z 自身的路径规范化（p7zip 对 `../` 条目会拒绝或剥离）；
+ * ② 调用方在解包后仍走 planTargets 白名单链把文件**搬**进最终目标（不在解包目录直接交付）。
+ *
+ * @returns {{ok: true} | {ok: false, code: 'BAD_PASSWORD'|'ARCHIVE_CORRUPTED'|'SEVENZIP_MISSING'|'INTERNAL_ERROR', message: string}}
+ */
+export async function extractWith7z(archivePath, password, outputDir) {
+  const binary = resolve7zBinary();
+  if (!binary) {
+    return {
+      ok: false,
+      code: 'SEVENZIP_MISSING',
+      message: '当前环境缺少 7z，无法解压加密压缩包，请安装 7-Zip 或设置 ZC_7Z_BIN 环境变量',
+    };
+  }
+  try {
+    await execFileAsync(binary, ['x', `-p${password}`, '-y', `-o${outputDir}`, archivePath], {
+      timeout: 600000,
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    return { ok: true };
+  } catch (error) {
+    const output = `${error && error.stdout ? error.stdout : ''}${error && error.stderr ? error.stderr : ''}`;
+    if (/wrong password/i.test(output)) {
+      return { ok: false, code: 'BAD_PASSWORD', message: '密码错误' };
+    }
+    if (/Cannot open|Errors|ERROR/i.test(output) && /corrupt|损坏|unexpected end/i.test(output)) {
+      return { ok: false, code: 'ARCHIVE_CORRUPTED', message: '压缩包损坏' };
+    }
+    return { ok: false, code: 'INTERNAL_ERROR', message: (error && error.message) || '解压失败' };
+  }
+}
+
+/** 7z 可用性探测（解压路由判「缺 7z」用，不执行解包） */
+export function sevenZipAvailable() {
+  return resolve7zBinary() !== null;
+}
+
+/** 加密条目检测（供 extract 路由/格式包判别）：任一非目录条目加密 → true */
+export async function archiveHasEncryption(archivePath) {
+  const directory = await unzipperOpen(archivePath);
+  for (const entry of directory.files) {
+    if (isDirectoryEntry(entry)) continue;
+    const flags = Number(entry.flags) || 0;
+    if ((flags & FLAG_ENCRYPTED) !== 0) {
+      return { encrypted: true, isAes: Number(entry.compressionMethod) === COMPRESSION_METHOD_AES };
+    }
+  }
+  return { encrypted: false, isAes: false };
 }

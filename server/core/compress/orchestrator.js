@@ -672,7 +672,13 @@ async function stageExtractWrite(record, deps, plugin) {
     format: info.format,
     archivePath: record.internal.archiveAbsPath,
     targetDir: record.internal.targetAbsDir,
-    options: { overwrite: false, signal: manager.getAbortSignal(info.id) },
+    options: {
+      overwrite: false,
+      signal: manager.getAbortSignal(info.id),
+      // P4：加密包解压密码——来自任务创建时的 options.password（明文仅内存存活，
+      // 落盘脱敏走 manager 的 PW-1 通道；这里透传给格式插件的加密分支）
+      ...(info.options && info.options.password ? { password: info.options.password } : {}),
+    },
     onProgress: (payload) => manager.updateProgress(info.id, payload),
   });
 }
@@ -681,6 +687,17 @@ async function stageExtractWrite(record, deps, plugin) {
 async function stageVerifyArchive(record, deps, plugin) {
   const { manager } = deps;
   manager.setPhase(record.info.id, 'verifying');
+  // P4：加密包的无密码 CRC 校验（unzipper）必然失败——解压侧校验语义改走
+  // 「7z t 同密码完整试解」（7z x 成功本身已含全量 CRC，t 一次是独立证据）；
+  // 未加密包保持原路径（行为与改动前一致，回归由既有测试锁）。
+  if (typeof record.info.options?.password === 'string' && record.info.options.password.length > 0) {
+    const { verifyWith7z } = await import('../../plugins/capabilities/password/index.js');
+    const verdict = await verifyWith7z(record.internal.archiveAbsPath, record.info.options.password);
+    if (!verdict.ok) {
+      throw apiError(ERROR_CODES.VERIFY_FAILED, `加密压缩包校验未通过：${verdict.error || '未知原因'}`);
+    }
+    return { ok: true, strategy: '7z-crc', checked: null, failures: [] };
+  }
   const verification = await verifyArchive(plugin, record.internal.archiveAbsPath);
   assertVerified(verification);
   return verification;

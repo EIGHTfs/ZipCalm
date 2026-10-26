@@ -42,6 +42,10 @@ export const ERROR_CODES = Object.freeze({
   INTERNAL_ERROR: 'INTERNAL_ERROR',
   INTERRUPTED: 'INTERRUPTED',
   ABORTED: 'ABORTED',
+  // 加密压缩包解压（docs/19 §七 P4）：三态必须区分，密码错 ≠ 文件损坏
+  MISSING_PASSWORD: 'MISSING_PASSWORD',
+  BAD_PASSWORD: 'BAD_PASSWORD',
+  SEVENZIP_MISSING: 'SEVENZIP_MISSING',
 });
 
 // 数组形态：便于做「码是否在全集内」的校验与遍历
@@ -81,6 +85,9 @@ export const ERROR_CODE_META = Object.freeze({
   [ERROR_CODES.INTERNAL_ERROR]: { http: 500, label: '服务内部错误', retryable: false },
   [ERROR_CODES.INTERRUPTED]: { http: null, label: '服务重启导致任务中断', retryable: true, taskOnly: true },
   [ERROR_CODES.ABORTED]: { http: null, label: '任务已取消', retryable: false, taskOnly: true },
+  [ERROR_CODES.MISSING_PASSWORD]: { http: 422, label: '该压缩包已加密，请输入密码', retryable: true },
+  [ERROR_CODES.BAD_PASSWORD]: { http: 422, label: '密码错误', retryable: true },
+  [ERROR_CODES.SEVENZIP_MISSING]: { http: 503, label: '当前环境缺少 7z，无法解压 AES-256 加密包', retryable: false },
 });
 
 // 任务内专用码：UI 只在任务对象上遇见它们，不要拿去和 HTTP 状态做映射

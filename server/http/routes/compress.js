@@ -147,6 +147,10 @@ async function handleExtractTaskCreate(app, request, reply) {
     options: {
       deleteArchiveAfterExtract: parsed.options.deleteArchiveAfterExtract === true,
       deleteConfirmed: parsed.options.deleteConfirmed === true,
+      // P4：加密包解压密码（normalizeOptions 会透传；PW-1 落盘脱敏走 manager 通道）
+      ...(typeof parsed.options.password === 'string' && parsed.options.password.length > 0
+        ? { password: parsed.options.password }
+        : {}),
     },
   });
 
@@ -261,7 +265,7 @@ async function compressPreflightFor(app, parsed) {
 }
 
 async function extractPreflightFor(app, parsed) {
-  return extractPreflight(
+  const preflight = await extractPreflight(
     { config: app.m2.config, plugin: parsed.plugin },
     {
       archivePath: parsed.archive.userPath,
@@ -270,6 +274,17 @@ async function extractPreflightFor(app, parsed) {
       targetAbsDir: parsed.target.absPath,
     },
   );
+  // P4：加密包预检——zip 格式报 MISSING_PASSWORD（前端据此弹密码输入）。
+  // 只对 zip 判（能力 appliesTo=['zip']；tar 系列无加密）。
+  if (parsed.plugin.id === 'zip') {
+    const { archiveHasEncryption } = await import('../../plugins/capabilities/password/index.js');
+    const probe = await archiveHasEncryption(parsed.archive.realPath);
+    if (probe.encrypted && !(parsed.options && parsed.options.password)) {
+      preflight.encrypted = true;
+      preflight.isAes = probe.isAes;
+    }
+  }
+  return preflight;
 }
 
 /** 归档 → 格式包（按扩展名匹配；匹配不到报 UNSUPPORTED_FORMAT）

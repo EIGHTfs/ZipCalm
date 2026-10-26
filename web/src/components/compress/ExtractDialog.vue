@@ -23,18 +23,29 @@ const deleteArchive = ref(false);
 const submitting = ref(false);
 const errorText = ref('');
 const preflightInfo = ref(null);
+// P4：加密包解压——preflight 报 MISSING_PASSWORD 时显示密码输入；错密码按 BAD_PASSWORD 提示
+const needsPassword = ref(false);
+const password = ref('');
 
 watch(
   () => props.open,
   async (open) => {
     preflightInfo.value = null;
     errorText.value = '';
+    needsPassword.value = false;
+    password.value = '';
     if (!open) return;
     try {
       const preflight = await api.post('/extract/preflight', { path: props.archivePath, rootId: props.rootId });
       preflightInfo.value = preflight;
       if (preflight && preflight.targetDir) targetDir.value = preflight.targetDir;
+      // P4：服务端在 preflight 里标注加密（encrypted=true）→ 直接显示密码输入
+      if (preflight && preflight.encrypted) needsPassword.value = true;
     } catch (error) {
+      if (error.code === 'MISSING_PASSWORD') {
+        needsPassword.value = true;
+        return;
+      }
       errorText.value = `[${error.code || 'ERROR'}] ${error.message}`;
     }
   },
@@ -49,11 +60,22 @@ async function submit() {
       rootId: props.rootId,
       path: props.archivePath,
       targetDir: targetDir.value || undefined,
-      options: { deleteArchiveAfterExtract: deleteArchive.value },
+      options: {
+        deleteArchiveAfterExtract: deleteArchive.value,
+        // P4：加密包密码（仅 needsPassword 时带上；服务端 PW-1 脱敏，明文不落盘）
+        ...(needsPassword.value && password.value ? { password: password.value } : {}),
+      },
     });
     emit('submitted', created.task.id);
   } catch (error) {
-    errorText.value = `[${error.code || 'ERROR'}] ${error.message}`;
+    if (error.code === 'MISSING_PASSWORD') {
+      needsPassword.value = true;
+      errorText.value = '该压缩包已加密，请输入密码';
+    } else if (error.code === 'BAD_PASSWORD') {
+      errorText.value = '密码错误';
+    } else {
+      errorText.value = `[${error.code || 'ERROR'}] ${error.message}`;
+    }
   } finally {
     submitting.value = false;
   }
@@ -78,6 +100,18 @@ async function submit() {
 
         <label class="field__label" for="extract-target">目标目录</label>
         <input id="extract-target" v-model="targetDir" type="text" data-testid="extract-target" placeholder="/目录名" />
+
+        <label v-if="needsPassword" class="field__label" for="extract-password">
+          解压密码（该压缩包已加密）
+        </label>
+        <input
+          v-if="needsPassword"
+          id="extract-password"
+          v-model="password"
+          type="password"
+          data-testid="extract-password"
+          autocomplete="off"
+        />
 
         <label class="field__option">
           <input v-model="deleteArchive" type="checkbox" data-testid="delete-archive" />

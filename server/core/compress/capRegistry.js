@@ -125,8 +125,15 @@ export function createCapabilityRegistry(options = {}) {
    * 能力未加载但参数还在（重启后重试场景）→ 保留方法名等非敏感字段，剔除 password。
    */
   function sanitizeOptionsForPersist(options) {
-    const caps = options && options.capabilities;
-    if (!caps || typeof caps !== 'object') return options;
+    if (!options) return options;
+    // P4：解压侧的顶层 options.password 同样是明文（PW-1）——落盘时替换为 hasPassword 布尔
+    const hasTopPassword = typeof options.password === 'string' && options.password.length > 0;
+    const caps = options.capabilities;
+    if (!caps || typeof caps !== 'object') {
+      if (!hasTopPassword) return options;
+      const { password: _removed, ...rest } = options;
+      return { ...rest, hasPassword: true };
+    }
     const sanitized = { ...options, capabilities: {} };
     for (const [capId, params] of Object.entries(caps)) {
       const cap = byId.get(capId);
@@ -140,6 +147,10 @@ export function createCapabilityRegistry(options = {}) {
         if (!isSecret) filtered[key] = value;
       }
       sanitized.capabilities[capId] = filtered;
+    }
+    if (hasTopPassword) {
+      delete sanitized.password;
+      sanitized.hasPassword = true;
     }
     return sanitized;
   }

@@ -30,6 +30,11 @@ import { createThrottledReporter } from '../../../lib/throttle.js';
 import { assertCreatable as assertSharedCreatable } from '../_shared/createGuards.js';
 // 条目安全判定与写出**各格式共用一套**（zip-slip 防护不各写一份，见 _shared/entrySafety.js）
 import { planTargets, writePlan } from '../_shared/entrySafety.js';
+import { extractWith7z } from '../../capabilities/password/index.js';
+
+/** zip 加密标志位（general purpose bit 0）与 WinZip AES 伪压缩方法号 */
+const ENCRYPTED_FLAG = 0x1;
+const AES_COMPRESSION_METHOD = 99;
 
 const FORMAT_ID = 'zip';
 
@@ -443,6 +448,83 @@ async function test(archivePath, options = {}) {
 
 // ===== extract（解压）=====
 
+/** 判定归档加密形态（unzipper central directory：flags bit0 = 加密；compressionMethod=99 = AES） */
+function detectEncryption(directory) {
+  for (const entry of directory.files) {
+    if (isDirectoryEntry(entry)) continue;
+    const flags = Number(entry.flags) || 0;
+    if ((flags & ENCRYPTED_FLAG) === 0) continue;
+    const isAes = Number(entry.compressionMethod) === AES_COMPRESSION_METHOD;
+    return { encrypted: true, isAes };
+  }
+  return { encrypted: false, isAes: false };
+}
+
+/**
+ * 加密包解压（P4）：7z 解到临时中转目录 → 复用 planTargets/writePlan 白名单链搬进目标目录。
+ *
+ * 为什么不直接 7z -o 目标目录：zip-slip 防护（INV-06）必须对最终交付的文件生效——
+ * 归档里的 `../` 条目在 7z 解包层可能被它自己的规范化剥离，但我们的防线不能依赖外部工具的
+ * 行为承诺。先解到中转目录、再经 planTargets 校验后搬移，加密包就没有绕过白名单的后门。
+ *
+ * @returns 同 extract 主路径的返回形状
+ */
+async function extractEncrypted(ctx, targetDir, overwrite, isAes) {
+  const password = ctx.options && ctx.options.password;
+  if (!password) {
+    throw apiError(ERROR_CODES.MISSING_PASSWORD, '该压缩包已加密，请输入密码');
+  }
+  // AES-256 与 ZipCrypto 统一走 7z（unzipper 只有 ZipCrypto 实现；AES 走它必假阴性）。
+  // 7z 缺失时 extractWith7z 返回明确错误，不静默降级为「文件损坏」。
+  const stagingDir = path.join(path.dirname(targetDir), `.${path.basename(targetDir)}.hl-7z-${Date.now()}`);
+  await fsp.mkdir(stagingDir, { recursive: true });
+  try {
+    const verdict = await extractWith7z(ctx.archivePath, password, stagingDir);
+    if (!verdict.ok) {
+      throw apiError(
+        ERROR_CODES[verdict.code] ? ERROR_CODES[verdict.code] : ERROR_CODES.INTERNAL_ERROR,
+        verdict.message,
+      );
+    }
+    // 中转目录内容 → planTargets（zip-slip/覆盖检查）→ writePlan 搬移
+    const stagedEntries = [];
+    const walk = async (dirAbs, relativePrefix) => {
+      for (const dirent of await fsp.readdir(dirAbs, { withFileTypes: true })) {
+        const childAbs = path.join(dirAbs, dirent.name);
+        const relative = relativePrefix ? `${relativePrefix}/${dirent.name}` : dirent.name;
+        if (dirent.isDirectory()) {
+          await walk(childAbs, relative);
+          continue;
+        }
+        if (!dirent.isFile()) continue; // 7z 产出的 symlink 等跳过（与主路径同口径）
+        const stat = await fsp.stat(childAbs).catch(() => null);
+        stagedEntries.push({
+          name: relative,
+          isDir: false,
+          size: stat ? stat.size : 0,
+          link: false,
+          open: () => fs.createReadStream(childAbs),
+        });
+      }
+    };
+    await walk(stagingDir, '');
+    const planned = await planTargets(stagedEntries, targetDir, overwrite);
+    const written = await writePlan(planned, targetDir, {
+      signal: ctx.options && ctx.options.signal,
+      onProgress: ctx.onProgress,
+    });
+    return {
+      targetDir,
+      entries: written.entries,
+      bytesOut: written.bytesOut,
+      durationMs: Date.now() - ctx.startedAt,
+    };
+  } finally {
+    // 中转目录无论成败都清掉（含密码的明文副本不留盘）
+    await fsp.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 async function extract(ctx) {
   if (!(await available())) {
     throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, 'zip 格式当前不可用');
@@ -452,6 +534,13 @@ async function extract(ctx) {
   const targetDir = path.resolve(ctx.targetDir);
   const overwrite = Boolean(ctx.options && ctx.options.overwrite);
   const directory = await openArchive(ctx.archivePath);
+
+  // ⓪ 加密检测（P4）：加密包走 7z 通道（错误三态：MISSING_PASSWORD/BAD_PASSWORD/损坏）
+  const encryption = detectEncryption(directory);
+  if (encryption.encrypted) {
+    ctx.startedAt = startedAt;
+    return extractEncrypted(ctx, targetDir, overwrite, encryption.isAes);
+  }
 
   // ① 判定（写盘之前）：zip-slip + 覆盖检查，全部通过才开始写 —— 与 tar 系列共用同一套代码
   const planned = await planTargets(toSharedEntries(directory), targetDir, overwrite);
