@@ -227,7 +227,13 @@ async function caseZstdFallbackChain() {
   // ② 禁用内置 + 指向垫片 → 走"系统命令"回退，且仍能往返
   // 垫片必须放在**可执行挂载**上：工作区是 noexec（依赖装在 zipcalm-build 就是这个原因），
   // 放 storage/ 下即使有 +x 也会被 EACCES 拒绝，回退链验证会变成假阴性。
-  const buildDir = path.dirname(await fsp.realpath(path.join(PROJECT_ROOT, 'node_modules')));
+  // 从「已解析的运行时依赖」反推 node_modules 真实位置，取其父目录作为可执行落点。
+  // 不假设 node_modules 落在项目根 —— 依赖可能装在别的可执行卷、经父级目录解析到。
+  const _nmMarker = `${path.sep}node_modules${path.sep}`;
+  const _resolvedDep = (await import('node:module')).createRequire(import.meta.url).resolve('fastify');
+  const _nmIdx = _resolvedDep.lastIndexOf(_nmMarker);
+  if (_nmIdx === -1) throw new Error(`无法从 ${_resolvedDep} 反推 node_modules 位置`);
+  const buildDir = _resolvedDep.slice(0, _nmIdx);
   const shimPath = path.join(buildDir, 'm4-tmp', 'zstd-shim');
   await fsp.mkdir(path.dirname(shimPath), { recursive: true });
   await fsp.writeFile(shimPath, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(PROJECT_ROOT, 'scripts/helpers/zstd-shim.mjs'))} "$@"\n`, 'utf8');
@@ -364,7 +370,13 @@ async function cleanupArtefacts() {
     return;
   }
   await fsp.rm(WORK, { recursive: true, force: true }).catch(() => {});
-  const buildDir = path.dirname(await fsp.realpath(path.join(PROJECT_ROOT, 'node_modules')));
+  // 从「已解析的运行时依赖」反推 node_modules 真实位置，取其父目录作为可执行落点。
+  // 不假设 node_modules 落在项目根 —— 依赖可能装在别的可执行卷、经父级目录解析到。
+  const _nmMarker = `${path.sep}node_modules${path.sep}`;
+  const _resolvedDep = (await import('node:module')).createRequire(import.meta.url).resolve('fastify');
+  const _nmIdx = _resolvedDep.lastIndexOf(_nmMarker);
+  if (_nmIdx === -1) throw new Error(`无法从 ${_resolvedDep} 反推 node_modules 位置`);
+  const buildDir = _resolvedDep.slice(0, _nmIdx);
   await fsp.rm(path.join(buildDir, 'm4-tmp'), { recursive: true, force: true }).catch(() => {});
 }
 

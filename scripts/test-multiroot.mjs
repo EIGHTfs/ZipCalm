@@ -77,9 +77,17 @@ async function main() {
   // 夹具：默认根里放一个**只存在于默认根**的标记文件
   await fsp.writeFile(path.join(ROOT_ABS, MARKER_NAME), 'only-in-default-root');
   // 越界符号链接（指向 /etc）：INV-06 的 realpath 复核应该拒绝
+  // 注意：CIFS/SMB 等文件系统不支持创建软链（ENOTSUP），此时无法构造攻击样本 ——
+  // 记为 SKIP 而不是 FAIL，避免把「环境能力缺失」误报成「防护失效」。
   const escapeLink = path.join(ROOT_ABS, 'escape-link');
   await fsp.rm(escapeLink, { force: true });
-  await fsp.symlink('/etc', escapeLink, 'dir');
+  let escapeLinkReady = false;
+  try {
+    await fsp.symlink('/etc', escapeLink, 'dir');
+    escapeLinkReady = true;
+  } catch (error) {
+    console.log(`SKIP | 越界符号链接用例：当前文件系统不支持创建软链（${error && error.code}），无法构造攻击样本`);
+  }
 
   const started = await restartService({ ZIPCALM_FORCE_PLATFORM: 'posix', ZIPCALM_SHOW_APP_ROOT: '1' });
   check('服务以 posix + SHOW_APP_ROOT 重启成功', started);
@@ -117,8 +125,10 @@ async function main() {
       const bare = await api('GET', `/fs/list?path=${encodeURIComponent('/../etc/passwd')}&rootId=${encodeURIComponent(rootId)}`);
       check(`[${rootId}] 编码后的绝对越界仍被拒`, ['PATH_OUT_OF_ROOT', 'INVALID_PATH', 'VALIDATION_FAILED'].includes(errorCode(bare)), `code=${errorCode(bare)}`);
     }
-    const symlinkEscape = await api('GET', `/fs/stat?path=%2Fescape-link&rootId=default`);
-    check('越界符号链接（→/etc）仍被 INV-06 拦下（PATH_OUT_OF_ROOT）', errorCode(symlinkEscape) === 'PATH_OUT_OF_ROOT', `code=${errorCode(symlinkEscape)}`);
+    if (escapeLinkReady) {
+      const symlinkEscape = await api('GET', `/fs/stat?path=%2Fescape-link&rootId=default`);
+      check('越界符号链接（→/etc）仍被 INV-06 拦下（PATH_OUT_OF_ROOT）', errorCode(symlinkEscape) === 'PATH_OUT_OF_ROOT', `code=${errorCode(symlinkEscape)}`);
+    }
 
     // ===== 跨根不可达 =====
     const crossRoot = await api('GET', `/fs/stat?path=${encodeURIComponent(`/../${volumeId}/`)}&rootId=default`);

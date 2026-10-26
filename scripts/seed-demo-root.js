@@ -53,15 +53,28 @@ async function mkdirIfAbsent(relPath) {
   }
 }
 
-/** 建符号链接：inner 指向根内（应可进入），escape 指向根外（必须被白名单拦下） */
+/** 建符号链接：inner 指向根内（应可进入），escape 指向根外（必须被白名单拦下）
+ *
+ * 文件系统可能不支持创建软链（CIFS/SMB 报 ENOTSUP、部分挂载报 EPERM）。
+ * 这类环境缺的是「构造攻击样本的能力」，不是「防护失效」—— 因此记入 skipped 并标注原因，
+ * 由依赖该样本的用例自行降级为 SKIP，而不是让 seed 崩掉或让断言误报成 404。
+ */
 async function symlinkIfAbsent(relPath, target) {
   const linkPath = path.join(ROOT, relPath);
   try {
     await fs.lstat(linkPath);
     skipped.push(`${relPath} -> ${target}`);
+    return true;
   } catch {
+    /* 不存在，继续创建 */
+  }
+  try {
     await fs.symlink(target, linkPath);
     created.push(`${relPath} -> ${target}`);
+    return true;
+  } catch (error) {
+    skipped.push(`${relPath} -> ${target}（文件系统不支持软链：${error && error.code}）`);
+    return false;
   }
 }
 
