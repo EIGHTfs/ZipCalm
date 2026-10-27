@@ -43,8 +43,8 @@ export const ERROR_CODES = Object.freeze({
   INTERRUPTED: 'INTERRUPTED',
   ABORTED: 'ABORTED',
   // 加密压缩包解压（docs/19 §七 P4）：三态必须区分，密码错 ≠ 文件损坏
-  MISSING_PASSWORD: 'MISSING_PASSWORD',
-  BAD_PASSWORD: 'BAD_PASSWORD',
+  MISSING_PASSWORD: 'MISSING_PASSWORD', // dsh-skip-sensitive
+  BAD_PASSWORD: 'BAD_PASSWORD', // dsh-skip-sensitive
   SEVENZIP_MISSING: 'SEVENZIP_MISSING',
 });
 

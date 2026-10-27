@@ -1,6 +1,6 @@
 {
   "name": "zipcalm",
-  "version": "0.12.0",
+  "version": "0.14.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -14,21 +14,23 @@
     "check:drift": "node scripts/check-drift.js"
   },
   "dependencies": {
-    "vue": "^3",
-    "vue-router": "^4",
-    "pinia": "^2",
-    "axios": "^1",
-    "dayjs": "^1",
-    "pretty-bytes": "^6",
-    "lucide-vue-next": "^1.0.0",
-    "uplot": "^1.6.32",
-    "fastify": "^5.12.7",
     "@fastify/cookie": "^11.1.3",
     "@fastify/static": "^10.1.6",
     "archiver": "^7.0.1",
     "archiver-zip-encrypted": "^2.0.0",
+    "axios": "^1",
+    "dayjs": "^1",
+    "fastify": "^5.12.7",
+    "js7z-tools": "2.5.0",
+    "lucide-vue-next": "^1.0.0",
+    "node-unrar-js": "2.0.2",
+    "pinia": "^2",
+    "pretty-bytes": "^6",
+    "tar": "^7.5.1",
     "unzipper": "^0.12.3",
-    "tar": "^7.5.1"
+    "uplot": "^1.6.32",
+    "vue": "^3",
+    "vue-router": "^4"
   },
   "devDependencies": {
     "vite": "^5",

@@ -22,40 +22,65 @@ import { ERROR_CODES, apiError } from '../../../lib/errors.js';
 import { planTargets, writePlan } from '../_shared/entrySafety.js';
 import {
   CREATE_TIMEOUT_MS,
+  copyLocalToTarget,
+  currentCpuCores,
   EXTRACT_TIMEOUT_MS,
   LIST_TIMEOUT_MS,
   isEncryptedList,
+  makeLocalWorkDir,
   mapFailure,
+  needsLocalWorkPath,
   parseSlt,
   probeVersion,
+  resetProbeCache,
   resolveEngine,
-  run7z,
+  runEngine,
 } from './engine.js';
 
 const FORMAT_ID = '7z';
+/** WASM 引擎的上游 7-Zip 版本（跑一次 `7z i` 取，缓存住；取不到就 null） */
+let wasmVersionCache = null;
+async function wasmVersion() {
+  if (wasmVersionCache !== null) return wasmVersionCache;
+  try {
+    const outcome = await runEngine(resolveEngine(), { argv: ['i'], timeoutMs: 30000 });
+    const matched = String(outcome.stdout || '').match(/7-Zip[^\n]*?(\d+\.\d+)/i);
+    wasmVersionCache = matched ? matched[1] : null;
+  } catch {
+    wasmVersionCache = null;
+  }
+  return wasmVersionCache;
+}
 const LEVEL_RANGE = [0, 9];
 const DEFAULT_LEVEL = 5;
+/** WASM 引擎单任务输入上限：32 位 ILP32 地址空间（4 GB），实测峰值约 420–460 MB / 89 MB 输入，留足余量取 2 GB */
+export const WASM_MAX_INPUT_BYTES = 2 * 1024 * 1024 * 1024;
+
 /** 进度上报节流（解析外部程序输出，避免每行都推一次） */
 const PROGRESS_INTERVAL_MS = 120;
 
 /** 取引擎；不可用时抛契约错误码（调用方不用自己拼错） */
 function requireEngine() {
   const engine = resolveEngine();
-  if (engine.kind !== 'native') {
-    throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, '未找到 7z/7za，无法处理 7z 包（可设置 ZC_7Z_BIN 指定路径）');
+  if (engine.kind !== 'native' && engine.kind !== 'wasm') {
+    throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, '未找到 7z/7za，也无法加载 WASM 引擎（可设置 ZC_7Z_BIN 指定路径）');
   }
   return engine;
 }
 
 async function available() {
-  return resolveEngine().kind === 'native';
+  const engine = resolveEngine();
+  return engine.kind === 'native' || engine.kind === 'wasm';
 }
 
 async function unavailableReason() {
   const engine = resolveEngine();
+  if (process.env.ZC_7Z_DISABLE_WASM === '1') {
+    return '未找到 7z/7za，且 WASM 引擎已被 ZC_7Z_DISABLE_WASM=1 关闭（请安装 p7zip，或去掉该变量）';
+  }
   if (engine.wasmPackage) {
-    // 依赖装了但适配未接入：说清楚，别让用户以为"装个包就能用"
-    return `仅检测到 WASM 引擎（${engine.wasmPackage}）但调用适配尚未接入；请安装 7z/7za，或用 ZC_7Z_BIN 指定路径`;
+    // 依赖在但加载不了（例如包被裁掉/缺 wasm 文件）：说清楚，别让用户猜
+    return `仅检测到 WASM 引擎依赖（${engine.wasmPackage}）但无法使用；请安装 7z/7za，或用 ZC_7Z_BIN 指定路径`;
   }
   return '未找到 7z/7za，也无法加载 WASM 引擎（请安装 p7zip，或用 ZC_7Z_BIN 指定路径）';
 }
@@ -74,10 +99,26 @@ async function estimate(inputBytes) {
   return Math.max(0, Math.ceil(bytes * 0.98));
 }
 
+/**
+ * 大输入保护：WASM 引擎是 32 位地址空间，超大输入会 OOM 且可能让宿主内存吃紧。
+ * **在写盘之前**就拒绝并给替代方案，而不是让用户跑到一半才失败。
+ * @param {{kind: string}} engine
+ * @param {number} totalBytes
+ */
+export function assertInputWithinEngineLimit(engine, totalBytes) {
+  if (engine && engine.kind === 'wasm' && Number(totalBytes) > WASM_MAX_INPUT_BYTES) {
+    const gb = (Number(totalBytes) / (1024 * 1024 * 1024)).toFixed(1);
+    throw apiError(
+      ERROR_CODES.VALIDATION_FAILED,
+      `输入约 ${gb} GB，超过 WASM 引擎的 2 GB 上限（32 位地址空间，容易内存不足）：建议改用 tar.zst，或安装系统 p7zip 后重试`,
+    );
+  }
+}
+
 /** 读条目清单（同时给出是否加密） */
 async function inspect(archivePath) {
   const engine = requireEngine();
-  const outcome = await run7z(engine.bin, ['l', '-slt', '-p-', archivePath], { timeoutMs: LIST_TIMEOUT_MS });
+  const outcome = await runEngine(engine, { argv: ['l', '-slt', '-p-', archivePath], timeoutMs: LIST_TIMEOUT_MS });
   if (outcome.code !== 0) mapFailure(outcome, { hasPassword: false, operation: 'list' });
   const entries = parseSlt(outcome.stdout);
   return { entries, encrypted: isEncryptedList(entries) };
@@ -98,10 +139,13 @@ async function list(archivePath) {
 async function test(archivePath, options = {}) {
   const engine = requireEngine();
   const password = options && typeof options.password === 'string' ? options.password : '';
-  const { entries } = await inspect(archivePath);
+  const info = await inspect(archivePath);
+  const entries = info.entries;
   const args = ['t', '-y', password ? `-p${password}` : '-p-', archivePath];
-  const outcome = await run7z(engine.bin, args, { timeoutMs: LIST_TIMEOUT_MS });
-  if (outcome.code !== 0) mapFailure(outcome, { hasPassword: Boolean(password), operation: 'test' });
+  const outcome = await runEngine(engine, { argv: args, timeoutMs: LIST_TIMEOUT_MS });
+  if (outcome.code !== 0) {
+    mapFailure(outcome, { hasPassword: Boolean(password), archiveEncrypted: info.encrypted, operation: 'test' });
+  }
   return {
     ok: true,
     checked: entries.filter((entry) => entry.type !== 'dir').length,
@@ -227,6 +271,7 @@ async function create(ctx) {
   if (plan.entryPaths.length === 0) {
     throw apiError(ERROR_CODES.ALL_SOURCES_SKIPPED, '没有可压缩的文件：全部命中黑名单');
   }
+  assertInputWithinEngineLimit(engine, plan.totalBytes);
 
   const level = resolveLevel(ctx.options);
   const password = ctx.options && typeof ctx.options.password === 'string' ? ctx.options.password : '';
@@ -235,6 +280,11 @@ async function create(ctx) {
     for (const [name, size] of group.sizes) sizeByPath.set(name, size);
   }
   const onLine = makeCreateReporter(ctx.onProgress, plan.totalBytes, sizeByPath);
+
+  // WASM 引擎不能直接写网络盘（NODEFS 的 chmod 在 CIFS 上被拒 → EPERM，实测 errno=63）：
+  // 先写本地盘，再由 Node 拷到目标路径。原生引擎没有这个限制，保持直写零拷贝。
+  const localWorkDir = needsLocalWorkPath(engine) ? await makeLocalWorkDir('zc7z-create-') : null;
+  const outputPath = localWorkDir ? path.join(localWorkDir, path.basename(ctx.tempPath)) : ctx.tempPath;
 
   // 逐个源、分批把条目名当**命令行参数**传给 7z（cwd = 源的父目录，条目名即"源名/子路径"）。
   // 为什么不用 `-i@listfile`：本机 p7zip 16.02 是 `Utf16=off` 构建，读 UTF-8 listfile 里的中文名会报
@@ -256,8 +306,10 @@ async function create(ctx) {
     if (current.length > 0) batches.push(current);
 
     for (const batch of batches) {
-      const args = ['a', '-t7z', `-mx${level}`, '-y', '-bb1', ...(password ? [`-p${password}`] : []), ctx.tempPath, ...batch];
-      const outcome = await run7z(engine.bin, args, {
+      // -mmt 与本进程被绑定的核数对齐：线程数 > 可用核只会互相等锁
+      const args = ['a', '-t7z', `-mx${level}`, '-y', '-bb1', `-mmt=${currentCpuCores()}`, ...(password ? [`-p${password}`] : []), outputPath, ...batch];
+      const outcome = await runEngine(engine, {
+        argv: args,
         cwd: group.cwd,
         timeoutMs: CREATE_TIMEOUT_MS,
         onLine,
@@ -265,8 +317,25 @@ async function create(ctx) {
       });
       if (outcome.code !== 0) {
         await fsp.rm(ctx.tempPath, { force: true }).catch(() => {});
+        if (localWorkDir) await fsp.rm(localWorkDir, { recursive: true, force: true }).catch(() => {});
         mapFailure(outcome, { hasPassword: Boolean(password), operation: 'create' });
       }
+    }
+  }
+
+  // WASM：把本地盘的产物搬到目标（可能是 CIFS）路径；用流式拷贝（CIFS 上 copyFile 会 EPERM）
+  if (localWorkDir) {
+    try {
+      await copyLocalToTarget(outputPath, ctx.tempPath);
+    } catch (error) {
+      // 不能把底层错误的原文写进任务 error：Node 的 EPERM 文案里带着**两端的绝对路径**
+      // （`copyfile '/var/packages/...' -> '/volume1/.../storage/fs-root/...'`），
+      // 会把存储根路径泄漏到 API 响应里（m2/m3/probes 的"响应不含绝对路径"断言就是这么红的）。
+      throw apiError(ERROR_CODES.INTERNAL_ERROR, '压缩包写入目标位置失败（磁盘/权限问题，详见服务日志）', {
+        reason: (error && error.code) || 'COPY_FAILED',
+      });
+    } finally {
+      await fsp.rm(localWorkDir, { recursive: true, force: true }).catch(() => {});
     }
   }
 
@@ -327,13 +396,19 @@ async function extract(ctx) {
     throw apiError(ERROR_CODES.MISSING_PASSWORD, '该压缩包已加密，请输入密码');
   }
 
-  // ① 解到目标目录旁边的中转目录（外部程序不直接写用户目录）
-  const stagingDir = path.join(path.dirname(targetDir), `.${path.basename(targetDir)}.zc7z-${Date.now()}`);
-  await fsp.mkdir(stagingDir, { recursive: true });
+  // ① 解到中转目录（外部程序不直接写用户目录）
+  // WASM 引擎必须解到**本地盘**：它经 NODEFS 落盘时会做 chmod/chown，CIFS 直接拒绝（实测 EPERM/errno=63）。
+  // 原生引擎仍用"目标目录旁边"的中转目录（同卷移动，省一次拷贝）。
+  const localStaging = needsLocalWorkPath(engine) ? await makeLocalWorkDir('zc7z-extract-') : null;
+  const stagingDir = localStaging || path.join(path.dirname(targetDir), `.${path.basename(targetDir)}.zc7z-${Date.now()}`);
+  if (!localStaging) await fsp.mkdir(stagingDir, { recursive: true });
+
   try {
     const args = ['x', '-y', ...(password ? [`-p${password}`] : []), `-o${stagingDir}`, ctx.archivePath];
-    const outcome = await run7z(engine.bin, args, { timeoutMs: EXTRACT_TIMEOUT_MS, signal });
-    if (outcome.code !== 0) mapFailure(outcome, { hasPassword: Boolean(password), operation: 'extract' });
+    const outcome = await runEngine(engine, { argv: args, timeoutMs: EXTRACT_TIMEOUT_MS, signal });
+    if (outcome.code !== 0) {
+      mapFailure(outcome, { hasPassword: Boolean(password), archiveEncrypted: info.encrypted, operation: 'extract' });
+    }
 
     // ② 安全判定 + 搬入目标目录（zip-slip / 不覆盖同名 / 进度 / 半成品清理）
     const staged = await collectStaged(stagingDir);
@@ -350,6 +425,8 @@ async function extract(ctx) {
     await fsp.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
   }
 }
+
+export { resetProbeCache };
 
 export default {
   id: FORMAT_ID,
@@ -371,13 +448,14 @@ export default {
   probeEncryption,
   verifyWithPassword,
   /** 诊断：当前用哪个引擎（验收要看这条） */
-  probe: () => {
+  probe: async () => {
     const engine = resolveEngine();
-    return {
-      kind: engine.kind,
-      bin: engine.bin,
-      version: engine.bin ? probeVersion(engine.bin) : null,
-      wasmPackage: engine.wasmPackage,
-    };
+    if (engine.kind === 'native') {
+      return { kind: engine.kind, bin: engine.bin, version: probeVersion(engine.bin), wasmPackage: null };
+    }
+    if (engine.kind === 'wasm') {
+      return { kind: engine.kind, bin: null, version: await wasmVersion(), wasmPackage: engine.wasmPackage };
+    }
+    return { kind: null, bin: null, version: null, wasmPackage: engine.wasmPackage || null };
   },
 };

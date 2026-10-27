@@ -18,6 +18,8 @@ import path from 'node:path';
 
 import { ERROR_CODES, apiError } from '../../../lib/errors.js';
 import { planTargets, writePlan } from '../_shared/entrySafety.js';
+import { jsExtractTo, jsInspect, jsTest } from './js-engine.js';
+import { repairName } from '../_shared/nameRepair.js';
 import {
   EXTRACT_TIMEOUT_MS,
   LIST_TIMEOUT_MS,
@@ -25,8 +27,8 @@ import {
   mapToolFailure,
   parseBareList,
   parseTechnicalList,
-  pickBinaries,
-  probeUnrarVersion,
+  resolveEngine,
+  resetProbeCache,
   runCommand,
 } from './unrar.js';
 
@@ -38,20 +40,26 @@ const CREATE_REFUSED = 'RAR 压缩算法为闭源商业算法，未授权不能�
 /** 进度上报的最小间隔（解析外部程序输出时自己节流，避免每行都推一次） */
 const PROGRESS_INTERVAL_MS = 120;
 
-/** 当前可用后端：unrar 优先（7z 16.02 对 rar5 会 exit 2，只能算兜底） */
-function currentBinary() {
-  const tools = pickBinaries();
-  if (tools.unrar) return { bin: tools.unrar, kind: 'unrar' };
-  if (tools.sevenZip) return { bin: tools.sevenZip, kind: '7z' };
-  return null;
+/** 当前引擎（三级回退：原生 unrar → node-unrar-js → 7z；具体见 unrar.js 的 resolveEngine） */
+function currentEngine() {
+  const engine = resolveEngine();
+  return engine.kind ? engine : null;
 }
 
 async function available() {
-  return currentBinary() !== null;
+  return currentEngine() !== null;
 }
 
 async function unavailableReason() {
-  return '未找到 unrar/7z，无法解压 RAR（请安装 unrar，或用 ZC_UNRAR_BIN / ZC_7Z_BIN 指定路径）';
+  const engine = resolveEngine();
+  if (engine.reason) {
+    return `RAR 解压不可用：${engine.reason}（请安装 unrar 7.x 以上，或用 ZC_UNRAR_BIN 指定路径）`;
+  }
+  if (engine.kind && engine.filenameSafe === false) {
+    // 能用但文件名不可靠：把话说清楚，别让用户以为是编码识别问题
+    return `当前 unrar 版本 ${engine.version || '未知'} 对 RAR5 中文文件名有已知 bug（解出会乱码），建议升级到 7.x 以上`;
+  }
+  return '未找到 unrar / node-unrar-js / 7z，无法解压 RAR（请安装 unrar，或用 ZC_UNRAR_BIN 指定路径）';
 }
 
 async function estimate() {
@@ -96,33 +104,38 @@ function parseSevenZipList(output) {
  * 解析失败（输出格式随版本变）→ 降级成 `lb` 裸名列表，**不报错**。
  * @returns {Promise<{entries: Array, encrypted: boolean, degraded: boolean}>}
  */
-async function inspectEntries(archivePath, binary) {
-  if (binary.kind === '7z') {
-    const outcome = await runCommand(binary.bin, ['l', '-slt', '-p-', archivePath], { timeoutMs: LIST_TIMEOUT_MS });
+async function inspectEntries(archivePath, engine) {
+  if (engine.kind === 'js') {
+    // js 引擎自己解析文件头（不走外部进程），错误已在适配层映射成契约错误码
+    return { ...(await jsInspect(archivePath)), degraded: false };
+  }
+  if (engine.kind === '7z') {
+    const outcome = await runCommand(engine.bin, ['l', '-slt', '-p-', archivePath], { timeoutMs: LIST_TIMEOUT_MS });
     if (outcome.code !== 0) mapToolFailure(outcome, { hasPassword: false });
     const entries = parseSevenZipList(outcome.stdout);
     const encrypted = /Encrypted = \+/i.test(outcome.stdout);
     return { entries, encrypted, degraded: false };
   }
 
-  const technical = await runCommand(binary.bin, ['lt', '-p-', archivePath], { timeoutMs: LIST_TIMEOUT_MS });
+  const technical = await runCommand(engine.bin, ['lt', '-p-', archivePath], { timeoutMs: LIST_TIMEOUT_MS });
   if (technical.code !== 0) mapToolFailure(technical, { hasPassword: false });
   const entries = parseTechnicalList(technical.stdout);
   const encrypted = hasEncryptionFlag(technical.stdout);
   if (entries.length > 0) return { entries, encrypted, degraded: false };
 
   // 降级：只拿名字（大小未知 → 0）。宁可"信息少一点"，也不要因为解析不了就报错。
-  const bare = await runCommand(binary.bin, ['lb', '-p-', archivePath], { timeoutMs: LIST_TIMEOUT_MS });
+  const bare = await runCommand(engine.bin, ['lb', '-p-', archivePath], { timeoutMs: LIST_TIMEOUT_MS });
   if (bare.code !== 0) mapToolFailure(bare, { hasPassword: false });
   return { entries: parseBareList(bare.stdout), encrypted, degraded: true };
 }
 
 async function list(archivePath) {
-  const binary = currentBinary();
-  if (!binary) throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, await unavailableReason());
-  const info = await inspectEntries(archivePath, binary);
+  const engine = currentEngine();
+  if (!engine) throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, await unavailableReason());
+  const info = await inspectEntries(archivePath, engine);
   const items = info.entries.map((entry) => ({
-    name: entry.name,
+    // 列表也要还原名字：前端"内含 N 个条目"与解压后的实际文件名必须一致
+    name: repairName(entry.name).name,
     type: entry.type,
     size: entry.size,
     compressedSize: entry.compressedSize,
@@ -132,18 +145,22 @@ async function list(archivePath) {
 }
 
 async function test(archivePath, options = {}) {
-  const binary = currentBinary();
-  if (!binary) throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, await unavailableReason());
+  const engine = currentEngine();
+  if (!engine) throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, await unavailableReason());
   const password = options && typeof options.password === 'string' ? options.password : '';
-  const { entries } = await inspectEntries(archivePath, binary);
+  if (engine.kind === 'js') {
+    // js 没有独立 test API：完整解一遍到临时目录并核对条数/字节数（见 js-engine.js 的说明）
+    return jsTest(archivePath, { password });
+  }
+  const { entries } = await inspectEntries(archivePath, engine);
   const args = ['t', password ? `-p${password}` : '-p-', archivePath];
-  const outcome = await runCommand(binary.bin, args, { timeoutMs: LIST_TIMEOUT_MS });
+  const outcome = await runCommand(engine.bin, args, { timeoutMs: LIST_TIMEOUT_MS });
   if (outcome.code !== 0) mapToolFailure(outcome, { hasPassword: Boolean(password) });
   return {
     ok: true,
     checked: entries.filter((entry) => entry.type !== 'dir').length,
     failures: [],
-    strategy: `${binary.kind}-test`,
+    strategy: `${engine.kind}-test`,
   };
 }
 
@@ -203,8 +220,8 @@ function makeExtractReporter(onProgress, totalFiles) {
 }
 
 async function extract(ctx) {
-  const binary = currentBinary();
-  if (!binary) throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, await unavailableReason());
+  const engine = currentEngine();
+  if (!engine) throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, await unavailableReason());
 
   const startedAt = Date.now();
   const targetDir = path.resolve(ctx.targetDir);
@@ -213,7 +230,7 @@ async function extract(ctx) {
   const signal = ctx.options && ctx.options.signal;
 
   // ⓪ 先读清单：既拿到文件数（进度分母/校验），也判定是否加密
-  const info = await inspectEntries(ctx.archivePath, binary);
+  const info = await inspectEntries(ctx.archivePath, engine);
   if (info.encrypted && !password) {
     throw apiError(ERROR_CODES.MISSING_PASSWORD, '该压缩包已加密，请输入密码');
   }
@@ -223,13 +240,18 @@ async function extract(ctx) {
   await fsp.mkdir(stagingDir, { recursive: true });
   try {
     const fileCount = info.entries.filter((entry) => entry.type !== 'dir').length;
-    const args = ['x', '-o-', '-y', password ? `-p${password}` : '-p-', ctx.archivePath, `${stagingDir}/`];
-    const outcome = await runCommand(binary.bin, args, {
-      timeoutMs: EXTRACT_TIMEOUT_MS,
-      signal,
-      onLine: makeExtractReporter(ctx.onProgress, fileCount),
-    });
-    if (outcome.code !== 0) mapToolFailure(outcome, { hasPassword: Boolean(password) });
+    if (engine.kind === 'js') {
+      // js 引擎在进程内解析并落盘（Node fs，CIFS 上没问题），自带"少文件/少字节"的损坏检测
+      await jsExtractTo(ctx.archivePath, stagingDir, { password });
+    } else {
+      const args = ['x', '-o-', '-y', password ? `-p${password}` : '-p-', ctx.archivePath, `${stagingDir}/`];
+      const outcome = await runCommand(engine.bin, args, {
+        timeoutMs: EXTRACT_TIMEOUT_MS,
+        signal,
+        onLine: makeExtractReporter(ctx.onProgress, fileCount),
+      });
+      if (outcome.code !== 0) mapToolFailure(outcome, { hasPassword: Boolean(password) });
+    }
 
     // ② 安全判定 + 搬进目标目录（zip-slip / 不覆盖同名 / 进度 / 半成品清理 都由这套共享代码负责）
     const staged = await collectStaged(stagingDir);
@@ -238,6 +260,7 @@ async function extract(ctx) {
     return {
       targetDir,
       entries: written.entries,
+      namesDecoded: planned.repairedNames || 0,
       bytesOut: written.bytesOut,
       durationMs: Date.now() - startedAt,
       encrypted: info.encrypted,
@@ -247,6 +270,8 @@ async function extract(ctx) {
     await fsp.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
   }
 }
+
+export { resetProbeCache };
 
 export default {
   id: FORMAT_ID,
@@ -279,9 +304,9 @@ export default {
    * @returns {Promise<{encrypted: boolean, isAes: boolean}>}
    */
   async probeEncryption(archivePath) {
-    const binary = currentBinary();
-    if (!binary) throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, await unavailableReason());
-    const info = await inspectEntries(archivePath, binary);
+    const engine = currentEngine();
+    if (!engine) throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, await unavailableReason());
+    const info = await inspectEntries(archivePath, engine);
     return { encrypted: info.encrypted === true, isAes: false };
   },
   /**
@@ -310,9 +335,20 @@ export default {
       };
     }
   },
-  /** 便于测试与诊断：探测到的 unrar 版本（拿不到为 null） */
+  /**
+   * 诊断：当前用哪个引擎、版本多少、文件名是否可靠。
+   * 形如 `{kind:'unrar', bin:'/bin/unrar', version:'5.70', filenameSafe:false}`
+   * 或 `{kind:'js', bin:null, version:'2.0.2', filenameSafe:false}`。
+   */
   probe: () => {
-    const tools = pickBinaries();
-    return { ...tools, unrarVersion: tools.unrar ? probeUnrarVersion(tools.unrar) : null };
+    const engine = resolveEngine();
+    return {
+      kind: engine.kind,
+      bin: engine.bin,
+      version: engine.version,
+      filenameSafe: engine.filenameSafe,
+      jsPackage: engine.kind === 'js' ? 'node-unrar-js' : null,
+      reason: engine.reason,
+    };
   },
 };

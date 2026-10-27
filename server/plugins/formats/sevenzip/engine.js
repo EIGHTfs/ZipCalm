@@ -11,11 +11,57 @@
 // - 符号链接条目在 `Attributes` 里体现为权限位以 `l` 开头（如 `A_ lrwxrwxrwx`）
 // - 目录条目 `Attributes = D_ ...`（压缩包里不含空目录时可能没有目录条目，父目录由解压时自动创建）
 
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { createRequire } from 'node:module';
+import { pipeline } from 'node:stream/promises';
+import { fileURLToPath } from 'node:url';
 
 import { ERROR_CODES, apiError } from '../../../lib/errors.js';
+import { currentCpuCores, runEngineProcess } from '../../../core/engineRunner.js';
+
+// 供 index.js 的 `-mmt` 对齐使用
+export { currentCpuCores };
+
+/**
+ * WASM 引擎能不能直接写这个路径所在的文件系统？
+ *
+ * **不能写网络盘（CIFS/SMB/NFS）**：WASM 侧通过 Emscripten 的 NODEFS 落盘，它创建文件后会做
+ * chmod/chown/utime 这类元数据操作，而 CIFS 挂载会直接拒绝 → 7z 报 `errno=63 : Operation not permitted`
+ * （该构建里 errno 63 = EPERM，已在 js7z.js 的 ERRNO_CODES 表里核对过）。
+ *
+ * 对照实验（同一份 runner，只改挂载根）：
+ *   挂 CIFS 目录  → exit=2，产物 0B，报 errno=63
+ *   挂本地 btrfs → exit=0，产物 166B
+ *   读 CIFS + 写本地 → exit=0（**读没问题，只有写不行**）
+ *
+ * 因此：WASM 模式下**可写路径一律先落本地盘**，再由 Node 拷到目标（Node 的 fs 在 CIFS 上正常）。
+ */
+export function needsLocalWorkPath(engine) {
+  return Boolean(engine) && engine.kind === 'wasm';
+}
+
+/** 在本地盘（os.tmpdir()）建一个临时工作目录，供 WASM 引擎写产物 */
+export async function makeLocalWorkDir(prefix) {
+  return fsp.mkdtemp(path.join(os.tmpdir(), prefix));
+}
+
+/**
+ * 把本地盘上的文件搬到目标路径（可能是 CIFS 网络盘）。
+ *
+ * **不能用 `fs.copyFile`**：本机 CIFS 挂载上它必报 `EPERM: operation not permitted, copyfile`
+ * （实测 copyFile / COPYFILE_EXCL 都失败，而 `readFile+writeFile` 与流式 pipeline 都成功）。
+ * 这里用流式管道：内存占用与文件大小无关，适合大压缩包。
+ */
+export async function copyLocalToTarget(sourcePath, targetPath) {
+  await pipeline(fs.createReadStream(sourcePath), fs.createWriteStream(targetPath));
+}
+
+// CPU 纪律（绑核「总核数 − 1」+ nice + 全局串行）统一由 `server/core/engineRunner.js` 提供，与 7z 共用同一把锁。
+// 这是部署环境约束（本机 3 核、跑满会触发宿主保护），不是 7z 私有实现，RAR 的 js 引擎同样要用。
 
 /** 探测结果缓存（60s，与格式注册表的可用性缓存同频） */
 const PROBE_TTL_MS = 60 * 1000;
@@ -61,11 +107,12 @@ export function resolveEngine() {
   const bin = nativeCandidates().find(isExecutable) || null;
   let engine = { kind: bin ? 'native' : null, bin, wasmPackage: null, nativePresent: Boolean(bin) };
 
-  // WASM 兜底：**只探测依赖是否可解析**（不做加载/执行）。
-  // 说明：WASM 引擎的调用适配尚未接入（需要 js7z-tools 的 onExit 异步语义，见 docs/18 §附四），
-  // 因此 kind 保持 null —— available() 不会误报"可用"，避免用户点下去才发现跑不了。
+  // WASM 兜底：系统没有二进制时才启用。判定标准是"依赖可解析"
+  // （真正的加载/执行放到子进程里，见 wasm-runner.mjs —— 缺依赖时子进程启动即失败，不会误报可用）。
   let resolvableWasm = null;
-  if (!bin) {
+  // ZC_7Z_DISABLE_WASM=1：用于验收"回退③两者都没有"，也供运维在 WASM 出问题时临时关掉
+  const wasmDisabled = process.env.ZC_7Z_DISABLE_WASM === '1';
+  if (!bin && !wasmDisabled) {
     const requireFromHere = createRequire(import.meta.url);
     for (const name of WASM_PACKAGES) {
       try {
@@ -77,7 +124,12 @@ export function resolveEngine() {
       }
     }
   }
-  engine = { ...engine, wasmPackage: resolvableWasm };
+  engine = {
+    kind: bin ? 'native' : (resolvableWasm ? 'wasm' : null),
+    bin,
+    wasmPackage: resolvableWasm,
+    nativePresent: Boolean(bin),
+  };
 
   probeCache = { at: now, engine };
   return engine;
@@ -100,60 +152,20 @@ export function probeVersion(bin) {
 }
 
 /**
- * 跑一次 7z 命令，按行回调（进度解析用）。
+ * 跑一次 7z 命令（薄封装：绑核/降优先级/串行/超时硬杀都在 `core/engineRunner.js` 里统一做）。
  * @param {string} bin
  * @param {string[]} args
  * @param {{cwd?: string, timeoutMs?: number, onLine?: (line: string) => void, signal?: AbortSignal}} [options]
  */
 export function run7z(bin, args, options = {}) {
-  const timeoutMs = options.timeoutMs || LIST_TIMEOUT_MS;
-  return new Promise((resolve) => {
-    let child;
-    try {
-      child = spawn(bin, args, { cwd: options.cwd || undefined, stdio: ['ignore', 'pipe', 'pipe'] });
-    } catch (error) {
-      resolve({ code: -1, stdout: '', stderr: String(error && error.message), timedOut: false, aborted: false });
-      return;
-    }
-    let stdout = '';
-    let stderr = '';
-    let timedOut = false;
-    let aborted = false;
-    const emit = (chunk, isError) => {
-      const text = chunk.toString();
-      if (isError) stderr += text;
-      else stdout += text;
-      if (typeof options.onLine === 'function') {
-        for (const line of text.split(/\r?\n/)) {
-          if (line.trim().length > 0) options.onLine(line);
-        }
-      }
-    };
-    const timer = setTimeout(() => {
-      timedOut = true;
-      child.kill('SIGKILL');
-    }, timeoutMs);
-    if (options.signal) {
-      if (options.signal.aborted) {
-        aborted = true;
-        child.kill('SIGKILL');
-      } else {
-        options.signal.addEventListener('abort', () => {
-          aborted = true;
-          child.kill('SIGKILL');
-        }, { once: true });
-      }
-    }
-    child.stdout.on('data', (chunk) => emit(chunk, false));
-    child.stderr.on('data', (chunk) => emit(chunk, true));
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      resolve({ code: -1, stdout, stderr: `${stderr}${String(error && error.message)}`, timedOut, aborted });
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({ code: typeof code === 'number' ? code : -1, stdout, stderr, timedOut, aborted });
-    });
+  return runEngineProcess({
+    command: bin,
+    args,
+    cwd: options.cwd,
+    timeoutMs: options.timeoutMs || LIST_TIMEOUT_MS,
+    onLine: options.onLine,
+    signal: options.signal,
+    label: '7z',
   });
 }
 
@@ -191,7 +203,8 @@ export function parseSlt(output) {
     const attributes = line.match(/^Attributes = (.*)$/);
     if (attributes) {
       const attributeText = attributes[1];
-      if (/^D_/.test(attributeText)) current.type = 'dir';
+      // 目录标记：p7zip 16.02 写 `D_ drwxr-xr-x`，7-Zip 25.01（WASM）写 `D drwxr-xr-x` —— 两者都要认
+      if (/^D[\s_]/.test(attributeText) || /^D$/.test(attributeText)) current.type = 'dir';
       // 符号链接判定：**权限串首字符必须是 `l`**（`A_ lrwxrwxrwx`）。
       // 不能宽匹配 `-rw-r--r--`——普通文件的权限串也以 `-` 开头，宽匹配会把所有普通文件误判成链接（实测踩过）。
       const permission = attributeText.split(/\s+/).find((token) => /^[dl-][rwx-]{9}$/.test(token)) || '';
@@ -209,6 +222,8 @@ export function parseSlt(output) {
       continue;
     }
     if (/^Encrypted = \+/.test(line)) current.encrypted = true;
+    // 25.01 用 `Folder = +` 表达目录（与 Attributes 双保险）
+    if (/^Folder = \+/.test(line)) current.type = 'dir';
   }
   flush();
   return entries;
@@ -228,17 +243,113 @@ export function mapFailure(outcome, context) {
   if (outcome.aborted) throw apiError(ERROR_CODES.ABORTED, '任务已取消');
   if (outcome.timedOut) throw apiError(ERROR_CODES.INTERNAL_ERROR, '7z 操作超时（外部程序未在限定时间内完成）');
   const text = `${outcome.stdout}\n${outcome.stderr}`;
-  if (/wrong password|Can not open encrypted|password/i.test(text)) {
+  const passwordState = () => {
     if (!context.hasPassword) throw apiError(ERROR_CODES.MISSING_PASSWORD, '该压缩包已加密，请输入密码');
     throw apiError(ERROR_CODES.BAD_PASSWORD, '密码错误');
+  };
+  // 明确的密码字样（p7zip 16.02 会打 "Wrong password"/"Enter password"）
+  if (/wrong password|enter password|can not open encrypted|password/i.test(text)) passwordState();
+  // 明确的数据损坏信号
+  if (/data error|crc failed|unexpected end|headers error|is not archive/i.test(text)) {
+    // 落到下面的"损坏"分支
+  } else if (context.archiveEncrypted) {
+    // 关键：WASM 版 7-Zip（25.01）密码错时只说 "Archives with Errors"，**不含 password 字样**。
+    // 已知包是加密的，又没命中损坏信号 → 就是密码问题（有没有传密码决定是哪一态）。
+    passwordState();
   }
   if (context.operation === 'create') {
     throw apiError(ERROR_CODES.INTERNAL_ERROR, '7z 压缩失败', {
-      detail: text.trim().split(/\r?\n/).slice(-2).join(' / ').slice(0, 200),
+      detail: sanitizeDetail(text),
     });
   }
   throw apiError(ERROR_CODES.ARCHIVE_CORRUPTED, '压缩包损坏', {
     exitCode: outcome.code,
-    detail: text.trim().split(/\r?\n/).slice(-2).join(' / ').slice(0, 200),
+    detail: sanitizeDetail(text),
   });
+}
+
+/**
+ * 把 7z 输出里的**宿主绝对路径**收敛成文件名，避免把存储根路径带进任务 error（进而出现在 API 响应里）。
+ *
+ * 为什么必须做：原生引擎调 7z 时传的是宿主绝对路径，失败时 7z 会把路径原样打出来；
+ * 而 m2/m3/probes 都有"响应不含绝对路径"的断言 —— 带路径的错误文案会让这些断言变红，
+ * 也确实属于信息泄漏（用户看到的错误不需要知道服务器目录结构）。
+ * 完整原文仍写服务日志，便于排查。
+ */
+function sanitizeDetail(rawText) {
+  const tail = String(rawText || '').trim().split(/\r?\n/).slice(-2).join(' / ').slice(0, 200);
+  if (tail.length === 0) return '';
+  console.error(`[sevenzip] 7z 失败原文：${tail}`);
+  return tail.replace(/\/[^\s'":,]+/g, (matched) => matched.split('/').filter(Boolean).pop() || matched);
+}
+
+/** WASM 执行器脚本路径（与被本文件同目录） */
+const WASM_RUNNER = path.join(path.dirname(fileURLToPath(import.meta.url)), 'wasm-runner.mjs');
+
+/**
+ * 把宿主绝对路径翻译成 WASM 虚拟路径，并给出需要挂载的目录清单。
+ *
+ * 规则：
+ *   - `-o/abs/dir`      → 挂载 `/abs/dir` 本身，参数变 `-o/mN`
+ *   - `/abs/file`       → 挂载其父目录，参数变 `/mN/file`
+ *   - 相对名（create 的条目名）→ 原样保留，靠 `cwd` 决定基准
+ * @returns {{argv: string[], cwdWasm: string|null, mounts: Array<{host: string, wasm: string}>}}
+ */
+export function planWasmMounts(argv, cwd) {
+  const mounts = [];
+  const mountOf = (hostAbs) => {
+    const found = mounts.find((item) => item.host === hostAbs);
+    if (found) return found.wasm;
+    const wasmPath = `/m${mounts.length}`;
+    mounts.push({ host: hostAbs, wasm: wasmPath });
+    return wasmPath;
+  };
+  const translated = argv.map((arg) => {
+    const outputPrefix = arg.match(/^-o(\/.*)$/);
+    if (outputPrefix) return `-o${mountOf(outputPrefix[1])}`;
+    if (arg.startsWith('/')) return `${mountOf(path.dirname(arg))}/${path.basename(arg)}`;
+    return arg;
+  });
+  return { argv: translated, cwdWasm: cwd ? mountOf(cwd) : null, mounts };
+}
+
+/**
+ * 统一执行入口：引擎是原生二进制就走 spawn，是 WASM 就走子进程执行器。
+ *
+ * 串行闸门与绑核/降优先级都来自 `server/core/engineRunner.js`（跨插件共享一把锁），
+ * 避免"每个格式各写一份 CPU 纪律、下一个格式必然漏掉"。
+ */
+export function runEngine(engine, options = {}) {
+  // 串行/限核由 runEngineProcess 内部统一处理，这里不再自己排队（避免双重排队）
+  return runEngineUnsafe(engine, options);
+}
+
+async function runEngineUnsafe(engine, options = {}) {
+  if (engine.kind === 'native') return run7z(engine.bin, options.argv, options);
+  if (engine.kind !== 'wasm') {
+    throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, '没有可用的 7z 引擎（系统二进制与 WASM 都不可用）');
+  }
+
+  const spec = planWasmMounts(options.argv, options.cwd);
+  // 绑核 / nice / 全局串行 / 超时硬杀 / 取消：统一由 core/engineRunner.js 处理
+  const outcome = await runEngineProcess({
+    command: process.execPath,
+    args: [WASM_RUNNER, JSON.stringify(spec)],
+    timeoutMs: options.timeoutMs || LIST_TIMEOUT_MS,
+    signal: options.signal,
+    onLine: options.onLine,
+    label: '7z-wasm',
+  });
+
+  // 信封是 stderr 的**最后一行** JSON（前面的行是运行器诊断信息）
+  let code = -1;
+  try {
+    const lastLine = String(outcome.stderr || '').trim().split('\n').filter((line) => line.startsWith('{')).pop() || '{}';
+    const parsed = JSON.parse(lastLine);
+    code = typeof parsed.exit === 'number' ? parsed.exit : -1;
+  } catch {
+    code = -1;
+  }
+  // WASM 模式下把 7z 输出放进 stdout，让 parseSlt 等既有解析逻辑无需分支
+  return { code, stdout: outcome.stdout, stderr: '', timedOut: outcome.timedOut, aborted: outcome.aborted };
 }

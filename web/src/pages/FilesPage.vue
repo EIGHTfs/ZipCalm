@@ -15,6 +15,7 @@ import { api } from '../api/client.js';
 import Icon from '../components/common/Icon.vue';
 import ContextMenu from '../components/common/ContextMenu.vue';
 import PromptDialog from '../components/common/PromptDialog.vue';
+import RepairNamesDialog from '../components/common/RepairNamesDialog.vue';
 import DirectoryTree from '../components/layout/DirectoryTree.vue';
 import CompressDrawer from '../components/compress/CompressDrawer.vue';
 import ExtractDialog from '../components/compress/ExtractDialog.vue';
@@ -39,6 +40,8 @@ const order = ref('asc');
 // M2：多选与操作面板
 const selected = ref(new Map()); // path -> entry
 const showCompress = ref(false);
+/** 修复乱码文件名：目标目录（空 = 对话框关闭） */
+const repairPath = ref('');
 const showExtract = ref(false);
 /** 页面内展示的任务：优先最近提交的；否则跟随 store 里当前活动任务（刷新/重开页面也能看到进度） */
 const submittedTaskId = ref(null);
@@ -359,6 +362,8 @@ const menuItems = computed(() => {
   if (target) {
     items.push({ key: 'compress', label: multiCount > 1 ? `压缩选中的 ${multiCount} 项` : '压缩' });
     if (target.type === 'dir') items.push({ key: 'enter', label: '进入目录' });
+    // 目录才给「修复乱码文件名」：老版 unrar 等引擎会把 UTF-8 名写成 U+FFFE+私有区的可逆转义
+    if (target.type === 'dir') items.push({ key: 'repair-names', label: '修复乱码文件名' });
     if (target.type === 'file' && looksLikeArchive(target.name)) items.push({ key: 'extract', label: '解压' });
     items.push({ divider: true });
     items.push({ key: 'rename', label: '重命名', shortcut: 'F2', disabled: multiCount > 1 });
@@ -378,11 +383,18 @@ const menuItems = computed(() => {
   return items;
 });
 
+/** 乱码名修复完成后：关掉对话框并刷新当前目录（列表里应立刻看到正确名字） */
+function onNamesRepaired() {
+  repairPath.value = '';
+  void load();
+}
+
 /** 菜单动作表：把"键 → 做什么"拆开写，各动作独立成函数（也让单函数复杂度落在阈值内） */
 const MENU_ACTIONS = {
   compress: () => { if (selected.value.size > 0) showCompress.value = true; },
   extract: (target) => { if (target) selectOnly(target); showExtract.value = true; },
   enter: (target) => { if (target) goto(target.path); },
+  'repair-names': (target) => { if (target) repairPath.value = target.path; },
   rename: (target) => { if (target) openRename(target); },
   move: () => openMove(),
   'copy-path': (target) => { void copyPath(target); },
@@ -989,6 +1001,13 @@ onUnmounted(() => {
     @pick="pickMenuItem"
   />
 
+  <RepairNamesDialog
+    :open="repairPath !== ''"
+    :path="repairPath"
+    :root-id="rootId"
+    @close="repairPath = ''"
+    @renamed="onNamesRepaired"
+  />
   <PromptDialog
     :open="promptState.open"
     :mode="promptState.mode"

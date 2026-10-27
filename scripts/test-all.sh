@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}" || exit 1
 
-WANT="${*:-build m1 m2 m3 crash probes retention m4 m6 m7 m8fs hlscan hlexec volumes multiroot hlhint rar sevenzip}"
+WANT="${*:-build m1 m2 m3 crash probes retention m4 m6 m7 m8fs hlscan hlexec volumes multiroot hlhint rar sevenzip engine}"
 
 # 测试卫生：把删除后端固定到项目 storage/trash（进程级覆盖，不改用户 config）。
 # 为什么必须：本项目目录就在共享内，auto 后端会把测试删除送进用户的 #recycle，
@@ -54,7 +54,18 @@ run_one() { # run_one <名字> <命令...>
 echo "ZipCalm 验收套件 —— ${PROJECT_ROOT}"
 echo
 
-if has build; then run_one build npm run build; fi
+# 构建（vite/esbuild）默认按核数开线程，会把整机 CPU 打满（实测触发过宿主"系统 CPU 过载"中断）。
+# 与 7z 引擎同一条纪律：**绑到「总核数 − 1」并降优先级**，留一个核给 Web 服务与宿主。
+CPU_TOTAL=$(node -e "process.stdout.write(String(require('node:os').availableParallelism()))" 2>/dev/null || echo 2)
+CPU_LIMIT=$(( CPU_TOTAL > 1 ? CPU_TOTAL - 1 : 1 ))
+CPU_LIST=$(node -e "process.stdout.write(Array.from({length:Number(process.argv[1])},(_,i)=>i).join(','))" "$CPU_LIMIT" 2>/dev/null || echo 0)
+if has build; then
+  if command -v taskset >/dev/null 2>&1; then
+    run_one build taskset -c "$CPU_LIST" nice -n 10 npm run build
+  else
+    run_one build nice -n 10 npm run build
+  fi
+fi
 
 # 依赖服务已在跑的三套：先统一起服务，跑完再停
 # 用 restart 而不是 start：start 对"已在运行"的服务是 no-op，环境变量（如
@@ -91,6 +102,8 @@ if has hlhint; then run_one hlhint node "${SCRIPT_DIR}/test-hardlink-hint.mjs"; 
 if has rar; then run_one rar node "${SCRIPT_DIR}/test-rar.mjs"; fi
 # 7z 双向格式（docs/18）：引擎回退链 / 压缩级别 / 加密三态 / 条目安全 / API 端到端
 if has sevenzip; then run_one sevenzip node "${SCRIPT_DIR}/test-sevenzip.mjs"; fi
+# 外部引擎统一执行入口（限核分层 / 超时 / 取消 / 串行）：跨平台分支靠单测证明
+if has engine; then run_one engine node "${SCRIPT_DIR}/test-engine-runner.mjs"; fi
 # 硬链接去重·执行：rename→link→unlink 三步替换 + link 失败回滚 + 执行前全量复核 + 日志
 if has hlexec; then run_one hlexec node "${SCRIPT_DIR}/test-hardlink-execute.mjs"; fi
 

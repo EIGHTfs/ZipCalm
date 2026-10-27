@@ -11,6 +11,7 @@ import { listDirectory } from '../../core/fs/list.js';
 import { listRoots } from '../../core/fs/roots.js';
 import { searchFiles } from '../../core/fs/search.js';
 import { deleteEntries, makeDirectory, moveEntries, renameEntry } from '../../core/fs/writeOps.js';
+import { repairNamesInDirectory } from '../../core/fs/repairNames.js';
 import { statEntry } from '../../core/fs/stat.js';
 
 /** 查询串里的数字参数解析（非法值→undefined，由 core 用默认值） */
@@ -72,6 +73,10 @@ export default async function fsRoutes(app) {
     reply.ok(await moveEntries(app.requestContext(request), request.body || {}));
   });
 
+  // 批量修复乱码文件名（U+FFFE + 私有区字节转义 → 原名）。dryRun 默认 true，不显式传 false 只出清单。
+  app.post('/fs/repair-names', { preHandler: [app.requireAuth] }, async (request, reply) => {
+    reply.ok(await repairNamesInDirectory(app.requestContext(request), request.body || {}));
+  });
   app.post('/fs/delete', { preHandler: [app.requireAuth] }, async (request, reply) => {
     reply.ok(await deleteEntries(app.requestContext(request), request.body || {}, {
       // 与 M5 删除原文件同一机制：进回收站（delete.mode 决定是 trash 还是 log-only 记账）

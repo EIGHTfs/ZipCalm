@@ -37,7 +37,16 @@
 | **黑名单** | `GET/POST /blacklist` · `GET/POST /blacklist/user` · `POST /blacklist/preview` | 三层规则的读改 + 命中预览 |
 | **硬链接去重** | `POST /hardlink/scan` · `POST /hardlink/execute` | 扫描只读；执行需显式确认 |
 | **监控** | `GET /metrics/snapshot` · `GET /metrics/history` | |
-| **其它** | `GET /health`（含实际运行身份 `runtime`）· `GET /formats`（格式可用性） | |
+| **其它** | `GET /health`（含实际运行身份 `runtime`）· `GET /formats`（格式可用性 + 能力声明）· **`GET /capabilities/:id`**（能力插件元数据，如密码的可用算法与兼容性提示） | |
+
+### 各端点的新增字段（2026-10-27，加密/7z/硬链接预检之后）
+
+| 端点 | 新增字段 | 用途 |
+|---|---|---|
+| `GET /formats` | `capabilities[]`（含 `methods[]` 每个带 `compatibility` / `caveat` / `available`、以及 `params` schema） | 前端据此渲染密码开关与算法下拉；**格式没声明就不该显示该能力** |
+| `GET /formats` | `extractOnly` | `true` = 只读格式（RAR）。前端压缩抽屉必须过滤掉，否则用户会选中它然后收到 `UNSUPPORTED_FORMAT` |
+| `POST /compress/preflight` | `hardlinks: { groups, files, logicalBytes, duplicateBytes, preservedByFormat, estimatedBytes, hint }` | 选 ZIP 压含硬链接目录时提示「会各存一份、建议 TAR」；`hint=false` 表示不用提示（无硬链接或占比 <10%） |
+| `POST /extract/preflight` | `encrypted` / `isAes` | 加密包标记，前端据此显示密码输入框（`encrypted=true` 且用户还没传密码时才置位） |
 
 ### 实现状态（与设计的差距）
 
@@ -51,7 +60,12 @@
 ### 响应与错误码
 
 - 统一响应：`{ ok, data, error }`
-- 错误对象：`{ code, message }`，`code` 为机器可读枚举（`PATH_NOT_FOUND` / `PATH_OUT_OF_ROOT` / `PERMISSION_DENIED` / `VALIDATION_FAILED` / `DISK_FULL` / `TASK_CONFLICT` / `FILE_ACCESS_DENIED` 等）
+- 错误对象：`{ code, message }`，`code` 为机器可读枚举
+  - 路径与权限：`PATH_NOT_FOUND` / `PATH_OUT_OF_ROOT` / `PERMISSION_DENIED` / `VALIDATION_FAILED` / `FILE_ACCESS_DENIED`
+  - 任务与磁盘：`DISK_FULL` / `TASK_CONFLICT` / `TASK_NOT_FOUND`
+  - **加密包三态（必须分开，不能一律报"损坏"）**：`MISSING_PASSWORD`（缺密码）/ `BAD_PASSWORD`（密码错）/ `ARCHIVE_CORRUPTED`（包损坏）
+  - **引擎与能力**：`FORMAT_UNAVAILABLE`（格式不可用，如缺 unrar/7z）/ `SEVENZIP_MISSING`（缺 7z 无法解 AES）/ `UNSUPPORTED_FORMAT`（如对 RAR 发起压缩）/ `VERIFY_FAILED`（压完自测或解压前校验失败）
+  - **文件冲突**：`TARGET_EXISTS`（目标已存在，绝不覆盖）
 - **错误码比错误消息重要** —— 客户端拿到 `DISK_FULL` 可以弹专门引导，拿到字符串只能照显
 
 ## 四、为客户端铺路的约定（现在就要守）
@@ -122,3 +136,22 @@ Web 前端用路由，客户端需要状态可恢复：
 - 用 curl + Bearer Token 可完整跑通文件浏览 + 压缩 + 解压 + 搜索
 - 所有错误码机器可读
 - **PWA 未开始**（按需求排期在网页端完全开发完之后）
+
+### POST /fs/repair-names —— 修复乱码文件名（PUA 转义还原）
+
+```jsonc
+// 请求
+{ "rootId": "Download", "path": "/某目录", "dryRun": true, "maxDepth": 6, "maxEntries": 5000 }
+// 响应
+{ "path": "/某目录", "dryRun": true, "maxDepth": 6, "scanned": 3, "truncated": false,
+  "candidates": [{ "from": "s7/￾￾….txt", "to": "s7/中文文件名.txt", "hex": "73372f…" }],
+  "unrecoverable": [{ "path": "s7/????.txt", "reason": "lossy" }],
+  "conflicts": [{ "from": "…", "to": "…", "reason": "target-exists" }],
+  "counts": { "candidates": 2, "unrecoverable": 1, "conflicts": 0, "renamed": 0 },
+  "renamed": 0 }
+```
+
+- **`dryRun` 默认 true**：不显式传 `false` 只出清单，不改任何文件
+- `candidates` / `unrecoverable` / `conflicts` 列表最多各 50 条（`counts` 里的数量永远是精确值）
+- **绝不覆盖**：目标已存在 → 进 `conflicts`，文件不动
+- 跳过符号链接；路径过白名单（越界 → `PATH_OUT_OF_ROOT`）；只接受目录（文件 → `VALIDATION_FAILED`）

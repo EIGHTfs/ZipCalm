@@ -17,6 +17,7 @@ import { ERROR_CODES, apiError } from '../../../lib/errors.js';
 import { pathExists } from '../../../lib/fs-probe.js';
 import { createThrottledReporter } from '../../../lib/throttle.js';
 import { normalizeUserPath } from '../../../core/fs/safePath.js';
+import { repairEntries } from './nameRepair.js';
 
 const MAX_PATH_LENGTH = 4096;
 const MAX_SEGMENT_LENGTH = 255;
@@ -80,7 +81,11 @@ export async function planTargets(entries, targetDir, overwrite) {
   let totalBytes = 0;
   let totalFiles = 0;
 
-  for (const entry of entries) {
+  // 共享阶段：先在**还原后的名字**上做路径判定（否则 `../` 可能藏在 PUA 转义里逃过检查）。
+  // 还原是增强不是必需路径：解不开/撞名就保留原名，绝不阻断解压。
+  const repaired = repairEntries(entries);
+
+  for (const entry of repaired.entries) {
     if (entry.link) rejectSymlink(entry.name);
     const unified = String(entry.name || '').replace(/\\/g, '/');
     const nameForCheck = unified.replace(/\/+$/, '');
@@ -111,7 +116,7 @@ export async function planTargets(entries, targetDir, overwrite) {
     }
   }
 
-  return { plan, totalBytes, totalFiles };
+  return { plan, totalBytes, totalFiles, repairedNames: repaired.repaired, repairConflicts: repaired.conflicts };
 }
 
 /**
