@@ -14,6 +14,8 @@ import path from 'node:path';
 import { ERROR_CODES, apiError } from '../../lib/errors.js';
 import { matchEntry } from './blacklist.js';
 import { collectFilesUnder } from './sourceWalk.js';
+import { accumulateHardlink, createHardlinkAccumulator, discardHardlink, finalizeHardlinks } from './hardlinkScan.js';
+import { formatPreservesHardlinks, shouldHintHardlink } from '../../../shared/hardlink-hint.js';
 import { pathExists } from '../../lib/fs-probe.js';
 
 /** 压缩估算的粗比值（M2 只用于给前端一个量级；真实压缩比由格式包 estimate 决定） */
@@ -39,7 +41,7 @@ async function isWritable(dir) {
 }
 
 /** 单个源 → 预检条目（不存在 / 不可读都在这里定下来，后续判定只看条目） */
-async function sourceItemOf(source) {
+async function sourceItemOf(source, hardlinkAccumulator) {
   let fileStat;
   try {
     fileStat = await fsp.lstat(source.absPath);
@@ -66,9 +68,16 @@ async function sourceItemOf(source) {
   let size = isDir ? 0 : fileStat.size;
   let fileCount = isDir ? 0 : 1;
   if (isDir) {
-    const nested = await directoryStats(source.absPath);
+    const nested = await directoryStats(source.absPath, hardlinkAccumulator);
     size = nested.bytes;
     fileCount = nested.files;
+  } else {
+    accumulateHardlink(hardlinkAccumulator, {
+      absPath: source.absPath,
+      dev: fileStat.dev,
+      ino: fileStat.ino,
+      size: fileStat.size,
+    });
   }
 
   return {
@@ -82,9 +91,9 @@ async function sourceItemOf(source) {
   };
 }
 
-async function collectSourceItems(sources) {
+async function collectSourceItems(sources, hardlinkAccumulator) {
   const items = [];
-  for (const source of sources) items.push(await sourceItemOf(source));
+  for (const source of sources) items.push(await sourceItemOf(source, hardlinkAccumulator));
   return items;
 }
 
@@ -99,13 +108,13 @@ async function collectSourceItems(sources) {
  * @param {Array} layers resolveLayers 的结果（空数组 = 黑名单关闭）
  * @returns {Promise<{items: Array, skipped: Array<{path: string, pattern: string, layer: string}>, skippedBytes: number}>}
  */
-async function annotateWithBlacklist(items, sources, layers) {
+async function annotateWithBlacklist(items, sources, layers, hardlinkAccumulator) {
   const skipped = [];
   let skippedBytes = 0;
   const annotated = [];
 
   for (let index = 0; index < items.length; index += 1) {
-    const one = await annotateOneSource(items[index], sources[index], layers);
+    const one = await annotateOneSource(items[index], sources[index], layers, hardlinkAccumulator);
     annotated.push(one.item);
     skipped.push(...one.skipped);
     skippedBytes += one.skippedBytes;
@@ -118,7 +127,7 @@ async function annotateWithBlacklist(items, sources, layers) {
  * 单个源的标注：返回标注后的条目、命中清单与命中字节数。
  * 抽出来是为了让 annotateWithBlacklist 只做"遍历 + 汇总"（圈复杂度压在阈值内）。
  */
-async function annotateOneSource(sourceItem, sourceRef, layers) {
+async function annotateOneSource(sourceItem, sourceRef, layers, hardlinkAccumulator) {
   const annotatedItem = { ...sourceItem, willSkip: false, skipReason: null, keptFiles: Number(sourceItem.fileCount) || 0 };
   if (!sourceItem.exists || !sourceRef || layers.length === 0) return { item: annotatedItem, skipped: [], skippedBytes: 0 };
 
@@ -134,6 +143,8 @@ async function annotateOneSource(sourceItem, sourceRef, layers) {
     }
     skipped.push({ path: joinUserPath(sourceItem.path, file.relative), pattern: hit.pattern, layer: hit.layer });
     skippedBytes += Number(file.size) || 0;
+    // 被跳过的文件不会进包 → 从硬链接统计里扣掉，避免"两个成员都被跳过却提示会存两份"
+    discardHardlink(hardlinkAccumulator, file);
   }
   annotatedItem.keptFiles = keptFiles;
   // 整个源都被跳过（且确实有文件）：前端据此提示"该目录没有可压缩文件"，single 模式据此不建空包
@@ -175,16 +186,40 @@ function compressBlockedReason({ items, outputExists, outputWritable, freeBytes,
 }
 
 /**
+ * 组装硬链接响应块。
+ *
+ * 只做"提示所需的信息"，**不参与任何空间判定**（INV-07 保持原样）：
+ * - `duplicateBytes` 与格式无关（同一份数据被多存多少），便于前端在 tar 下做正向说明
+ * - `estimatedBytes` 只体现"存几份"，**不含压缩比**（压缩比因内容而异，不能承诺最终大小）
+ */
+function buildHardlinksBlock(format, keptBytes, hardlinkAccumulator) {
+  const stats = finalizeHardlinks(hardlinkAccumulator);
+  const preservedByFormat = formatPreservesHardlinks(format);
+  return {
+    groups: stats.groups,
+    files: stats.files,
+    // 逻辑大小 = 真正会进包的文件字节（已扣掉黑名单跳过项）
+    logicalBytes: keptBytes,
+    duplicateBytes: stats.duplicatedBytes,
+    preservedByFormat,
+    estimatedBytes: preservedByFormat ? Math.max(0, keptBytes - stats.duplicatedBytes) : keptBytes,
+    hint: !preservedByFormat && shouldHintHardlink({ logicalBytes: keptBytes, duplicatedBytes: stats.duplicatedBytes }),
+  };
+}
+
+/**
  * 压缩预检。
  * @param {{config: object, rootAbs: string}} deps
  * @param {{sources: Array<{path: string, absPath: string, name: string, kind: string}>, format: string, mode: string, outputDir: string}} input
  */
 export async function compressPreflight(deps, input) {
   const factor = deps.config.compress.preflightFactor;
-  const rawItems = await collectSourceItems(input.sources);
+  // 硬链接统计与"目录字节数"共用同一次遍历（dev/ino 来自已有的 lstat，不额外多 syscall）
+  const hardlinkAccumulator = createHardlinkAccumulator();
+  const rawItems = await collectSourceItems(input.sources, hardlinkAccumulator);
   // 黑名单层由调用方解析（路由里一次性解析，预检与打包共用同一份判定语义）
   const layers = Array.isArray(deps.blacklistLayers) ? deps.blacklistLayers : [];
-  const { items, skipped, skippedBytes } = await annotateWithBlacklist(rawItems, input.sources, layers);
+  const { items, skipped, skippedBytes } = await annotateWithBlacklist(rawItems, input.sources, layers, hardlinkAccumulator);
 
   const totalBytes = items.reduce((sum, item) => sum + item.size, 0);
   // 「待压字节」= 全部源 − 黑名单跳过：跳过项不进包，不该占用 2 倍空间额度
@@ -207,6 +242,8 @@ export async function compressPreflight(deps, input) {
     keptBytes,
   });
 
+  const hardlinks = buildHardlinksBlock(input.format, keptBytes, hardlinkAccumulator);
+
   return {
     canProceed: blockedReason === null,
     blockedReason,
@@ -218,6 +255,8 @@ export async function compressPreflight(deps, input) {
     freeBytes,
     preflightFactor: factor,
     items,
+    // 硬链接提示（只读信息；hint=false 时前端不应展示任何提示条）
+    hardlinks,
     // 契约 §compress/preflight：skipped[] = { path, pattern, layer }（对外只有用户路径）
     skipped,
     packages: [],
@@ -225,7 +264,7 @@ export async function compressPreflight(deps, input) {
 }
 
 /** 递归统计目录（字节数 + 文件数；异步、不跟随符号链接）—— 进度分母用 */
-async function directoryStats(dirAbs) {
+async function directoryStats(dirAbs, hardlinkAccumulator) {
   let bytes = 0;
   let files = 0;
   let dirents;
@@ -238,13 +277,20 @@ async function directoryStats(dirAbs) {
     const child = path.join(dirAbs, dirent.name);
     if (dirent.isSymbolicLink()) continue;
     if (dirent.isDirectory()) {
-      const nested = await directoryStats(child);
+      const nested = await directoryStats(child, hardlinkAccumulator);
       bytes += nested.bytes;
       files += nested.files;
     } else if (dirent.isFile()) {
       try {
-        bytes += (await fsp.lstat(child)).size;
+        const childStat = await fsp.lstat(child);
+        bytes += childStat.size;
         files += 1;
+        accumulateHardlink(hardlinkAccumulator, {
+          absPath: child,
+          dev: childStat.dev,
+          ino: childStat.ino,
+          size: childStat.size,
+        });
       } catch {
         /* 竞态删除：忽略 */
       }

@@ -12,6 +12,7 @@ import { computed, ref, watch } from 'vue';
 import { api } from '../../api/client.js';
 import { useUiStore } from '../../stores/ui.js';
 import { COMPRESS_MODE, COMPRESS_MODE_HINTS, COMPRESS_MODE_LABELS } from '../../constants/index.js';
+import { formatBytes } from '../../utils/format.js';
 
 const props = defineProps({
   open: { type: Boolean, default: false },
@@ -37,36 +38,75 @@ const modeOptions = [COMPRESS_MODE.SINGLE, COMPRESS_MODE.BUNDLE];
 const canSubmit = computed(() => props.sources.length > 0 && !submitting.value);
 
 /**
- * 命中预览（POST /blacklist/preview）：告诉用户"这次会有几个文件被跳过"。
- * 为什么用 token：打开抽屉后用户可能连续改选择，慢请求返回晚就会覆盖新结果。
- * 预览失败不阻断压缩（它只是提示），所以这里静默降级为"没有跳过项"。
+ * 预检（POST /compress/preflight）：一次请求同时拿到「黑名单跳过项」与「硬链接统计」。
+ *
+ * 为什么不用 /blacklist/preview：那个端点不含格式信息，而硬链接提示必须知道"当前格式保不保留
+ * 硬链接"（zip 不保留、tar 系保留）。两处都调会为同一个目录多走一遍遍历，抽屉打开会明显变慢。
+ *
+ * 预检失败不阻断压缩（它只是提示）：静默降级成"没有提示"，真正的拦截仍在提交时由同一份预检给出。
  */
 const ui = useUiStore();
 
-async function runPreview() {
+const preflightInfo = ref(null);
+
+async function runPreflight() {
   const token = previewToken.value + 1;
   previewToken.value = token;
-  if (!blacklistEnabled.value || props.sources.length === 0) {
+  if (props.sources.length === 0) {
+    preflightInfo.value = null;
     skipInfo.value = { count: 0, patterns: [], layers: [] };
     return;
   }
   try {
-    const previewDoc = await api.post('/blacklist/preview', {
-      paths: props.sources.map((source) => source.path),
-      extraPatterns: [],
+    const doc = await api.post('/compress/preflight', {
+      sources: props.sources.map((source) => source.path),
+      format: formatId.value,
+      mode: mode.value,
       rootId: props.rootId,
+      options: { blacklist: { enabled: blacklistEnabled.value } },
     });
     if (token !== previewToken.value) return; // 已有更新的请求，丢弃旧结果
-    const skipped = (previewDoc && previewDoc.skipped) || [];
+    preflightInfo.value = doc || null;
+    const skipped = (doc && doc.skipped) || [];
     skipInfo.value = {
       count: skipped.length,
       patterns: [...new Set(skipped.map((item) => item.pattern))],
       layers: [...new Set(skipped.map((item) => item.layer))],
     };
   } catch {
-    if (token === previewToken.value) skipInfo.value = { count: 0, patterns: [], layers: [] };
+    if (token === previewToken.value) {
+      preflightInfo.value = null;
+      skipInfo.value = { count: 0, patterns: [], layers: [] };
+    }
   }
 }
+
+/**
+ * 硬链接提示：只在"真有硬链接"时出现，且**随格式变化**。
+ * - 当前格式不保留硬链接（zip）：达到阈值才提示，说明会多存多少、换 TAR 能省多少
+ * - 当前格式保留硬链接（tar 系）：给正向说明，避免"切了 tar 还提示 ZIP 会翻倍"的自相矛盾
+ */
+const hardlinkHint = computed(() => {
+  const hardlinks = preflightInfo.value && preflightInfo.value.hardlinks;
+  if (!hardlinks || !hardlinks.groups) return null;
+  if (hardlinks.preservedByFormat) {
+    return {
+      tone: 'ok',
+      groups: hardlinks.groups,
+      files: hardlinks.files,
+      savedText: hardlinks.duplicateBytes > 0 ? formatBytes(hardlinks.duplicateBytes) : null,
+    };
+  }
+  if (!hardlinks.hint) return null;
+  return {
+    tone: 'info',
+    groups: hardlinks.groups,
+    files: hardlinks.files,
+    estimatedText: formatBytes(hardlinks.estimatedBytes),
+    tarEstimatedText: formatBytes(Math.max(0, hardlinks.logicalBytes - hardlinks.duplicateBytes)),
+    savedText: formatBytes(hardlinks.duplicateBytes),
+  };
+});
 
 // 打开时拉一次格式列表（可用性由服务端判定，前端不猜）+ 跑一次命中预览
 watch(
@@ -82,13 +122,15 @@ watch(
     } catch (error) {
       errorText.value = `[${error.code || 'ERROR'}] ${error.message}`;
     }
-    await runPreview();
+    await runPreflight();
   },
 );
 
-// 选择变化/开关切换 → 重算提示（关掉黑名单时提示必须消失，否则会误导）
-watch(() => props.sources, () => { void runPreview(); });
-watch(blacklistEnabled, () => { void runPreview(); });
+// 选择变化/开关切换/换格式 → 重算提示（关掉黑名单时提示必须消失，否则会误导；
+// 换格式时硬链接提示必须跟着变，否则会出现"选了 tar 还提示 ZIP 会翻倍"）
+watch(() => props.sources, () => { void runPreflight(); });
+watch(blacklistEnabled, () => { void runPreflight(); });
+watch(formatId, () => { void runPreflight(); });
 
 async function submit() {
   if (!canSubmit.value) return;
@@ -150,6 +192,24 @@ async function submit() {
           </label>
         </fieldset>
 
+        <!--
+          硬链接提示：纯信息条，不阻断操作（用户可以忽略继续压缩）。
+          位置放在格式选择之后：用户刚换完格式，这里正好回答"我这个格式会多存多少"。
+        -->
+        <p
+          v-if="hardlinkHint"
+          class="drawer__hardlink-hint"
+          :class="`drawer__hardlink-hint--${hardlinkHint.tone}`"
+          data-testid="hardlink-hint"
+        >
+          <template v-if="hardlinkHint.tone === 'ok'">
+            已检测到 <b>{{ hardlinkHint.groups }}</b> 组硬链接（共 <b>{{ hardlinkHint.files }}</b> 个文件）：当前格式会保留硬链接，同一份数据只存一份<template v-if="hardlinkHint.savedText">，比各存一份省 <b>{{ hardlinkHint.savedText }}</b></template>。
+          </template>
+          <template v-else>
+            检测到 <b>{{ hardlinkHint.groups }}</b> 组硬链接（共 <b>{{ hardlinkHint.files }}</b> 个文件）：<b>{{ formatId.toUpperCase() }}</b> 不支持硬链接，同一份数据会各存一份，预计产出 <b>{{ hardlinkHint.estimatedText }}</b>；改用 TAR 只存一份，约 <b>{{ hardlinkHint.tarEstimatedText }}</b>（省 <b>{{ hardlinkHint.savedText }}</b>）。
+          </template>
+        </p>
+
         <fieldset class="field">
           <legend>压缩方式</legend>
           <label v-for="value in modeOptions" :key="value" class="field__option">
@@ -161,14 +221,14 @@ async function submit() {
 
         <label class="field__option">
           <input v-model="keepOriginal" type="checkbox" data-testid="keep-original" />
-          <span>保留原文件（推荐；不勾选则在**校验通过后**按 delete.mode 处理）</span>
+          <span>保留原文件（推荐；不勾选则在<b>校验通过后</b>按 delete.mode 处理）</span>
         </label>
 
         <fieldset class="field">
           <legend>黑名单</legend>
           <label class="field__option">
             <input v-model="blacklistEnabled" type="checkbox" data-testid="blacklist-enabled" />
-            <span>启用黑名单（跳过已压缩格式，如 jpg/mp4/zip/docx）</span>
+            <span>启用黑名单（跳过系统垃圾与你自定义规则命中的文件）</span>
           </label>
           <!-- 全局层的开关不落盘：这是安全默认，必须让用户知道，别以为是 bug -->
           <p class="field__hint">
@@ -180,7 +240,7 @@ async function submit() {
             data-testid="blacklist-skip-hint"
             :title="`命中规则：${skipInfo.patterns.join('、')}（层：${skipInfo.layers.join('、')}）`"
           >
-            <span class="badge">{{ skipInfo.count }} 个文件已跳过（已压缩格式）</span>
+            <span class="badge">{{ skipInfo.count }} 个文件已跳过（命中黑名单规则）</span>
             这些文件不会进压缩包，也不会被「删除原文件」删掉。
           </p>
         </fieldset>

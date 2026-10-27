@@ -13,6 +13,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { RouterLink, useRouter } from 'vue-router';
 
 import Icon from '../common/Icon.vue';
+import { useSessionStore } from '../../stores/session.js';
 import { useUiStore } from '../../stores/ui.js';
 import { FORMATS, ROUTES } from '../../constants/index.js';
 import { api } from '../../api/client.js';
@@ -29,6 +30,7 @@ const navItems = [
 
 // 触屏抽屉的开关状态与 TopBar 共用同一个 store（避免两处各自维护 open 状态）
 const ui = useUiStore();
+const session = useSessionStore();
 const router = useRouter();
 
 // ===== 存储根（docs/16）：数据源由后端按平台决定（B 列卷 / C 列共享），前端只负责渲染 =====
@@ -40,33 +42,45 @@ const rootsError = ref('');
 const rootsTitle = computed(() => (rootsMode.value === 'C' ? '位置' : '存储卷'));
 
 let rootsRetry = 0;
+
+/** 把 /fs/volumes 的结果落到状态里，并把"当前根"收敛到列表内的某一项 */
+function applyRootsPayload(payload) {
+  rootsRetry = 0;
+  roots.value = (payload && payload.roots) || [];
+  rootsMode.value = (payload && payload.mode) || '';
+  // 存进 store：主区面包屑与压缩抽屉要显示"当前在哪个位置"，不能只靠侧栏自己知道
+  ui.setRoots(roots.value);
+  // 当前根不在列表里（如默认根在 C 模式下被隐藏）→ 落到第一个可用项，避免"切了根但列表全不亮"
+  if (!roots.value.some((root) => root.id === ui.currentRootId) && roots.value.length > 0) {
+    ui.setCurrentRoot(roots.value[0].id);
+  }
+}
+
+/**
+ * 失败处理：登录瞬间的 AUTH_REQUIRED 是竞态（token 还没落到 store），不是真错误，
+ * 有限重试几次；其它错误（或重试用尽）记录原因并**照样放行**（文件页按默认根加载 + 显示提示，好过白屏）。
+ * @returns {boolean} true 表示已安排重试（调用方不要再往下走）
+ */
+function handleLoadFailure(error) {
+  if (error.code === 'AUTH_REQUIRED' && rootsRetry < 5) {
+    rootsRetry += 1;
+    rootsError.value = '';
+    window.setTimeout(() => { void loadRoots(); }, 600);
+    return true;
+  }
+  rootsError.value = `[${error.code || 'ERROR'}] ${error.message}`;
+  ui.setRootsResolved({ roots: roots.value, rootId: ui.currentRootId, error: rootsError.value });
+  return false;
+}
+
 async function loadRoots() {
   try {
-    const payload = await api.get('/fs/volumes');
-    rootsRetry = 0;
-    roots.value = (payload && payload.roots) || [];
-    rootsMode.value = (payload && payload.mode) || '';
-    // 存进 store：主区面包屑与压缩抽屉要显示"当前在哪个位置"，不能只靠侧栏自己知道
-    ui.setRoots(roots.value);
-    // 当前根不在列表里（如默认根在 C 模式下被隐藏）→ 落到第一个可用项，避免"切了根但列表全不亮"
-    if (!roots.value.some((root) => root.id === ui.currentRootId) && roots.value.length > 0) {
-      ui.setCurrentRoot(roots.value[0].id);
-    }
+    applyRootsPayload(await api.get('/fs/volumes'));
     const readable = await ensureReadableRoot();
     // 放行文件页首屏：探测结果（含"全不可读"）必须写进 store，否则页面会一直等
     ui.setRootsResolved({ roots: roots.value, mode: rootsMode.value, rootId: readable || ui.currentRootId, error: '' });
   } catch (error) {
-    // 登录瞬间的 AUTH_REQUIRED 是竞态（token 还没落到 store），不是真错误：
-    // 有限重试几次，避免侧栏永久停在"需要登录"（实测踩过）。
-    if (error.code === 'AUTH_REQUIRED' && rootsRetry < 5) {
-      rootsRetry += 1;
-      rootsError.value = '';
-      window.setTimeout(() => { void loadRoots(); }, 600);
-      return;
-    }
-    rootsError.value = `[${error.code || 'ERROR'}] ${error.message}`;
-    // 失败也要放行（带原因）：文件页按默认根加载并显示提示，好过白屏
-    ui.setRootsResolved({ roots: roots.value, rootId: ui.currentRootId, error: rootsError.value });
+    handleLoadFailure(error);
   }
 }
 
@@ -119,6 +133,16 @@ onMounted(loadRoots);
 // 登录前就挂着侧栏时，首次 /fs/volumes 会 401（且之后不会自动重试）。
 // 路由变化实际等价于"用户已进入应用"，这时重拉一次即可；另外登录后停留原页也会有 route 变化。
 watch(() => ui.route, () => { void loadRoots(); });
+
+// 登录成功后必须重拉一次：页面可能先于登录挂载，首次 /fs/volumes 拿到 AUTH_REQUIRED，
+// 而重试窗口只有几秒 —— 用户在登录页停留久一点，侧栏就会一直停在"需要登录"（实测踩过）。
+// 这里以"登录态变成已认证"为触发点，与停留时长无关。
+watch(() => session.authenticated, (authenticated) => {
+  if (!authenticated) return;
+  rootsRetry = 0;
+  rootsError.value = '';
+  void loadRoots();
+});
 </script>
 
 <template>

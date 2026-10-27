@@ -1304,6 +1304,31 @@
   color: var(--color-text-muted);
 }
 
+.drawer__hardlink-hint {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid color-mix(in srgb, var(--color-primary) 32%, var(--color-border));
+  border-left: 3px solid var(--color-primary);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-primary) 8%, var(--color-surface));
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  line-height: 1.55;
+  /* 长数字/长路径允许在任意位置断开：窄视口下不能把抽屉撑破 */
+  overflow-wrap: anywhere;
+}
+
+.drawer__hardlink-hint b {
+  font-weight: 600;
+}
+
+/* 正向说明（当前格式保留硬链接）：绿色语义，不用警告色 */
+.drawer__hardlink-hint--ok {
+  border-color: color-mix(in srgb, var(--color-ok) 32%, var(--color-border));
+  border-left-color: var(--color-ok);
+  background: color-mix(in srgb, var(--color-ok) 8%, var(--color-surface));
+}
+
 .field__hint {
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);

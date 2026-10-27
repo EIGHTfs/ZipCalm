@@ -13,14 +13,26 @@ import path from 'node:path';
 
 /**
  * 列出 absPath 下的普通文件（absPath 本身就是文件时返回它自己）。
+ *
+ * `dev` / `ino` 一并返回：硬链接判定（同 dev 且同 ino 才是硬链接）与压缩格式的产出估算
+ * 都要用，而它们本来就在这次 lstat 结果里 —— 不额外多一次 syscall。
+ *
  * @param {string} absPath
- * @returns {Promise<Array<{absPath: string, name: string, relative: string, segments: string[]}>>}
+ * @returns {Promise<Array<{absPath: string, name: string, relative: string, segments: string[], size: number, dev: number|null, ino: number|null}>>}
  */
 export async function collectFilesUnder(absPath) {
   const stat = await fsp.lstat(absPath).catch(() => null);
   if (!stat) return [];
   if (stat.isFile()) {
-    return [{ absPath, name: path.basename(absPath), relative: '', segments: [], size: stat.size }];
+    return [{
+      absPath,
+      name: path.basename(absPath),
+      relative: '',
+      segments: [],
+      size: stat.size,
+      dev: Number.isFinite(stat.dev) ? stat.dev : null,
+      ino: Number.isFinite(stat.ino) ? stat.ino : null,
+    }];
   }
   if (!stat.isDirectory()) return []; // 符号链接/设备文件：不进包，也不参与黑名单判定
 
@@ -44,17 +56,29 @@ async function walkDir(dirAbs, relativePrefix, out) {
       await walkDir(childAbs, relative, out);
       continue;
     }
-    if (!dirent.isFile()) continue; // 符号链接等一律不跟随、不进包
-    // size 走 lstat（dirent 不带大小）：预检要按"被跳过文件的字节数"扣减待压量
-    const fileStat = await fsp.lstat(childAbs).catch(() => null);
-    if (!fileStat || !fileStat.isFile()) continue;
-    out.push({
-      absPath: childAbs,
-      name: dirent.name,
-      size: fileStat.size,
-      relative,
-      // 路径段用于"目录名规则"（如 @eaDir）：既包含中间目录，也包含文件名本身
-      segments: relative.split('/'),
-    });
+    const entry = await fileEntryOf(childAbs, dirent, relative);
+    if (entry) out.push(entry);
   }
+}
+
+/**
+ * 单个非目录条目 → 待压文件记录（不是普通文件则返回 null）。
+ * 抽出来是为了让 walkDir 只负责递归与分流（圈复杂度压在阈值内）。
+ */
+async function fileEntryOf(childAbs, dirent, relative) {
+  if (!dirent.isFile()) return null; // 符号链接等一律不跟随、不进包
+  // size 走 lstat（dirent 不带大小）：预检要按"被跳过文件的字节数"扣减待压量
+  const fileStat = await fsp.lstat(childAbs).catch(() => null);
+  if (!fileStat || !fileStat.isFile()) return null;
+  return {
+    absPath: childAbs,
+    name: dirent.name,
+    size: fileStat.size,
+    // 同一份数据被多个路径指向（硬链接）时，这三个字段让上层能识别出"其实是同一份"
+    dev: Number.isFinite(fileStat.dev) ? fileStat.dev : null,
+    ino: Number.isFinite(fileStat.ino) ? fileStat.ino : null,
+    relative,
+    // 路径段用于"目录名规则"（如 @eaDir）：既包含中间目录，也包含文件名本身
+    segments: relative.split('/'),
+  };
 }
