@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}" || exit 1
 
-WANT="${*:-build m1 m2 m3 crash probes retention m4 m6 m7 m8fs hlscan hlexec volumes multiroot hlhint rar}"
+WANT="${*:-build m1 m2 m3 crash probes retention m4 m6 m7 m8fs hlscan hlexec volumes multiroot hlhint rar sevenzip}"
 
 # 测试卫生：把删除后端固定到项目 storage/trash（进程级覆盖，不改用户 config）。
 # 为什么必须：本项目目录就在共享内，auto 后端会把测试删除送进用户的 #recycle，
@@ -89,6 +89,8 @@ if has hlscan; then run_one hlscan node "${SCRIPT_DIR}/test-hardlink-scan.mjs"; 
 if has hlhint; then run_one hlhint node "${SCRIPT_DIR}/test-hardlink-hint.mjs"; fi
 # RAR 只读解压插件（docs/18 §①）：契约/三态错误/解压行为/条目安全
 if has rar; then run_one rar node "${SCRIPT_DIR}/test-rar.mjs"; fi
+# 7z 双向格式（docs/18）：引擎回退链 / 压缩级别 / 加密三态 / 条目安全 / API 端到端
+if has sevenzip; then run_one sevenzip node "${SCRIPT_DIR}/test-sevenzip.mjs"; fi
 # 硬链接去重·执行：rename→link→unlink 三步替换 + link 失败回滚 + 执行前全量复核 + 日志
 if has hlexec; then run_one hlexec node "${SCRIPT_DIR}/test-hardlink-execute.mjs"; fi
 
