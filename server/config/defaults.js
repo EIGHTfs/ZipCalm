@@ -140,6 +140,9 @@ export const ENV_OVERRIDES = {
   ZIPCALM_PORT: ['server', 'port'],
   ZIPCALM_STORAGE_ROOT: ['storage', 'root'],
   ZIPCALM_DATA_DIR: ['storage', 'dataDir'],
+  // CLI（npx 安装形态）需要把回收站与日志也指到用户数据目录，否则它们会落在包目录里
+  ZIPCALM_TRASH_DIR: ['storage', 'trashDir'],
+  ZIPCALM_LOG_DIR: ['storage', 'logDir'],
   ZIPCALM_LOG_LEVEL: ['log', 'level'],
   ZIPCALM_USERNAME: ['auth', 'username'],
   ZIPCALM_PASSWORD: ['auth', 'password'],

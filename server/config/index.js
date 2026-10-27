@@ -77,7 +77,13 @@ export async function loadConfig(options = {}) {
   }
 
   // 3) <dataDir>/config.json（dataDir 可能被上面引导文件改过，所以放在后面读）
-  const dataDir = path.resolve(projectRoot, config.storage.dataDir);
+  //    注意：**必须先把 ZIPCALM_DATA_DIR 考虑进来** —— 否则 `ZIPCALM_DATA_DIR` 指到别处时，
+  //    这里仍在项目根下找 config.json，用户数据目录里那份永远读不到（npm 包形态就是这种情况：
+  //    包目录里没有 config.json，配置在 ~/.zipcalm/config.json）。
+  const envDataDir = typeof env.ZIPCALM_DATA_DIR === 'string' && env.ZIPCALM_DATA_DIR.length > 0
+    ? env.ZIPCALM_DATA_DIR
+    : null;
+  const dataDir = path.resolve(projectRoot, envDataDir || config.storage.dataDir);
   const runtimeConfigPath = path.join(dataDir, 'config.json');
   const runtimeConfig = await readJson(runtimeConfigPath, null);
   if (runtimeConfig.ok && runtimeConfig.data) {

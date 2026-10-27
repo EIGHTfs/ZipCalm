@@ -2,17 +2,17 @@
 
 > 一个跑在 NAS 上的 Node.js 网页服务端：浏览文件目录、选择文件/文件夹压缩（多算法多格式）、按类型去重（硬链接）、带性能监控看板。
 >
-> 当前状态：**M0~M8 已完成 + 硬链接去重已上线 + 硬链接预检提示**（版本 `0.14.0`），19 套验收全绿。手机端 PWA（M9）待做。
+> 当前状态：**M0~M8 已完成 + 硬链接去重已上线 + 硬链接预检提示**（版本 `1.0.0`），19 套验收全绿。手机端 PWA（M9）待做。
 
 ## 界面预览
 
 **硬链接预检提示** —— 选 ZIP 压含硬链接的目录时，直接算出「各存一份会多花多少」，并建议改 TAR：
 
-![硬链接预检：ZIP 会各存一份](docs/images/hl-hint-zip-desktop.jpg)
+![硬链接预检：ZIP 会各存一份](https://raw.githubusercontent.com/EIGHTfs/ZipCalm/main/docs/images/hl-hint-zip-desktop.jpg)
 
 切到 TAR 后提示自动变成正向说明（同一份数据只存一份、省多少空间），不会出现「选了 TAR 还提示 ZIP 翻倍」这类自相矛盾：
 
-![硬链接预检：TAR 保留硬链接](docs/images/hl-hint-tar-desktop.jpg)
+![硬链接预检：TAR 保留硬链接](https://raw.githubusercontent.com/EIGHTfs/ZipCalm/main/docs/images/hl-hint-tar-desktop.jpg)
 
 **窄视口（390×844）** —— 提示条换行不溢出，主操作按钮仍在视口内：
 
@@ -20,9 +20,27 @@
 
 **加密压缩包解压** —— 打开加密包时自动识别并弹出密码框；密码错、缺密码、包损坏三种情况分别给不同提示，不会一律报「文件损坏」：
 
-![解压加密包时自动显示密码框](docs/images/extract-password-dialog.jpg)
+![解压加密包时自动显示密码框](https://raw.githubusercontent.com/EIGHTfs/ZipCalm/main/docs/images/extract-password-dialog.jpg)
 
 ## 快速开始
+
+### 方式一：npm 安装（任意机器，无需源码）
+
+```bash
+npx zipcalm                 # 直接跑，默认端口 3010、数据在 ~/.zipcalm
+npm i -g zipcalm            # 或全局安装，之后直接 zipcalm
+
+zipcalm --port 8080         # 换端口
+zipcalm --data-dir ~/mydata # 换数据目录（任务状态/日志/回收站都在这里）
+zipcalm --help              # 全部参数
+```
+
+- **数据默认放在 `~/.zipcalm`**（不在包目录里，升级/重装不丢数据）：含 `config.json`、`fs-root`（可浏览的默认存储根）、`trash`（回收站）、`logs`、`tasks.json`
+- **首次运行会自动生成随机管理员密码并打印一次**（用户名 `admin`）；也可以用 `ZIPCALM_PASSWORD=xxx zipcalm` 自己指定，或编辑 `~/.zipcalm/config.json`
+- **没有系统 `unrar` / `7z` 也能用**：RAR 走 `node-unrar-js`、7z 走 `js7z-tools`（都是 npm 依赖里的 WASM 引擎，随包安装）
+- 需要 Node **≥ 22.15**
+
+### 方式二：从源码（NAS 部署 / 开发）
 
 **访问**（局域网，需先启动服务）：
 
@@ -65,29 +83,29 @@ bash scripts/start.sh restart   # 重启（已在跑时改配置用这个）
 
 | 文档 | 内容 |
 |---|---|
-| [docs/00-需求演进与设计决策.md](docs/00-需求演进与设计决策.md) | 需求演进轨迹：每个阶段的诉求 → 采纳的方案 → 为什么，以及贯穿全程的三条原则 |
-| [docs/01-需求与总体架构.md](docs/01-需求与总体架构.md) | 原始需求、决定架构的三个问题、必须想清楚的决策 |
-| [docs/02-压缩格式与库选型.md](docs/02-压缩格式与库选型.md) | zip/tar/tar.gz/tar.zst 的库选型、库 vs 二进制、zstd 方案（Node 内置） |
-| [docs/03-插件化架构与格式契约.md](docs/03-插件化架构与格式契约.md) | 每个格式一个格式包、插件契约、总入口职责边界 |
-| [docs/04-压缩模式与黑名单.md](docs/04-压缩模式与黑名单.md) | 单独压缩/打包为一个、三层黑名单、智能跳过 |
-| [docs/05-任务系统与进度推送.md](docs/05-任务系统与进度推送.md) | 后台任务、进度连续性、SSE 推送、状态落盘 |
-| [docs/06-删除原文件与磁盘预检.md](docs/06-删除原文件与磁盘预检.md) | 先压→校验→再删、回收站、两倍空间预检 |
-| [docs/07-性能监控看板.md](docs/07-性能监控看板.md) | 指标采集分层、采集频率、六个卡片 |
-| [docs/08-前端布局设计.md](docs/08-前端布局设计.md) | 网盘式骨架、鼠标优先、触屏最小兼容、右键菜单 |
-| [docs/09-API契约与APK铺路.md](docs/09-API契约与APK铺路.md) | API 规范、双认证、UUID、SSE、Range、错误码 |
-| [docs/10-开源项目参考.md](docs/10-开源项目参考.md) | 9 个已克隆项目的可抄代码清单（文件:行号）+ 路径安全实现对比 |
-| [docs/11-开发里程碑与验收标准.md](docs/11-开发里程碑与验收标准.md) | M0~M9 分步计划与逐条验收标准 |
-| [docs/12-项目目录结构.md](docs/12-项目目录结构.md) | server/web/shared/docs/scripts/test 全目录设计 |
-| [docs/M0/](docs/M0/README.md) | **M0 契约冻结（v1）**：API 规范 / 插件契约 / 数据模型 / 不变量清单 + 验收结论与拍板记录 |
-| [docs/13-工期估算与模型分工.md](docs/13-工期估算与模型分工.md) | 工期估算（基于实测吞吐外推）+ 各阶段模型分工方案（主力 / 辅助） |
-| [docs/14-工程执行约定.md](docs/14-工程执行约定.md) | 执行层约定：每任务收尾固定做「审计 + 顺手优化 / 全套验收 / 停服务 / 汇报」、契约优先、写入范围、常用命令、踩过的坑 |
-| [docs/15-硬链接去重.md](docs/15-硬链接去重.md) | 硬链接去重：需求 + 评审结论（抽样哈希不可判定重复 / 复用路径白名单 / 替换顺序须崩溃可恢复）+ 实现规格 |
-| [docs/16-侧栏与根目录设计.md](docs/16-侧栏与根目录设计.md) | 侧栏「根」的设计：按系统自动选模式（群晖列共享文件夹 / 其他列卷），含多根配置、`fs/volumes` 端点与验收标准 |
-| [docs/17-设计与实现差异记录.md](docs/17-设计与实现差异记录.md) | 设计文档与代码实现的偏离登记：保留「设计意图 vs 实际实现」对照，便于回溯 |
-| [docs/19-压缩密码与能力插件设计.md](docs/19-压缩密码与能力插件设计.md) | 压缩密码的架构设计：能力插件三层契约、架构图、PW-1~4 安全约束、P1~P4 分阶段 |
-| [docs/18-待办功能排期.md](docs/18-待办功能排期.md) | 功能排期与完成状态（7z/rar 待做；压缩包密码、硬链接预检提示已完成） |
-| [docs/research/mt-apk-reverse-01-侦察与保护.md](docs/research/mt-apk-reverse-01-侦察与保护.md) | MT 管理器 APK 逆向（v2.26.10，共 4 册）：① 侦察与保护 ② 压缩实现 ③ SMB 与远程路径 ④ 借鉴与结论。**插件路线不可行的双重证据**在第 3、4 册 |
-| [docs/audit/M5-审查与修复.md](docs/audit/M5-审查与修复.md) | 删除链路的对抗式审查结论：10 个真问题 + 7 处契约漂移 + 9 项修复方案 + 复验门禁 |
+| [docs/00-需求演进与设计决策.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/00-需求演进与设计决策.md) | 需求演进轨迹：每个阶段的诉求 → 采纳的方案 → 为什么，以及贯穿全程的三条原则 |
+| [docs/01-需求与总体架构.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/01-需求与总体架构.md) | 原始需求、决定架构的三个问题、必须想清楚的决策 |
+| [docs/02-压缩格式与库选型.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/02-压缩格式与库选型.md) | zip/tar/tar.gz/tar.zst 的库选型、库 vs 二进制、zstd 方案（Node 内置） |
+| [docs/03-插件化架构与格式契约.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/03-插件化架构与格式契约.md) | 每个格式一个格式包、插件契约、总入口职责边界 |
+| [docs/04-压缩模式与黑名单.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/04-压缩模式与黑名单.md) | 单独压缩/打包为一个、三层黑名单、智能跳过 |
+| [docs/05-任务系统与进度推送.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/05-任务系统与进度推送.md) | 后台任务、进度连续性、SSE 推送、状态落盘 |
+| [docs/06-删除原文件与磁盘预检.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/06-删除原文件与磁盘预检.md) | 先压→校验→再删、回收站、两倍空间预检 |
+| [docs/07-性能监控看板.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/07-性能监控看板.md) | 指标采集分层、采集频率、六个卡片 |
+| [docs/08-前端布局设计.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/08-前端布局设计.md) | 网盘式骨架、鼠标优先、触屏最小兼容、右键菜单 |
+| [docs/09-API契约与APK铺路.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/09-API契约与APK铺路.md) | API 规范、双认证、UUID、SSE、Range、错误码 |
+| [docs/10-开源项目参考.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/10-开源项目参考.md) | 9 个已克隆项目的可抄代码清单（文件:行号）+ 路径安全实现对比 |
+| [docs/11-开发里程碑与验收标准.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/11-开发里程碑与验收标准.md) | M0~M9 分步计划与逐条验收标准 |
+| [docs/12-项目目录结构.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/12-项目目录结构.md) | server/web/shared/docs/scripts/test 全目录设计 |
+| [docs/M0/](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/M0/README.md) | **M0 契约冻结（v1）**：API 规范 / 插件契约 / 数据模型 / 不变量清单 + 验收结论与拍板记录 |
+| [docs/13-工期估算与模型分工.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/13-工期估算与模型分工.md) | 工期估算（基于实测吞吐外推）+ 各阶段模型分工方案（主力 / 辅助） |
+| [docs/14-工程执行约定.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/14-工程执行约定.md) | 执行层约定：每任务收尾固定做「审计 + 顺手优化 / 全套验收 / 停服务 / 汇报」、契约优先、写入范围、常用命令、踩过的坑 |
+| [docs/15-硬链接去重.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/15-硬链接去重.md) | 硬链接去重：需求 + 评审结论（抽样哈希不可判定重复 / 复用路径白名单 / 替换顺序须崩溃可恢复）+ 实现规格 |
+| [docs/16-侧栏与根目录设计.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/16-侧栏与根目录设计.md) | 侧栏「根」的设计：按系统自动选模式（群晖列共享文件夹 / 其他列卷），含多根配置、`fs/volumes` 端点与验收标准 |
+| [docs/17-设计与实现差异记录.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/17-设计与实现差异记录.md) | 设计文档与代码实现的偏离登记：保留「设计意图 vs 实际实现」对照，便于回溯 |
+| [docs/19-压缩密码与能力插件设计.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/19-压缩密码与能力插件设计.md) | 压缩密码的架构设计：能力插件三层契约、架构图、PW-1~4 安全约束、P1~P4 分阶段 |
+| [docs/18-待办功能排期.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/18-待办功能排期.md) | 功能排期与完成状态（7z/rar 待做；压缩包密码、硬链接预检提示已完成） |
+| [docs/research/mt-apk-reverse-01-侦察与保护.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/research/mt-apk-reverse-01-侦察与保护.md) | MT 管理器 APK 逆向（v2.26.10，共 4 册）：① 侦察与保护 ② 压缩实现 ③ SMB 与远程路径 ④ 借鉴与结论。**插件路线不可行的双重证据**在第 3、4 册 |
+| [docs/audit/M5-审查与修复.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/audit/M5-审查与修复.md) | 删除链路的对抗式审查结论：10 个真问题 + 7 处契约漂移 + 9 项修复方案 + 复验门禁 |
 
 ## 当前进展
 
@@ -145,6 +163,7 @@ bash scripts/start.sh restart   # 重启（已在跑时改配置用这个）
 
 | 版本 | 里程碑 | 内容 |
 |---|---|---|
+| **1.0.0** | **npm 首发** | 可 `npx zipcalm` / `npm i -g zipcalm` 运行：新增 CLI（`bin/zipcalm.js`，只做参数→环境变量翻译）、`files` 白名单（只带 `bin/ server/ shared/ web/dist/ README LICENSE`，不含 docs）、首次运行自动生成随机口令配置；数据默认落 `~/.zipcalm`（含 fs-root/trash/logs/tasks.json），**从 git 仓库启动的行为一字未变**（数据仍在 `<项目根>/storage`）。README 里 29 处相对文档/图片链接改为绝对地址（npm 上才不 404） |
 | 0.14.0 | 乱码名还原 | 解压时自动还原 PUA 转义的乱码文件名（共享阶段，zip/tar/7z/rar 通用）；新增 `POST /fs/repair-names` 与 CLI 修复已解压目录（dryRun 默认、绝不覆盖、四类计数）；RAR 引擎强制 `en_US.UTF-8`（默认 locale / C.UTF-8 会输出有损 `?`）；实测六款 RAR 解包库，结论是不换库、只做解码 |
 | 0.13.0 | RAR 双引擎 | RAR 解压引擎改为三级回退（系统 `unrar` → `node-unrar-js@2.0.2` 纯 JS 兜底 → 置灰），新增 `ZC_UNRAR_ENGINE=native\|js` 与 `probe().filenameSafe`。**实测澄清了根因**：RAR5 中文名乱码是 unrar 版本 bug（5.70 坏 / 7.23 好），而 js 引擎内置的 6.1.7 **同样坏** → 换引擎修不了文件名，因此**有原生 unrar 时仍优先原生**（它还能正确报损坏包，js 会静默部分解出）。版本判 minor：新增引擎与依赖、影响部署面（没装 unrar 的机器从"不可用"变"可用"） |
 | 0.12.1 | 7z 双引擎 | 接入回退② **WASM 引擎 `js7z-tools@2.5.0`（7-Zip 25.01）**：没装 p7zip 的机器也能压缩/解压 7z，产物与原生引擎**双向兼容**（同输入同尺寸、互解互验通过）。实现要点：每次操作独立子进程、严格等 `onExit`（MT 异步语义）再读产物；`ZC_7Z_DISABLE_WASM=1` 可关；单任务输入 >2 GB 提前拒绝并建议 tar.zst；CPU 默认绑「总核数 − 1」+ `nice` + 全局串行（这是本机 CPU 过载 503 事故的直接修复）。版本判 patch：对外仍是"7z 双向"，变的是引擎覆盖范围 |
@@ -201,15 +220,15 @@ bash scripts/start.sh restart   # 重启（已在跑时改配置用这个）
 
 > 本项目**不追求零依赖**。取舍是「部署可靠 + 开发效率优先」：所有依赖均为纯 JS 或 Node 内置（zstd 走 `node:zlib`），无原生编译，NAS 上无需构建工具链。
 > 运行时要求：**Node ≥ 22.15**（zstd 内置 API 自 v22.15.0 起提供；`fs.statfs` 自 v18.15 起）。
-> 目录与框架约定见 [docs/12-项目目录结构.md](docs/12-项目目录结构.md) 第三节。
+> 目录与框架约定见 [docs/12-项目目录结构.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/12-项目目录结构.md) 第三节。
 
 ## 设计来源
 
-本项目的设计文档体系由需求演进逐步沉淀而成，需求与决策的来龙去脉见 [docs/00-需求演进与设计决策.md](docs/00-需求演进与设计决策.md)。
+本项目的设计文档体系由需求演进逐步沉淀而成，需求与决策的来龙去脉见 [docs/00-需求演进与设计决策.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/00-需求演进与设计决策.md)。
 
 ## 参考项目（第三方代码快照）
 
-`参考项目/` 下是 10 个第三方开源项目的本地代码（9 个 git 克隆 + 1 个从 npm tarball 解压），用于精读可抄代码（见 [docs/10](docs/10-开源项目参考.md)）：
+`参考项目/` 下是 10 个第三方开源项目的本地代码（9 个 git 克隆 + 1 个从 npm tarball 解压），用于精读可抄代码（见 [docs/10](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/10-开源项目参考.md)）：
 
 - 它们是**别人的代码**，不属于本项目产物，建议将来建仓时写进 `.gitignore`；
 - 文档中的「文件:行号」绑定各仓库当时的 commit（commit 清单见 docs/10 第〇节），上游更新后行号会漂移；
