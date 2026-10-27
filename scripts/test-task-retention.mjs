@@ -15,7 +15,7 @@ import crypto from 'node:crypto';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
-import { PROJECT_ROOT, execFileAsync, pathExists, taskIdOf } from './helpers/script-env.mjs';
+import { PROJECT_ROOT, execFileAsync, taskIdOf } from './helpers/script-env.mjs';
 import { loadRuntimeConfig } from './helpers/test-config.mjs';
 import { createReporter } from './helpers/test-report.mjs';
 
@@ -45,6 +45,8 @@ const STOP_SETTLE_MS = 400;
 /** 等"第二个任务进入 running"的轮询参数；以及取消任务后的静置 */
 const RUNNING_WAIT_TIMEOUT_MS = 180000;
 const RUNNING_POLL_INTERVAL_MS = 150;
+/** 等"终态积压收敛到阈值内"的上限：只影响偶发滞后，不改变断言语义 */
+const CONVERGE_TIMEOUT_MS = 20000;
 const CANCEL_SETTLE_MS = 500;
 /** 播种的终态任务条数（与阈值 max=3 对比用） */
 const SEED_TASK_COUNT = 6;
@@ -313,25 +315,106 @@ async function createCompressTask(source, outputDir) {
  * 所以：起 A（大任务，跑着）+ B（排队），A 完成会触发一次清理，此刻 B 必须还在 tasks.json 里。
  * 这比"造一堆终态再观察"更贴近真实触发路径。
  */
+/** 任务的终态集合（到了就不会再变，可作为"稳定观察点"） */
+const TERMINAL_STATUSES = ['done', 'failed', 'aborted', 'interrupted'];
+
 /**
- * 轮询直到第二个任务进入 running（那一刻第一个任务已完成 → 触发过一次清理时机）。
- * 超时返回 null（由调用方判失败）。
+ * 轮询直到指定任务"结束"并返回那一刻的快照；超时返回 null。
+ *
+ * 为什么改成等终态：`running`/`queued` 都是瞬时态，用 150ms 轮询去撞一个毫秒级的窗口
+ * 必然时灵时不灵（历史现象：同代码约一半概率失败）。终态一到位就不再变，是确定性事件。
+ *
+ * 注意：`done` 完成任务**会被移出 tasks.json**（只保留 failed/interrupted 这类可重试终态），
+ * 所以"从文件里消失"同样算结束信号 —— 但必须先见过它一次，否则会把"刚落盘还没读到"误判成已完成。
  */
-async function waitForSecondRunning(secondId, timeoutMs = RUNNING_WAIT_TIMEOUT_MS) {
+async function waitForTaskTerminal(taskId, timeoutMs = RUNNING_WAIT_TIMEOUT_MS) {
   const deadline = Date.now() + timeoutMs;
+  let seenOnce = false;
   while (Date.now() < deadline) {
     const snapshot = await countByStatus().catch(() => null);
-    const second = snapshot && snapshot.tasks.find((entry) => entry.info.id === secondId);
-    if (second && second.info.status === 'running') return snapshot;
+    const target = snapshot && snapshot.tasks.find((entry) => entry.info.id === taskId);
+    if (target) {
+      seenOnce = true;
+      if (TERMINAL_STATUSES.includes(target.info.status)) return { snapshot, status: target.info.status };
+    } else if (seenOnce) {
+      // 见过之后又消失 = 已完成并被清理出 tasks.json
+      return { snapshot, status: 'pruned' };
+    }
     await sleep(RUNNING_POLL_INTERVAL_MS);
   }
   return null;
 }
 
-/** 断言"非终态不被清理 + 终态积压仍在阈值内"（两条都基于同一份快照） */
+/**
+ * 造一份"压缩要跑一会儿"的夹具，让第二个任务在 A 完成之后**稳定处于非终态**（而不是毫秒级）。
+ * 内容用哈希链生成（伪随机、不可压缩）；同时把本用例要用的 outputDir 一并建好
+ * （outputDir 指向不存在的目录会被服务端以 PATH_NOT_FOUND 拒掉）。
+ *
+ * @returns {{source: string, outA: string, outB: string, outDel: string}}
+ */
+async function ensureSlowFixture() {
+  const dirAbs = path.join(ROOT, 'm3-test', 'retention-big');
+  const outNames = { outA: 'ret-a', outB: 'ret-b', outDel: 'ret-del' };
+  const targetBytes = 4 * 1024 * 1024;
+  const existing = await fsp.stat(path.join(dirAbs, 'blob.bin')).then((stat) => stat.size, () => 0);
+  if (existing < targetBytes) {
+    await fsp.mkdir(dirAbs, { recursive: true });
+    let seed = Buffer.from('zipcalm-retention-fixture');
+    const handle = await fsp.open(path.join(dirAbs, 'blob.bin'), 'w');
+    try {
+      let written = 0;
+      while (written < targetBytes) {
+        seed = crypto.createHash('sha512').update(seed).digest();
+        const size = Math.min(seed.length, targetBytes - written);
+        await handle.write(seed.subarray(0, size));
+        written += size;
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+  for (const name of Object.values(outNames)) {
+    await fsp.mkdir(path.join(ROOT, 'm3-test', name), { recursive: true });
+  }
+  return {
+    source: '/m3-test/retention-big',
+    outA: `/m3-test/${outNames.outA}`,
+    outB: `/m3-test/${outNames.outB}`,
+    outDel: `/m3-test/${outNames.outDel}`,
+  };
+}
+
+/**
+ * 等到终态积压**收敛**到阈值内（或超时返回最后一份快照）。
+ *
+ * 为什么不单次读数：清理在"任务完成"时触发，落盘与投影可能略晚于最后一个终态的可见时刻，
+ * 单次读数会偶发读到清理前的中间态（历史现象 `after=4 > limit=3`）。
+ * 断言语义仍是"必须收敛"——清理机制真失效时永远不会收敛，依旧 FAIL。
+ *
+ * @returns {{ok: boolean, snapshot: object, elapsedMs: number}}
+ */
+async function waitForFailedConverge(limit, timeoutMs = CONVERGE_TIMEOUT_MS) {
+  const startedAt = Date.now();
+  let snapshot = await countByStatus();
+  while ((snapshot.by.failed || 0) > limit && Date.now() - startedAt < timeoutMs) {
+    await sleep(RUNNING_POLL_INTERVAL_MS);
+    snapshot = await countByStatus();
+  }
+  return { ok: (snapshot.by.failed || 0) <= limit, snapshot, elapsedMs: Date.now() - startedAt };
+}
+
+/**
+ * 断言"非终态不被清理 + 终态积压仍在阈值内"（两条都基于**A 刚完成时**的那份快照）。
+ *
+ * 两条不变量分别对应：
+ *   1. 契约 §六 规则 7：清理只删终态 → B（此刻 queued/running）必须在 tasks.json 里
+ *   2. 清理同时把终态积压压在阈值内 → failed 条数 ≤ 3
+ */
 function checkNonTerminalKept(observed, secondId) {
-  const stillThere = observed.tasks.some((entry) => entry.info.id === secondId && entry.info.status === 'running');
-  check('非终态任务（running）在清理后仍在 tasks.json 中', stillThere, `failed=${observed.by.failed || 0} 总条数=${observed.total}`);
+  const second = observed.tasks.find((entry) => entry.info.id === secondId);
+  const nonTerminal = Boolean(second) && !TERMINAL_STATUSES.includes(second.info.status);
+  check('非终态任务（queued/running）在清理后仍在 tasks.json 中', nonTerminal,
+    `B 状态=${second ? second.info.status : '不存在'} failed=${observed.by.failed || 0} 总条数=${observed.total}`);
   check('同一时刻终态积压仍被压在阈值内（failed ≤ 3）', (observed.by.failed || 0) <= 3, `failed=${observed.by.failed || 0}`);
 }
 
@@ -347,17 +430,18 @@ async function caseNonTerminalSurvives() {
   const atBoot = await countByStatus();
   check(`启动清理把 ${SEED_TASK_COUNT} 条终态压到 3 条（阈值 max=3）`, (atBoot.by.failed || 0) === 3, `failed=${atBoot.by.failed}`);
 
-  const bigDir = path.join(ROOT, 'm3-test', 'big');
-  const hasBig = await pathExists(bigDir);
-  const source = hasBig ? '/m3-test/big' : '/文档';
-  const outputDir = hasBig ? '/m3-test' : undefined;
-  const firstId = await createCompressTask(source, outputDir);
-  const secondId = await createCompressTask(source, outputDir);
+  // 起两个任务：**必须用不同 outputDir**。
+  // 旧写法两次传同一个 outputDir，导致 B 压完立刻以 TARGET_EXISTS 失败（running 只有毫秒级），
+  // 用 150ms 轮询去撞它 → 约一半概率撞不到而白等超时。
+  const fixture = await ensureSlowFixture();
+  const firstId = await createCompressTask(fixture.source, fixture.outA);
+  const secondId = await createCompressTask(fixture.source, fixture.outB);
   check('起了两个任务（A 运行 / B 排队）', Boolean(firstId && secondId), `A=${String(firstId).slice(0, 8)} B=${String(secondId).slice(0, 8)}`);
 
-  const observed = await waitForSecondRunning(secondId);
-  check('B 进入 running（说明 A 已完成并触发过清理时机）', Boolean(observed), observed ? '' : '超时未观察到 B 运行');
-  if (observed) checkNonTerminalKept(observed, secondId);
+  // 等 A 进入终态（确定性事件）：这一刻刚触发过"每完成一个任务后"的清理
+  const observed = await waitForTaskTerminal(firstId);
+  check('A 进入终态（说明已触发过清理时机）', Boolean(observed), observed ? `A=${observed.status}` : '超时未等到 A 终态');
+  if (observed) checkNonTerminalKept(observed.snapshot, secondId);
 
   if (secondId) await api('POST', `/tasks/${secondId}/cancel`, {}).catch(() => {});
   await sleep(CANCEL_SETTLE_MS);
@@ -369,17 +453,22 @@ async function casePerCompletionPrune() {
   // 否则「环境里本来就有 4 条」会被误报成「清理失效」。
   const before = await countByStatus();
   const baseline = before.by.failed || 0;
-  const driven = await drivePruneRounds(4);
-  const after = await countByStatus();
-  check('done 终态驱动过清理（首个解压成功）', driven.done >= 1, `done=${driven.done} zip=${driven.zipUserPath}`);
-  check('failed 终态驱动过清理（重复解压命中同名 → TARGET_EXISTS）', driven.failed >= 3, `failed=${driven.failed}`);
   // 阈值取「起点与 3 的较大者」：干净环境仍按 ≤3 判；有残留时不误报，
   // 但若清理机制真失效（驱动后继续增长到基线之上）仍会 FAIL。
   const limit = Math.max(3, baseline);
+  const driven = await drivePruneRounds(4);
+  // 清理在"任务完成"时触发，落盘/投影可能略滞后于最后一个终态的可见时刻：
+  // 单次读数会偶发读到"还没来得及清理"的中间态（历史现象 after=4 > limit=3）。
+  // 这里等它**收敛**（最多 CONVERGE_TIMEOUT_MS），断言仍是"必须收敛到阈值内"——
+  // 清理机制真失效时永远不会收敛，依旧会 FAIL。
+  const converged = await waitForFailedConverge(limit);
+  const after = converged.snapshot;
+  check('done 终态驱动过清理（首个解压成功）', driven.done >= 1, `done=${driven.done} zip=${driven.zipUserPath}`);
+  check('failed 终态驱动过清理（重复解压命中同名 → TARGET_EXISTS）', driven.failed >= 3, `failed=${driven.failed}`);
   check(
     `多次完成任务后终态积压仍在阈值内（failed ≤ ${limit}）`,
-    (after.by.failed || 0) <= limit,
-    `before=${baseline} after=${after.by.failed || 0} limit=${limit}`,
+    converged.ok,
+    `before=${baseline} after=${after.by.failed || 0} limit=${limit} 收敛耗时=${converged.elapsedMs}ms`,
   );
 }
 
@@ -406,14 +495,13 @@ async function caseDeleteSemantics() {
     check('被删任务仍留在历史里（审计日志 append-only）', stillInHistory, `历史中含该 id=${stillInHistory}`);
   }
 
-  // 非终态 → INVALID_STATE（用长任务，确保删除时它还没结束）
-  const bigDirForDelete = path.join(ROOT, 'm3-test', 'big');
-  const useBigFixture = await pathExists(bigDirForDelete); // 探一次即可，避免在对象字面量里写两遍同步探测
+  // 非终态 → INVALID_STATE（用**慢夹具**确保删除时它还没结束；不再依赖"某个目录恰好够大"）
+  const longFixture = await ensureSlowFixture();
   const longTask = await api('POST', '/compress/tasks', {
-    sources: [useBigFixture ? '/m3-test/big' : '/文档'],
+    sources: [longFixture.source],
     mode: 'bundle',
     format: 'zip',
-    options: { outputDir: useBigFixture ? '/m3-test' : undefined },
+    options: { outputDir: longFixture.outDel },
   });
   const pendingId = taskIdOf(longTask);
   if (pendingId) {
