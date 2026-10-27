@@ -116,12 +116,31 @@ echo "── 四、API 响应不得泄漏绝对路径（曾抓到的真 bug）�
 LIST_BODY="$(curl -s -b "${COOKIE_JAR}" "${API}/tasks")"
 # 注意：只找「存储根绝对路径」特征，不能用 `"/` 这种宽匹配 —— 用户路径本身就以 `/` 开头（契约规定），
 # 拿它当泄漏会假阳性（本节曾经就是被这个宽匹配误报过一次）。
-check "任务列表不含存储根绝对路径" "LEAK=0" "LEAK=$(count_matches "${LIST_BODY}" '/volume\|storage/fs-root')"
-check "任务列表不含 absPath 字段" "ABS=0" "ABS=$(count_matches "${LIST_BODY}" 'absPath')"
+# 判据不放宽（泄漏就是缺陷，该 FAIL）；但**失败时必须能一眼看出漏在哪** ——
+# 只报一个 LEAK=1 等于让人从零重查（上一次就是这样，只能靠猜）。
+LEAK_N="$(count_matches "${LIST_BODY}" '/volume\|storage/fs-root')"
+check "任务列表不含存储根绝对路径" "LEAK=0" "LEAK=${LEAK_N}"
+if [ "${LEAK_N:-0}" -gt 0 ] 2>/dev/null; then
+  printf '  命中片段（最多 3 条，前 60 / 后 40 字符）：\n'
+  pipe_var "${LIST_BODY}" | grep -o '.\{0,60\}\(/volume\|storage/fs-root\).\{0,40\}' | head -3 | sed 's/^/    /'
+fi
+
+ABS_N="$(count_matches "${LIST_BODY}" 'absPath')"
+check "任务列表不含 absPath 字段" "ABS=0" "ABS=${ABS_N}"
+if [ "${ABS_N:-0}" -gt 0 ] 2>/dev/null; then
+  printf '  命中片段（最多 3 条，前 60 / 后 40 字符）：\n'
+  pipe_var "${LIST_BODY}" | grep -o '.\{0,60\}absPath.\{0,40\}' | head -3 | sed 's/^/    /'
+fi
+
 TASK_ID="$(json_field "${LIST_BODY}" '.data.items[0].id')"
 if [ -n "${TASK_ID}" ]; then
   DETAIL_BODY="$(curl -s -b "${COOKIE_JAR}" "${API}/tasks/${TASK_ID}")"
-  check "任务详情不含 absPath 字段" "ABS=0" "ABS=$(count_matches "${DETAIL_BODY}" 'absPath')"
+  DETAIL_ABS_N="$(count_matches "${DETAIL_BODY}" 'absPath')"
+  check "任务详情不含 absPath 字段" "ABS=0" "ABS=${DETAIL_ABS_N}"
+  if [ "${DETAIL_ABS_N:-0}" -gt 0 ] 2>/dev/null; then
+    printf '  命中片段（任务 %s，最多 3 条）：\n' "${TASK_ID}"
+    pipe_var "${DETAIL_BODY}" | grep -o '.\{0,60\}absPath.\{0,40\}' | head -3 | sed 's/^/    /'
+  fi
 else
   printf 'SKIP | 任务详情泄漏检查（列表为空，无样本）\n'
 fi

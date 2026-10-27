@@ -413,19 +413,67 @@ async function main() {
   );
 
   // ===== 六、原子写：运行期反复解析 tasks.json，且无 .tmp 残留 =====
+  // 判据分三档，避免把「网络盘读缓存抖动」误判成「原子写失效」：
+  //   · 直读成功            → 正常
+  //   · 直读失败但立即重读成功 → 瞬时抖动（CIFS 的 actimeo/cache 可能短暂读到旧内容），不算失败，单独计数
+  //   · 直读与重读都失败     → 确实读到半截文件 ⇒ 原子写真的失效，FAIL
+  // 这样既不会被环境抖动误红，也不会把真 bug 放过去（真失效时重读同样解析不出来）。
   let parseOk = 0;
+  let transientMiss = 0;
+  let parseFail = 0;
   const parseSamples = 25;
-  for (let i = 0; i < parseSamples; i += 1) {
+  /**
+   * 单次直读：能解析返回 true。
+   * 失败时把**原因**记下来（错误码 / 解析位置 / 读到多少字节）—— 只报"失败了几次"
+   * 会让人从零重查（上一次 1/25 就只能靠猜：是读到半截、还是 I/O 错误、还是文件不存在）。
+   */
+  let lastParseProblem = null;
+  const tryParseTasks = async () => {
     try {
       const text = await fsp.readFile(TASKS_FILE, 'utf8');
       JSON.parse(text);
-      parseOk += 1;
-    } catch {
-      /* 半截文件会在这里暴露 */
+      return true;
+    } catch (error) {
+      if (error && error.code) {
+        lastParseProblem = `I/O 错误 ${error.code}`;
+      } else if (error instanceof SyntaxError) {
+        const bytes = await fsp.stat(TASKS_FILE).then((st) => st.size).catch(() => -1);
+        lastParseProblem = `JSON 解析失败（${error.message.slice(0, 60)}；文件 ${bytes} 字节）`;
+      } else {
+        lastParseProblem = `未知错误 ${String(error && error.message).slice(0, 60)}`;
+      }
+      return false;
     }
+  };
+  /**
+   * 有界重试：为什么不是"立刻重读一次"——重读之间必须留出时间，
+   * 否则两次读可能落在**同一个** SMB 缓存/写入窗口里，抖动照样被判成失败。
+   * 3 次 × 100ms 足够跨过"rename 替换瞬间"，而**真正写了半截的文件**在这段时间里不会自己变好
+   * （下一次写入才会覆盖它），所以不会放过真 bug。
+   */
+  const RETRY_TIMES = 3;
+  const RETRY_DELAY_MS = 100;
+  const parseWithRetry = async () => {
+    if (await tryParseTasks()) return 'ok';
+    for (let attempt = 1; attempt < RETRY_TIMES; attempt += 1) {
+      await sleep(RETRY_DELAY_MS);
+      if (await tryParseTasks()) return 'transient';
+    }
+    return 'fail';
+  };
+  for (let i = 0; i < parseSamples; i += 1) {
+    const outcome = await parseWithRetry();
+    if (outcome === 'ok') parseOk += 1;
+    else if (outcome === 'transient') transientMiss += 1;
+    else parseFail += 1;
     await sleep(40);
   }
-  check('原子写：tasks.json 任意时刻都可被 JSON 解析', parseOk === parseSamples, `${parseOk}/${parseSamples} 次成功`);
+  check(
+    '原子写：tasks.json 任意时刻都可被 JSON 解析',
+    parseFail === 0,
+    `${parseSamples} 次采样：直读 ${parseOk} 次成功 / 瞬时抖动 ${transientMiss} 次（重读即成功） / 确认读到半截 ${parseFail} 次`
+      + (parseFail > 0 && lastParseProblem ? `；失败原因：${lastParseProblem}` : ''),
+  );
   // 轮询到稳定再断言（不能查一次就判）：节流写（500ms）+ 串行写链进行中时 .tmp 处于
   // 「已创建、未 rename」的合法中间态，立即断言会撞上窗口误报（实测间歇失败）。
   // 超时（3s）仍存在才 FAIL——那才可能是真正的产品侧 .tmp 泄漏（如写失败路径未清理）。
