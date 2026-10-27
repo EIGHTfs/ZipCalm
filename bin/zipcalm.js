@@ -13,6 +13,7 @@
 //     所以本文件**显式**把 dataDir / 存储根 / 回收站 / 日志全部指到 `~/.zipcalm`。
 //     这四个环境变量都传**绝对路径**，config 侧 path.resolve(projectRoot, 绝对值) = 绝对值，所以不会被包目录带偏。
 
+import { realpathSync } from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -165,7 +166,24 @@ async function main() {
 }
 
 // 只有被当作 CLI 直接执行时才跑 main（同时导出上面的工具函数供测试复用）
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+//
+// 判据必须比较**真实路径**（realpath），不能只 path.resolve：
+//   `npx zipcalm` / 全局安装时，npm 会在 node_modules/.bin/ 下建一个**符号链接**指向本文件，
+//   于是 process.argv[1] 是链接路径、import.meta.url 是真实路径，两者字面不同但指向同一个文件。
+//   用 path.resolve 比较会判成"不是直接执行"→ main() 不跑 → 进程静默 exit 0（零输出、服务不起）。
+//   这就是 npx 形态彻底不可用的原因，而所有直接用 `node <真实路径>` 运行的方式都不受影响。
+function isDirectInvocation() {
+  if (!process.argv[1]) return false;
+  const self = fileURLToPath(import.meta.url);
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(self);
+  } catch {
+    // realpath 失败（如 argv[1] 是相对路径且 cwd 已变）→ 退回字面比较
+    return path.resolve(process.argv[1]) === path.resolve(self);
+  }
+}
+
+if (isDirectInvocation()) {
   main().catch((error) => {
     process.stderr.write(`[ZipCalm] 启动失败：${error && error.message ? error.message : error}\n`);
     process.exit(1);

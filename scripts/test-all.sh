@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${PROJECT_ROOT}" || exit 1
 
-WANT="${*:-build m1 m2 m3 crash probes retention m4 m6 m7 m8fs hlscan hlexec volumes multiroot hlhint rar sevenzip engine}"
+WANT="${*:-build m1 m2 m3 crash probes retention m4 m6 m7 m8fs hlscan hlexec volumes multiroot hlhint rar sevenzip engine cli}"
 
 # 测试卫生：把删除后端固定到项目 storage/trash（进程级覆盖，不改用户 config）。
 # 为什么必须：本项目目录就在共享内，auto 后端会把测试删除送进用户的 #recycle，
@@ -106,6 +106,7 @@ if has sevenzip; then run_one sevenzip node "${SCRIPT_DIR}/test-sevenzip.mjs"; f
 if has engine; then run_one engine node "${SCRIPT_DIR}/test-engine-runner.mjs"; fi
 # 硬链接去重·执行：rename→link→unlink 三步替换 + link 失败回滚 + 执行前全量复核 + 日志
 if has hlexec; then run_one hlexec node "${SCRIPT_DIR}/test-hardlink-execute.mjs"; fi
+if has cli; then run_one cli node "${SCRIPT_DIR}/test-cli.mjs"; fi
 
 echo
 echo "── 汇总 ──"

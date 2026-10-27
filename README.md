@@ -2,7 +2,7 @@
 
 > 一个跑在 NAS 上的 Node.js 网页服务端：浏览文件目录、选择文件/文件夹压缩（多算法多格式）、按类型去重（硬链接）、带性能监控看板。
 >
-> 当前状态：**M0~M8 已完成 + 硬链接去重已上线 + 硬链接预检提示**（版本 `1.0.0`），19 套验收全绿。手机端 PWA（M9）待做。
+> 当前状态：**M0~M8 已完成 + 硬链接去重已上线 + 硬链接预检提示**（版本 `1.0.1`），二十套验收全绿。手机端 PWA（M9）待做。
 
 ## 界面预览
 
@@ -155,7 +155,7 @@ bash scripts/start.sh restart   # 重启（已在跑时改配置用这个）
 - 能力自探测：格式可用性**真探测**（zstd 走「Node 内置 → 系统命令」回退链，都不可用则该格式置灰并说明原因）
 - **压缩包密码**（压缩与解压全链路已通）：能力以插件形式追加 —— 格式插件声明 `capabilities`，能力插件在 `server/plugins/capabilities/<id>/` 自注册，算法在 `methods/` 下可继续追加；当前支持 AES-256（强，但 Linux `unzip` / Windows 资源管理器解不开）与 ZipCrypto（兼容好、强度弱），前端按各自兼容性给出提示。加密包**压完必须用同一密码自测**，不通过即任务失败且不删原文件；明文密码不落日志、不落 `tasks.json`、不进 API 响应。解压侧：加密包自动识别（preflight 返回 `encrypted` 标志），AES-256 与 ZipCrypto 统一走 7z 解包（解到中转目录后仍过 zip-slip 白名单链才交付）；错误三态区分——缺密码 `MISSING_PASSWORD`、密码错误 `BAD_PASSWORD`、包损坏 `ARCHIVE_CORRUPTED`，绝不把密码错当「文件损坏」；缺 7z 时明确报「无法解压 AES 加密包」不静默降级
 
-**一键验收**：`bash scripts/test-all.sh` 跑十九套（M1 不变量 / M2 往返 / M3 任务 / 崩溃恢复 / 边界探测 / 记录清理 / M4 多格式 / M6 黑名单 / M7 指标 / M8 文件写操作 / 多存储位置 / 多根隔离 / 硬链接扫描 / 硬链接执行 / 硬链接预检 / RAR 解压 / 7z / 引擎执行入口 / 构建门禁），当前全绿。
+**一键验收**：`bash scripts/test-all.sh` 跑二十套（M1 不变量 / M2 往返 / M3 任务 / 崩溃恢复 / 边界探测 / 记录清理 / M4 多格式 / M6 黑名单 / M7 指标 / M8 文件写操作 / 多存储位置 / 多根隔离 / 硬链接扫描 / 硬链接执行 / 硬链接预检 / RAR 解压 / 7z / 引擎执行入口 / CLI 入口 / 构建门禁），当前全绿。
 
 ## 版本记录
 
@@ -163,6 +163,7 @@ bash scripts/start.sh restart   # 重启（已在跑时改配置用这个）
 
 | 版本 | 里程碑 | 内容 |
 |---|---|---|
+| **1.0.1** | **修 npx 启动** | 修一个让 `npx zipcalm` / 全局安装**完全不可用**的 bug：CLI 的「是否被直接执行」判据只比较 `path.resolve` 的字面路径，而 npm 在 `node_modules/.bin/` 下建的是**符号链接** —— 链接路径与真实路径字面不等，于是 `main()` 不跑、进程**静默 exit 0、零输出、服务不起**。改为比较 `realpath`（解析符号链接）。本机验证时用 `node <真实路径>` 跑所以一路没暴露，直到从 registry 装包跑 npx 才现形；新增 `cli` 套件（7 条）钉住这条，含符号链接调用用例，并已用「回退到旧判据」反向验证该用例确会变红 |
 | **1.0.0** | **npm 首发** | 可 `npx zipcalm` / `npm i -g zipcalm` 运行：新增 CLI（`bin/zipcalm.js`，只做参数→环境变量翻译）、`files` 白名单（只带 `bin/ server/ shared/ web/dist/ README LICENSE`，不含 docs）、首次运行自动生成随机口令配置；数据默认落 `~/.zipcalm`（含 fs-root/trash/logs/tasks.json），**从 git 仓库启动的行为一字未变**（数据仍在 `<项目根>/storage`）。README 里 29 处相对文档/图片链接改为绝对地址（npm 上才不 404） |
 | 0.14.0 | 乱码名还原 | 解压时自动还原 PUA 转义的乱码文件名（共享阶段，zip/tar/7z/rar 通用）；新增 `POST /fs/repair-names` 与 CLI 修复已解压目录（dryRun 默认、绝不覆盖、四类计数）；RAR 引擎强制 `en_US.UTF-8`（默认 locale / C.UTF-8 会输出有损 `?`）；实测六款 RAR 解包库，结论是不换库、只做解码 |
 | 0.13.0 | RAR 双引擎 | RAR 解压引擎改为三级回退（系统 `unrar` → `node-unrar-js@2.0.2` 纯 JS 兜底 → 置灰），新增 `ZC_UNRAR_ENGINE=native\|js` 与 `probe().filenameSafe`。**实测澄清了根因**：RAR5 中文名乱码是 unrar 版本 bug（5.70 坏 / 7.23 好），而 js 引擎内置的 6.1.7 **同样坏** → 换引擎修不了文件名，因此**有原生 unrar 时仍优先原生**（它还能正确报损坏包，js 会静默部分解出）。版本判 minor：新增引擎与依赖、影响部署面（没装 unrar 的机器从"不可用"变"可用"） |
