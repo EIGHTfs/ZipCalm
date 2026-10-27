@@ -43,6 +43,31 @@ const rootsTitle = computed(() => (rootsMode.value === 'C' ? '位置' : '存储�
 
 let rootsRetry = 0;
 
+// ===== 支持格式清单 =====
+// 为什么另拉一份而不直接用 shared 的静态 FORMATS：那份是前后端共用的常量，
+// 而真正的格式来源是 server/plugins/formats/ 下的插件目录 —— 两个来源必然会漂移
+// （实测：7z 与 rar 插件加好了，侧栏还显示老四样）。这里以注册表为准，
+// 静态列表降级为「接口不可用时的兜底」，新加插件自动出现在列表里。
+const apiFormats = ref([]);
+const displayFormats = computed(() => (apiFormats.value.length > 0 ? apiFormats.value : FORMATS));
+
+async function loadSidebarFormats() {
+  try {
+    const payload = await api.get('/formats');
+    const list = (payload && payload.formats) || [];
+    apiFormats.value = list.map((item) => ({
+      id: item.id,
+      name: item.name,
+      ext: item.ext,
+      // 只读格式（如 RAR）标一下，避免用户以为它也能压缩
+      extractOnly: item.extractOnly === true,
+    }));
+  } catch {
+    // 拉不到就保持静态兜底，不阻塞侧栏
+    apiFormats.value = [];
+  }
+}
+
 /** 把 /fs/volumes 的结果落到状态里，并把"当前根"收敛到列表内的某一项 */
 function applyRootsPayload(payload) {
   rootsRetry = 0;
@@ -128,11 +153,17 @@ function switchRoot(rootId) {
   void router.push({ path: ROUTES.FILES, query: { path: '/' } });
 }
 
-onMounted(loadRoots);
+onMounted(() => {
+  void loadRoots();
+  void loadSidebarFormats();
+});
 
 // 登录前就挂着侧栏时，首次 /fs/volumes 会 401（且之后不会自动重试）。
 // 路由变化实际等价于"用户已进入应用"，这时重拉一次即可；另外登录后停留原页也会有 route 变化。
-watch(() => ui.route, () => { void loadRoots(); });
+watch(() => ui.route, () => {
+  void loadRoots();
+  void loadSidebarFormats();
+});
 
 // 登录成功后必须重拉一次：页面可能先于登录挂载，首次 /fs/volumes 拿到 AUTH_REQUIRED，
 // 而重试窗口只有几秒 —— 用户在登录页停留久一点，侧栏就会一直停在"需要登录"（实测踩过）。
@@ -142,6 +173,9 @@ watch(() => session.authenticated, (authenticated) => {
   rootsRetry = 0;
   rootsError.value = '';
   void loadRoots();
+  // 格式清单同理：侧栏常先于登录挂载，首次 /formats 拿到 401 就回落到静态列表，
+  // 结果新增的 7z/rar 一直不显示（实测踩过）。登录态一变就重拉。
+  void loadSidebarFormats();
 });
 </script>
 
@@ -211,9 +245,10 @@ watch(() => session.authenticated, (authenticated) => {
         支持格式
       </h2>
       <ul class="tree">
-        <li v-for="format in FORMATS" :key="format.id" class="tree__item">
+        <li v-for="format in displayFormats" :key="format.id" class="tree__item">
           <span>{{ format.name }}</span>
           <span class="badge">{{ format.ext }}</span>
+          <span v-if="format.extractOnly" class="badge" title="只能解压，不能压缩">仅解压</span>
         </li>
       </ul>
     </section>
