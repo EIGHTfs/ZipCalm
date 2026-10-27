@@ -196,6 +196,9 @@ export function createRegistry(options = {}) {
         unavailableReason,
         levelRange: plugin.levelRange || null,
         defaultLevel: plugin.defaultLevel ?? null,
+        // 只读格式（如 RAR）：可解压但不能压缩。前端压缩抽屉要靠这个字段把它过滤掉，
+        // 否则它会出现在压缩格式列表里、甚至被默认选中，用户点「开始压缩」才失败。
+        extractOnly: plugin.extractOnly === true,
       });
     }
     return formatItems;

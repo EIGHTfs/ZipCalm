@@ -116,7 +116,12 @@ watch(
     errorText.value = '';
     try {
       const formatsResponse = await api.get('/formats');
-      formats.value = (formatsResponse && formatsResponse.formats) || [];
+      // 过滤掉只读格式（RAR 这类只能解压、不能压缩）：它们会以 available=true 出现，
+      // 若不过滤就会被列进压缩格式、还可能被下面的「默认选中第一项」选中，
+      // 用户点了「开始压缩」才收到 UNSUPPORTED_FORMAT —— 体验上等于骗了一次点击。
+      formats.value = ((formatsResponse && formatsResponse.formats) || []).filter(
+        (item) => item.extractOnly !== true,
+      );
       const firstAvailable = formats.value.find((item) => item.available);
       if (firstAvailable) formatId.value = firstAvailable.id;
     } catch (error) {
