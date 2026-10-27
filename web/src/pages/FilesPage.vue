@@ -933,7 +933,7 @@ onUnmounted(() => {
                 class="badge"
                 data-testid="blacklist-badge"
                 :title="`命中黑名单（${entry.blacklistLayer} 层）：压缩时会跳过，不会进包也不会被删除`"
-              >已压缩格式</span>
+              >已跳过</span>
             </span>
           </td>
           <td class="file-table__col-type">{{ typeLabel(entry) }}</td>
@@ -967,7 +967,7 @@ onUnmounted(() => {
         <span class="file-card__name" :title="entry.name">{{ entry.name }}</span>
         <span class="file-card__meta">
           {{ entry.type === 'dir' ? '目录' : formatBytes(entry.size) }}
-          <span v-if="entry.blacklisted" class="badge">已压缩格式</span>
+          <span v-if="entry.blacklisted" class="badge">已跳过</span>
         </span>
       </article>
     </div>
