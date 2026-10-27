@@ -18,10 +18,21 @@ import path from 'node:path';
 
 import rarPlugin from '../server/plugins/formats/rar/index.js';
 import { planTargets } from '../server/plugins/formats/_shared/entrySafety.js';
-import { PROJECT_ROOT } from './helpers/script-env.mjs';
+import { PROJECT_ROOT, execFileAsync } from './helpers/script-env.mjs';
+import { loadRuntimeConfig } from './helpers/test-config.mjs';
 import { createReporter } from './helpers/test-report.mjs';
 
 const FIXTURES = path.join(PROJECT_ROOT, 'scripts/fixtures/rar');
+
+/** API 层（任务级）复核需要服务在跑；拿不到服务就 SKIP 而不是 FAIL */
+const runtimeConfig = await loadRuntimeConfig(PROJECT_ROOT);
+const PORT = process.env.ZIPCALM_PORT || (runtimeConfig.server && runtimeConfig.server.port) || 3010;
+const BASE = process.env.ZIPCALM_BASE || `http://127.0.0.1:${PORT}/api/v1`;
+const LOGIN = { username: process.env.ZIPCALM_TEST_USER || 'admin', password: process.env.ZIPCALM_TEST_PASSWORD || 'zipcalm' };
+const TASK_WAIT_MS = 30000;
+/** API 层缺服务/根时的统一 SKIP 标签（重复字面量收口） */
+const SKIP_REASON_SERVICE = 'API 层四条状态码';
+let API_TOKEN = null;
 // 公开测试样本的密码（scripts/fixtures/rar/README.md 里公开写明），不是真实凭据 → 审计误报，按行豁免
 const PASSWORD = 'TestRar123'; // dsh-skip-sensitive
 
@@ -255,8 +266,155 @@ async function main() {
     await fsp.rm(sandbox, { recursive: true, force: true }).catch(() => {});
   }
 
+  // ===== 七、API 层（任务级）：四条状态码必须各对各 =====
+  // 插件层（上面的 test/extract）证明了错误码能产出；这一节证明**任务记录**里也带着正确的码，
+  // 否则前端只看到"失败"却不知道是密码错还是包坏（这正是本次要收尾的缺陷）。
+  await runApiPhase();
+
   reporter.summary();
 }
+
+/** POST 并轮询到终态 */
+async function apiJson(path, { method = 'GET', token = null, body = undefined } = {}) {
+  const response = await fetch(`${BASE}${path}`, {
+    method,
+    headers: {
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(15000),
+  });
+  return { status: response.status, json: await response.json().catch(() => null) };
+}
+
+async function waitTask(token, taskId) {
+  const deadline = Date.now() + TASK_WAIT_MS;
+  while (Date.now() < deadline) {
+    const { json } = await apiJson(`/tasks/${taskId}`, { token });
+    const task = json && json.data && json.data.task;
+    if (task && ['done', 'failed', 'aborted', 'interrupted'].includes(task.status)) return task;
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+  return null;
+}
+
+/** API 层：把样本放进一个可写存储位置，然后用 /extract/tasks 跑四种情况 */
+/** 服务不在就先拉起（本套件排在自管生命周期的套件之后，顺序不该决定覆盖率） */
+async function ensureService() {
+  const probe = async () => {
+    try {
+      const r = await fetch(`${BASE}/health`, { signal: AbortSignal.timeout(3000) });
+      return r.ok;
+    } catch {
+      return false;
+    }
+  };
+  if (await probe()) return true;
+  try {
+    await execFileAsync('bash', ['scripts/start.sh', 'start'], { cwd: PROJECT_ROOT, timeout: 120000 });
+  } catch {
+    return false;
+  }
+  for (let i = 0; i < 40; i += 1) {
+    if (await probe()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return false;
+}
+
+/** 选一个可写存储位置并放入样本；返回 {rootId, userDir, dirAbs} 或 null */
+async function pickApiRoot() {
+  const volumes = await apiJson('/fs/volumes', { token: API_TOKEN });
+  const roots = (volumes.json && volumes.json.data && volumes.json.data.roots) || [];
+  for (const root of roots) {
+    if (!root || typeof root.path !== 'string' || !root.id) continue;
+    const dir = path.join(root.path, `zipcalm-rar-api-${process.pid}`);
+    try {
+      await fsp.mkdir(dir, { recursive: true });
+      await fsp.copyFile(archive('s4-encrypted.rar'), path.join(dir, 's4-encrypted.rar'));
+      await fsp.copyFile(archive('s6-broken.rar'), path.join(dir, 's6-broken.rar'));
+      return { rootId: root.id, userDir: `/${path.basename(dir)}`, dirAbs: dir };
+    } catch {
+      await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+  return null;
+}
+
+/** 提交一个解压任务并等终态；options 为空表示不带密码 */
+async function submitExtract(picked, archiveName, options) {
+  const created = await apiJson('/extract/tasks', {
+    method: 'POST',
+    token: API_TOKEN,
+    body: {
+      path: `${picked.userDir}/${archiveName}`,
+      rootId: picked.rootId,
+      targetDir: `${picked.userDir}/out-${archiveName.replace(/[^a-z0-9]/gi, '')}-${Date.now()}`,
+      ...(options ? { options } : {}),
+    },
+  });
+  const taskId = created.json && created.json.data && created.json.data.task && created.json.data.task.id;
+  if (!taskId) return { rejected: created.json && created.json.error && created.json.error.code, task: null };
+  return { rejected: null, task: await waitTask(API_TOKEN, taskId) };
+}
+
+/** 四条状态码的断言（拆出来：runApiPhase 只做编排，复杂度压在阈值内） */
+async function assertApiStatusCodes(picked) {
+  const okCase = await submitExtract(picked, 's4-encrypted.rar', { password: PASSWORD }); // dsh-skip-sensitive
+  check('API：加密 RAR + 正确密码 → done 且 error=null',
+    Boolean(okCase.task) && okCase.task.status === 'done' && okCase.task.error === null,
+    `status=${okCase.task && okCase.task.status} error=${JSON.stringify(okCase.task && okCase.task.error)}`);
+
+  const badCase = await submitExtract(picked, 's4-encrypted.rar', { password: 'definitely-wrong' }); // dsh-skip-sensitive
+  check('API：加密 RAR + 错密码 → failed 且 error.code=BAD_PASSWORD',
+    Boolean(badCase.task) && badCase.task.status === 'failed' && badCase.task.error?.code === 'BAD_PASSWORD',
+    `status=${badCase.task && badCase.task.status} code=${badCase.task && badCase.task.error && badCase.task.error.code}`);
+
+  const noPassCase = await submitExtract(picked, 's4-encrypted.rar', null);
+  check('API：加密 RAR + 不给密码 → failed 且 error.code=MISSING_PASSWORD',
+    Boolean(noPassCase.task) && noPassCase.task.status === 'failed' && noPassCase.task.error?.code === 'MISSING_PASSWORD',
+    `status=${noPassCase.task && noPassCase.task.status} code=${noPassCase.task && noPassCase.task.error && noPassCase.task.error.code}`);
+
+  const brokenCase = await submitExtract(picked, 's6-broken.rar', null);
+  const brokenCode = brokenCase.rejected || (brokenCase.task ? 'TASK_CREATED' : 'UNKNOWN');
+  check('API：损坏 RAR → ARCHIVE_CORRUPTED（预检即拒，不建任务）', brokenCode === 'ARCHIVE_CORRUPTED', `code=${brokenCode}`);
+}
+
+/** API 层入口：确保服务 → 登录 → 选根 → 断言 → 清理 */
+async function runApiPhase() {
+  if (!(await ensureService())) {
+    reporter.skip(SKIP_REASON_SERVICE, '服务未能启动');
+    return;
+  }
+  try {
+    const login = await apiJson('/auth/login', { method: 'POST', body: LOGIN });
+    API_TOKEN = login.json && login.json.data && login.json.data.token;
+  } catch {
+    API_TOKEN = null;
+  }
+  if (!API_TOKEN) {
+    reporter.skip(SKIP_REASON_SERVICE, '登录失败');
+    return;
+  }
+  const picked = await pickApiRoot();
+  if (!picked) {
+    reporter.skip(SKIP_REASON_SERVICE, '没有可写的存储位置放置样本');
+    return;
+  }
+  try {
+    await assertApiStatusCodes(picked);
+  } finally {
+    // 清样本：先走项目自己的删除接口（进回收站可恢复），再兜底清目录
+    await apiJson('/fs/delete', {
+      method: 'POST',
+      token: API_TOKEN,
+      body: { paths: [picked.userDir], rootId: picked.rootId, mode: 'trash' },
+    }).catch(() => {});
+    await fsp.rm(picked.dirAbs, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 
 main().catch((error) => {
   console.error(`RAR 插件验收异常：${error.message}`);

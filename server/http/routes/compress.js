@@ -274,14 +274,14 @@ async function extractPreflightFor(app, parsed) {
       targetAbsDir: parsed.target.absPath,
     },
   );
-  // P4：加密包预检——zip 格式报 MISSING_PASSWORD（前端据此弹密码输入）。
-  // 只对 zip 判（能力 appliesTo=['zip']；tar 系列无加密）。
-  if (parsed.plugin.id === 'zip') {
-    const { archiveHasEncryption } = await import('../../plugins/capabilities/password/index.js');
-    const probe = await archiveHasEncryption(parsed.archive.realPath);
+  // 加密包预检：由格式插件自报（ZIP 读 central directory 标志位，RAR 看 unrar 列表输出）。
+  // 不能写死某个格式 —— 任何能解加密包的插件都应让前端弹密码框，
+  // 否则用户会停在「提示要密码、却没有输入框」的死角。
+  if (typeof parsed.plugin.probeEncryption === 'function') {
+    const probe = await parsed.plugin.probeEncryption(parsed.archive.realPath);
     if (probe.encrypted && !(parsed.options && parsed.options.password)) {
       preflight.encrypted = true;
-      preflight.isAes = probe.isAes;
+      preflight.isAes = probe.isAes === true;
     }
   }
   return preflight;

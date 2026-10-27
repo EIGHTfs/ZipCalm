@@ -230,7 +230,9 @@ export async function verifyWith7z(archivePath, password) {
     if (/wrong password|password is incorrect|加密|密码/i.test(output)) {
       return { ok: false, error: '密码错误' };
     }
-    return { ok: false, error: (error && error.message) || '加密包自测失败' };
+    // 绝不能把 execFile 的 error.message 直接透出去：它含**完整命令行**（`-p<明文密码>`）与本机绝对路径。
+    // 这些字串会被写进任务记录的 error 字段，等于把密码和目录结构泄漏到 API 响应里（实测踩过）。
+    return { ok: false, error: '加密包自测失败（7z 无法读取该包：可能格式不支持，或包已损坏）' };
   }
 }
 

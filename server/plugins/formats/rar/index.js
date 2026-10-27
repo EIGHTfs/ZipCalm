@@ -268,6 +268,48 @@ export default {
   extract,
   list,
   test,
+  /**
+   * 探测归档是否加密（供解压预检决定是否弹密码输入框）。
+   *
+   * 实现方式是复用列表阶段已经拿到的信息：`unrar lt` 的输出里每一条都带
+   * `* Encrypted = +` 标志，`7z -slt` 同理，所以不需要额外开一次进程去猜测。
+   * RAR 没有 ZIP 那种 AES/ZipCrypto 之分，`isAes` 恒为 false（保持与 ZIP 同构的返回形状）。
+   *
+   * @param {string} archivePath
+   * @returns {Promise<{encrypted: boolean, isAes: boolean}>}
+   */
+  async probeEncryption(archivePath) {
+    const binary = currentBinary();
+    if (!binary) throw apiError(ERROR_CODES.FORMAT_UNAVAILABLE, await unavailableReason());
+    const info = await inspectEntries(archivePath, binary);
+    return { encrypted: info.encrypted === true, isAes: false };
+  },
+  /**
+   * 用给定密码完整试解一次（供解压侧「先校验」阶段调用）。
+   *
+   * 为什么必须由本插件提供、而不是让编排层统一用 7z：
+   * p7zip 16.02 读不了加密 RAR5（实测报 `Can not open the file as archive`），
+   * 而本机 `unrar 5.70` 可以。工具能力按格式不同，这个知识属于插件自己。
+   *
+   * @param {string} archivePath
+   * @param {string} password
+   * @returns {Promise<{ok: boolean, checked?: number, strategy?: string, error?: string}>}
+   */
+  async verifyWithPassword(archivePath, password) {
+    try {
+      const result = await test(archivePath, { password });
+      return { ok: true, checked: result.checked, strategy: result.strategy };
+    } catch (error) {
+      // 保留原始错误码（BAD_PASSWORD / ARCHIVE_CORRUPTED / ABORTED），交给上层原样抛给用户。
+      // 如果在这里一律收敛成 VERIFY_FAILED，用户看到的就只是"校验未通过"，
+      // 分不清到底是密码打错了还是包坏了 —— 三态区分就白做了。
+      return {
+        ok: false,
+        code: (error && error.code) || null,
+        error: (error && error.message) || '加密包校验失败',
+      };
+    }
+  },
   /** 便于测试与诊断：探测到的 unrar 版本（拿不到为 null） */
   probe: () => {
     const tools = pickBinaries();

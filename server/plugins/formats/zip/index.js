@@ -559,6 +559,21 @@ async function extract(ctx) {
   };
 }
 
+/**
+ * 探测归档是否加密（供解压预检决定是否弹密码输入框）。
+ *
+ * 为什么单独导出：解压预检需要「不解压就能知道加没加密」，而这件事的实现方式
+ * 每个格式都不一样（ZIP 读 central directory 的标志位，RAR 看 unrar 的列表输出）。
+ * 统一成这个可选方法后，预检层不必认识具体格式。
+ *
+ * @param {string} archivePath
+ * @returns {Promise<{encrypted: boolean, isAes: boolean}>}
+ */
+async function probeEncryption(archivePath) {
+  const directory = await openArchive(archivePath);
+  return detectEncryption(directory);
+}
+
 export default {
   ...meta,
   available,
@@ -568,4 +583,5 @@ export default {
   extract,
   list,
   test,
+  probeEncryption,
 };

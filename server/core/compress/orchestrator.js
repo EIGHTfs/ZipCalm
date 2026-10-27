@@ -687,12 +687,33 @@ async function stageExtractWrite(record, deps, plugin) {
 async function stageVerifyArchive(record, deps, plugin) {
   const { manager } = deps;
   manager.setPhase(record.info.id, 'verifying');
-  // P4：加密包的无密码 CRC 校验（unzipper）必然失败——解压侧校验语义改走
-  // 「7z t 同密码完整试解」（7z x 成功本身已含全量 CRC，t 一次是独立证据）；
+  // 加密包的无密码 CRC 校验必然失败（ZIP 侧 unzipper 读不了 AES，RAR 侧 unrar 没密码也不干），
+  // 所以改走「同一密码完整试解一次」——试解成功本身就含全量 CRC，是独立证据。
+  //
+  // 用哪个工具试解由**格式插件自己决定**：这里优先问插件要 `verifyWithPassword`。
+  // 为什么不能一律用 7z：p7zip 16.02 读不了加密 RAR5（报 Can not open the file as archive），
+  // 而 ZIP 的 AES 又只有 7z 读得了（unzipper 只认 ZipCrypto）。工具能力是按格式分的，
+  // 编排层不该知道这些细节，否则每加一个加密格式都要回来改这里。
+  //
   // 未加密包保持原路径（行为与改动前一致，回归由既有测试锁）。
   if (typeof record.info.options?.password === 'string' && record.info.options.password.length > 0) {
+    const archivePath = record.internal.archiveAbsPath;
+    const password = record.info.options.password;
+
+    if (typeof plugin.verifyWithPassword === 'function') {
+      const verdict = await plugin.verifyWithPassword(archivePath, password);
+      if (!verdict || verdict.ok !== true) {
+        // 透传插件给的错误码：密码错就是 BAD_PASSWORD、包坏就是 ARCHIVE_CORRUPTED，
+        // 不要一律压成 VERIFY_FAILED，否则前端只能提示"校验未通过"，用户无从判断该改什么。
+        const code = (verdict && verdict.code) || ERROR_CODES.VERIFY_FAILED;
+        throw apiError(code, (verdict && verdict.error) || '加密压缩包校验未通过');
+      }
+      return { ok: true, strategy: verdict.strategy || 'plugin-test', checked: verdict.checked ?? null, failures: [] };
+    }
+
+    // 插件未提供专用校验（如 ZIP）→ 回落到 7z 同密码试解
     const { verifyWith7z } = await import('../../plugins/capabilities/password/index.js');
-    const verdict = await verifyWith7z(record.internal.archiveAbsPath, record.info.options.password);
+    const verdict = await verifyWith7z(archivePath, password);
     if (!verdict.ok) {
       throw apiError(ERROR_CODES.VERIFY_FAILED, `加密压缩包校验未通过：${verdict.error || '未知原因'}`);
     }
