@@ -1,5 +1,5 @@
 <script setup>
-// 压缩任务页（占位）：M3 接入 GET /api/v1/tasks + GET /api/v1/tasks/events(SSE)
+// 任务状态枚举查阅页：把 shared/ 里的状态/阶段/模式清单渲染出来，供使用者查阅与「前端未硬编码」的可视证据
 //
 // 这里把 shared/task-status.js 与 shared/task-phase.js 的枚举**渲染成可见清单**：
 // 既是给使用者的说明，也是「前端枚举来自 shared/、没有硬编码」的可视证据
@@ -19,9 +19,10 @@ import {
   <section class="card">
     <h3 class="card__title">压缩任务</h3>
     <p class="card__desc">
-      F1 仅占位。M3 起接入 <code>/api/v1/tasks</code>（列表/单查）与
-      <code>/api/v1/tasks/events</code>（SSE 推送）；断线重连后先收 <code>snapshot</code>
-      快照再收增量，进度是「状态」不是「消息」。
+      实际的任务列表、进度与取消按钮在<b>底部任务条</b>与<b>任务抽屉</b>里（由
+      <code>/api/v1/tasks/events</code> 的 SSE 推送驱动，断线重连后先收
+      <code>snapshot</code> 快照再收增量 —— 进度是「状态」不是「消息」）。
+      本页列出状态/阶段/模式的取值清单，供查阅。
     </p>
   </section>
 

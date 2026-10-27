@@ -26,37 +26,37 @@ export const routes = [
     path: ROUTES.LOGIN,
     name: 'login',
     component: LoginPage,
-    meta: { title: '登录', hint: 'M1 已接入 /api/v1/auth/login', public: true },
+    meta: { title: '登录', hint: 'POST /api/v1/auth/login', public: true },
   },
   {
     path: ROUTES.FILES,
     name: 'files',
     component: FilesPage,
-    meta: { title: '文件浏览', hint: 'M1 已接入 /api/v1/fs/list' },
+    meta: { title: '文件浏览', hint: 'GET /api/v1/fs/list' },
   },
   {
     path: ROUTES.TASKS,
     name: 'tasks',
     component: TasksPage,
-    meta: { title: '压缩任务', hint: 'M3 接入 /api/v1/tasks + SSE' },
+    meta: { title: '压缩任务', hint: 'GET /api/v1/tasks + SSE 推送' },
   },
   {
     path: ROUTES.METRICS,
     name: 'metrics',
     component: MetricsPage,
-    meta: { title: '性能看板', hint: 'M7 接入 /api/v1/metrics/*' },
+    meta: { title: '性能看板', hint: 'GET /api/v1/metrics/*' },
   },
   {
     path: ROUTES.HARDLINK,
     name: 'hardlink',
     component: HardlinkPage,
-    meta: { title: '硬链接去重', hint: 'docs/15：POST /hardlink/scan（只读）+ execute（显式确认）' },
+    meta: { title: '硬链接去重', hint: 'POST /hardlink/scan（只读扫描）+ execute（显式确认后执行）' },
   },
   {
     path: ROUTES.SETTINGS,
     name: 'settings',
     component: SettingsPage,
-    meta: { title: '设置', hint: 'M6 接入 /api/v1/blacklist/*' },
+    meta: { title: '设置', hint: 'GET/POST /api/v1/blacklist/*' },
   },
   // 兜底路由必须放最后
   {

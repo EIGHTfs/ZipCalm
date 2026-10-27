@@ -177,7 +177,7 @@ onMounted(load);
     <h3 class="card__title">界面偏好（已是真交互）</h3>
     <p class="card__desc">
       当前视图模式：<strong>{{ ui.viewMode }}</strong>（顶部栏可切换；该状态存在 pinia，
-      未登录也不影响）。深色模式属 M8 范围。
+      未登录也不影响）。
     </p>
   </section>
 </template>

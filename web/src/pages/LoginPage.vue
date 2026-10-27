@@ -59,7 +59,7 @@ async function handleSubmit() {
         {{ APP_NAME }}
         <span class="topbar__brand-sub">{{ APP_NAME_ZH }}</span>
       </h1>
-      <p class="card__desc">登录后即可浏览存储根目录下的文件（M1：浏览 + 认证）。</p>
+      <p class="card__desc">登录后即可浏览存储根目录下的文件。</p>
 
       <form class="login-form" data-testid="login-form" @submit.prevent="handleSubmit">
         <label class="login-form__label" for="login-username">用户名</label>
