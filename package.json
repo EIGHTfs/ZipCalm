@@ -11,7 +11,8 @@
     "build": "node scripts/check-drift.js && vite build --config web/vite.config.js",
     "preview": "vite preview --config web/vite.config.js",
     "start": "node server/boot.js",
-    "check:drift": "node scripts/check-drift.js"
+    "check:drift": "node scripts/check-drift.js",
+    "prepublishOnly": "npm run build"
   },
   "bin": {
     "zipcalm": "bin/zipcalm.js"
@@ -24,7 +25,6 @@
     "README.md",
     "LICENSE"
   ],
-  "prepublishOnly": "npm run build",
   "dependencies": {
     "@fastify/cookie": "^11.1.3",
     "@fastify/static": "^10.1.6",
