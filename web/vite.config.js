@@ -31,7 +31,14 @@ export default defineConfig({
   build: {
     outDir: 'dist', // → web/dist
     emptyOutDir: true,
-    sourcemap: true,
+    // 不产出 sourcemap：
+    //   ① 体积 —— .map 约 1.8 MB，是压缩后 js（328 KB）的 5 倍，占 npm 包体积约 65%
+    //   ② 泄漏构建机目录结构 —— map 的 sources 会记下 `../../../../../zipcalm-build/node_modules/...`
+    //      这类路径，等于把本机组织方式暴露给所有下载包的人
+    //   ③ 对使用者价值有限 —— 本包用于"跑服务"；前端问题在浏览器 DevTools 看即可，
+    //      真要还原堆栈，从源码仓库（web/src 全在 git 里）拿比塞进发行包合适
+    // 排查线上前端问题若确实需要，可临时改回 true 单独构建一份，不必随包分发。
+    sourcemap: false,
   },
 
   server: {

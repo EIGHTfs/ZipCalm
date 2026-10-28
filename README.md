@@ -57,6 +57,14 @@ bash scripts/start.sh stop      # 停止
 bash scripts/start.sh restart   # 重启（已在跑时改配置用这个）
 ```
 
+**开发**（改了 `web/` 下的代码要 `build`，服务端托管的是构建产物；本地联调用 `dev` 热更新）：
+
+```bash
+npm install     # 装依赖
+npm run dev     # 前端开发服务（5180，接口代理到 3010）
+npm run build   # 构建前端产物到 web/dist
+```
+
 **首次登录**：默认账号 `admin` / `zipcalm`。
 
 > ⚠️ **上线前请改密码**（默认密码等于把删除权限交给所有知道它的人）：
@@ -163,7 +171,7 @@ bash scripts/start.sh restart   # 重启（已在跑时改配置用这个）
 
 | 版本 | 里程碑 | 内容 |
 |---|---|---|
-| **1.0.1** | **修 npx 启动** | 修一个让 `npx zipcalm` / 全局安装**完全不可用**的 bug：CLI 的「是否被直接执行」判据只比较 `path.resolve` 的字面路径，而 npm 在 `node_modules/.bin/` 下建的是**符号链接** —— 链接路径与真实路径字面不等，于是 `main()` 不跑、进程**静默 exit 0、零输出、服务不起**。改为比较 `realpath`（解析符号链接）。本机验证时用 `node <真实路径>` 跑所以一路没暴露，直到从 registry 装包跑 npx 才现形；新增 `cli` 套件（7 条）钉住这条，含符号链接调用用例，并已用「回退到旧判据」反向验证该用例确会变红 |
+| **1.0.1** | **修 npx 启动** | 修一个让 `npx zipcalm` / 全局安装**完全不可用**的 bug：CLI 的「是否被直接执行」判据只比较 `path.resolve` 的字面路径，而 npm 在 `node_modules/.bin/` 下建的是**符号链接** —— 链接路径与真实路径字面不等，于是 `main()` 不跑、进程**静默 exit 0、零输出、服务不起**。改为比较 `realpath`（解析符号链接）。本机验证时用 `node <真实路径>` 跑所以一路没暴露，直到从 registry 装包跑 npx 才现形；新增 `cli` 套件（7 条）钉住这条，含符号链接调用用例，并已用「回退到旧判据」反向验证该用例确会变红。**同时**：构建不再产出 sourcemap（`.map` 是压缩产物的 5 倍大、且其 `sources` 会带出构建机目录结构），发布包 855 KB → **346 KB**；README 移除机器专属的依赖安装说明与内部参考快照段（此类内容归 `docs/14`） |
 | **1.0.0** | **npm 首发** | 可 `npx zipcalm` / `npm i -g zipcalm` 运行：新增 CLI（`bin/zipcalm.js`，只做参数→环境变量翻译）、`files` 白名单（只带 `bin/ server/ shared/ web/dist/ README LICENSE`，不含 docs）、首次运行自动生成随机口令配置；数据默认落 `~/.zipcalm`（含 fs-root/trash/logs/tasks.json），**从 git 仓库启动的行为一字未变**（数据仍在 `<项目根>/storage`）。README 里 29 处相对文档/图片链接改为绝对地址（npm 上才不 404） |
 | 0.14.0 | 乱码名还原 | 解压时自动还原 PUA 转义的乱码文件名（共享阶段，zip/tar/7z/rar 通用）；新增 `POST /fs/repair-names` 与 CLI 修复已解压目录（dryRun 默认、绝不覆盖、四类计数）；RAR 引擎强制 `en_US.UTF-8`（默认 locale / C.UTF-8 会输出有损 `?`）；实测六款 RAR 解包库，结论是不换库、只做解码 |
 | 0.13.0 | RAR 双引擎 | RAR 解压引擎改为三级回退（系统 `unrar` → `node-unrar-js@2.0.2` 纯 JS 兜底 → 置灰），新增 `ZC_UNRAR_ENGINE=native\|js` 与 `probe().filenameSafe`。**实测澄清了根因**：RAR5 中文名乱码是 unrar 版本 bug（5.70 坏 / 7.23 好），而 js 引擎内置的 6.1.7 **同样坏** → 换引擎修不了文件名，因此**有原生 unrar 时仍优先原生**（它还能正确报损坏包，js 会静默部分解出）。版本判 minor：新增引擎与依赖、影响部署面（没装 unrar 的机器从"不可用"变"可用"） |
@@ -226,35 +234,6 @@ bash scripts/start.sh restart   # 重启（已在跑时改配置用这个）
 ## 设计来源
 
 本项目的设计文档体系由需求演进逐步沉淀而成，需求与决策的来龙去脉见 [docs/00-需求演进与设计决策.md](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/00-需求演进与设计决策.md)。
-
-## 参考项目（第三方代码快照）
-
-`参考项目/` 下是 10 个第三方开源项目的本地代码（9 个 git 克隆 + 1 个从 npm tarball 解压），用于精读可抄代码（见 [docs/10](https://github.com/EIGHTfs/ZipCalm/blob/main/docs/10-开源项目参考.md)）：
-
-- 它们是**别人的代码**，不属于本项目产物，建议将来建仓时写进 `.gitignore`；
-- 文档中的「文件:行号」绑定各仓库当时的 commit（commit 清单见 docs/10 第〇节），上游更新后行号会漂移；
-- 其中一个项目（wfmanager）的路径防护实测存在缺陷，docs/10 已注明**只抄 UI 不抄安全逻辑**。
-
-## 开发环境约束（依赖安装）
-
-本工作区挂载在 NFS 上且带 `noexec`（`/tmp` 同样是 noexec），`node_modules` 里的原生二进制（esbuild 等）在工作区内无法执行；**直接在项目根执行 `npm install` 也会失败**——npm 10 的 reify 阶段会先删掉项目根的 `node_modules` 软链（日志：`npm warn reify Removing non-directory`），再在 noexec 盘建真实目录，随后 esbuild postinstall 报 `EACCES`。
-
-因此依赖装在**可执行目录**（脚本自探测），项目根只保留一个指向它的软链：
-
-```bash
-bash scripts/setup-dev-deps.sh                                     # 幂等：未指定则自动探测可执行目录
-ZIPCALM_BUILD_DIR=/some/exec/path bash scripts/setup-dev-deps.sh   # 显式指定（优先级最高）
-```
-
-- 依赖目录的确定顺序（`scripts/setup-dev-deps.sh` 的 `detect_build_dir`）：
-  1. 环境变量 `ZIPCALM_BUILD_DIR`——先校验「可写 + 可执行」，不合格直接报错退出（不会默默换路径）；
-  2. 自探测候选：项目根同级 `<父目录>/.zipcalm-build` → 从项目根**向上逐层**的 `<上层>/zipcalm-build` → `$TMPDIR/zipcalm-build`、`$HOME/.cache/zipcalm-build`（临时目录仅作兜底，可能被系统清理，重跑本脚本即可恢复）。
-- **探测方式是「真写一个脚本并执行」**（`probe_exec_dir`）：noexec 挂载会被直接挡掉，所以不需要预先知道某个盘是不是 NFS、是不是 noexec；**脚本里没有任何机器专属的硬编码路径**。
-- 软链：项目根 `node_modules` → `<依赖目录>/node_modules`；`package-lock.json` 落在依赖目录，不入库。
-- 日常在项目根执行：`npm run dev`（开发服务，端口 5180）、`npm run build`（产物 `web/dist`）、`npm run preview`；后端服务用 `bash scripts/start.sh {start|stop|restart|status}`。
-- **不要在项目根直接执行 `npm install` / `npm ci`**：会删掉软链并把依赖重新装到 noexec 盘。
-- 源码始终留在工作区（`shared/`、`web/`、`server/`、`scripts/`、`package.json`）；依赖目录只是构建缓存，可随时重装。
-- 忽略规则：`.gitignore` 忽略 `node_modules`（不带斜杠，同时匹配真实目录与软链）、`web/dist/`、`ZipCalm.pid`（运行时 PID 文件）、`storage/`（运行态数据与凭据配置）。
 
 ## 鸣谢
 
