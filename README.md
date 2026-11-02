@@ -2,7 +2,7 @@
 
 > 一个跑在 NAS 上的 Node.js 网页服务端：浏览文件目录、选择文件/文件夹压缩（多算法多格式）、按类型去重（硬链接）、带性能监控看板。
 >
-> 当前状态：**M0~M8 已完成 + 硬链接去重已上线 + 硬链接预检提示**（版本 `1.0.2`），二十套验收全绿。手机端 PWA（M9）待做。
+> 当前状态：**M0~M8 已完成 + 硬链接去重已上线 + 硬链接预检提示**（版本 `1.0.3`），二十套验收全绿。手机端 PWA（M9）待做。
 
 ## 界面预览
 
@@ -171,6 +171,7 @@ npm run build   # 构建前端产物到 web/dist
 
 | 版本 | 里程碑 | 内容 |
 |---|---|---|
+| **1.0.3** | **构建工具链升级 + 依赖收敛** | 构建工具 vite 5→8（打包器改 rolldown）、`@vitejs/plugin-vue` 6；`overrides.glob` 到 `14.0.3`，`npm audit` 10 → 4（剩余为 archiver 链已知风险）；`build-web.mjs` 加固：依赖缓存按 lock 指纹分目录、打包器探测兼容 rolldown；文档补密码压缩的传参契约（`options.capabilities.password`）与 archiver 链风险记录 |
 | **1.0.2** | **识别层外置 + 措辞清理** | 平台识别改由 `sys-id@0.1.0` 提供（`PLATFORM_PROFILE` 映射表仍在本项目，对外接口与行为不变）；公开文档与注释去掉只对单一机型成立的描述（CIFS noexec、无系统 zstd 等改为通用表述）；`prepublishOnly` 改用 `build:web`，在无 `.bin/vite`、原生模块无法加载的工作区也能完成发布前构建 |
 | **1.0.1** | **修 npx 启动** | 修一个让 `npx zipcalm` / 全局安装**完全不可用**的 bug：CLI 的「是否被直接执行」判据只比较 `path.resolve` 的字面路径，而 npm 在 `node_modules/.bin/` 下建的是**符号链接** —— 链接路径与真实路径字面不等，于是 `main()` 不跑、进程**静默 exit 0、零输出、服务不起**。改为比较 `realpath`（解析符号链接）。验证时用 `node <真实路径>` 跑所以一路没暴露，直到从 registry 装包跑 npx 才现形；新增 `cli` 套件（7 条）钉住这条，含符号链接调用用例，并已用「回退到旧判据」反向验证该用例确会变红。**同时**：构建不再产出 sourcemap（`.map` 是压缩产物的 5 倍大、且其 `sources` 会带出构建机目录结构），发布包 855 KB → **346 KB**；README 移除机器专属的依赖安装说明与内部参考快照段（此类内容归 `docs/14`） |
 | **1.0.0** | **npm 首发** | 可 `npx zipcalm` / `npm i -g zipcalm` 运行：新增 CLI（`bin/zipcalm.js`，只做参数→环境变量翻译）、`files` 白名单（只带 `bin/ server/ shared/ web/dist/ README LICENSE`，不含 docs）、首次运行自动生成随机口令配置；数据默认落 `~/.zipcalm`（含 fs-root/trash/logs/tasks.json），**从 git 仓库启动的行为一字未变**（数据仍在 `<项目根>/storage`）。README 里 29 处相对文档/图片链接改为绝对地址（npm 上才不 404） |

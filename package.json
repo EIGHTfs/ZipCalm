@@ -1,6 +1,6 @@
 {
   "name": "zipcalm",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "跑在 NAS 上的网页版文件管理与压缩工具：浏览、压缩、解压、按内容去重，含任务队列与性能看板",
   "private": false,
   "type": "module",
