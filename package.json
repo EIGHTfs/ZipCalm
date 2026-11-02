@@ -39,6 +39,7 @@
     "node-unrar-js": "2.0.2",
     "pinia": "2.3.1",
     "pretty-bytes": "6.1.0",
+    "sys-id": "0.1.0",
     "tar": "^7.5.1",
     "unzipper": "0.12.5",
     "uplot": "^1.6.32",
@@ -46,8 +47,8 @@
     "vue-router": "4.6.4"
   },
   "devDependencies": {
-    "vite": "^5",
-    "@vitejs/plugin-vue": "^5"
+    "@vitejs/plugin-vue": "^5",
+    "vite": "^5"
   },
   "repository": {
     "type": "git",

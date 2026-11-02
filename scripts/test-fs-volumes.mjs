@@ -70,6 +70,54 @@ async function main() {
   check('强制 synology → 模式 C', sidebarModeOf(detectPlatform({ env: { ZIPCALM_FORCE_PLATFORM: 'synology' } })) === 'C');
   check('非法强制值 → 回落真实探测（不抛错）', ['synology', 'posix', 'windows'].includes(detectPlatform({ env: { ZIPCALM_FORCE_PLATFORM: 'nonsense' } })));
 
+  // ===== 识别层接入（sys-id）：身份 → 本项目枚举 =====
+  // 身份由识别层给出（大写），本项目只做映射；其余身份一律 posix。
+  const IDENTITY_EXPECTATIONS = [
+    ['Synology', 'synology'],
+    ['Windows', 'windows'],
+    ['Linux', 'posix'],
+    ['Unknown', 'posix'],
+    ['macOS', 'posix'],
+    ['fnOS', 'posix'],
+  ];
+  for (const [identity, expected] of IDENTITY_EXPECTATIONS) {
+    const actual = detectPlatform({ env: { SYS_ID_FORCE_PLATFORM: identity } });
+    check(`身份 ${identity} → ${expected}`, actual === expected, `得到 ${actual}`);
+  }
+
+  // 本项目的小写强制值要能映射到识别层的身份（posix ↔ Linux）
+  const FORCE_EXPECTATIONS = [
+    ['synology', 'synology', 'C'],
+    ['windows', 'windows', 'B'],
+    ['posix', 'posix', 'B'],
+  ];
+  for (const [forcedValue, expectedPlatform, expectedMode] of FORCE_EXPECTATIONS) {
+    const platform = detectPlatform({ env: { ZIPCALM_FORCE_PLATFORM: forcedValue } });
+    check(`强制 ${forcedValue} → ${expectedPlatform}（模式 ${expectedMode}）`,
+      platform === expectedPlatform && sidebarModeOf(platform) === expectedMode,
+      `得到 ${platform} / 模式 ${sidebarModeOf(platform)}`);
+  }
+
+  // 非法强制值：识别层对非法 force 会抛错，本项目的契约是回落真实探测
+  const realPlatform = detectPlatform({ env: {} });
+  let illegalThrew = false;
+  let illegalResult = null;
+  try {
+    illegalResult = detectPlatform({ env: { ZIPCALM_FORCE_PLATFORM: 'nonsense' } });
+  } catch {
+    illegalThrew = true;
+  }
+  check('非法强制值不抛错，且与真实探测结果一致',
+    illegalThrew === false && illegalResult === realPlatform,
+    `结果 ${illegalResult} / 真实 ${realPlatform}`);
+
+  // existsSync 注入必须穿透到识别层（测试缝未断）
+  let probeCallCount = 0;
+  detectPlatform({ env: {}, existsSync: () => { probeCallCount += 1; return false; } });
+  check('existsSync 注入被识别层调用（测试缝未断）', probeCallCount > 0, `calls=${probeCallCount}`);
+  const markerOnly = detectPlatform({ env: {}, existsSync: (target) => target === '/etc/synoinfo.conf' });
+  check('只让群晖特征文件存在 → 判定为 synology', markerOnly === 'synology', `得到 ${markerOnly}`);
+
   // ===== 两模式数据源（纯函数：用本机真实卷/共享）=====
   const storageBase = { root: `${PROJECT_ROOT}/storage/fs-root`, roots: [] };
   const posixRoots = await listRoots({ storage: storageBase, env: { ZIPCALM_FORCE_PLATFORM: 'posix' } });
