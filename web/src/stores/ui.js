@@ -28,6 +28,8 @@ export const useUiStore = defineStore('ui', {
     currentRootId: 'default',
     /** 根列表（侧栏拉 /fs/volumes 后写入）：主区/抽屉要显示"我在哪个位置"，不能只有 id 没有名字 */
     roots: [],
+    /** 侧栏标题（**由后端平台画像下发**；前端不再自己判断平台）。空串时由 getter 给兜底文案 */
+    volumeLabel: '',
     /**
      * 根是否已"定下来"（含可读性探测）。
      * 文件页首屏必须等它：否则可能先按不可读的第一个根加载 → PERMISSION_DENIED（实测踩过）。
@@ -55,6 +57,10 @@ export const useUiStore = defineStore('ui', {
     currentRootLabel(state) {
       const matched = state.roots.find((root) => root.id === state.currentRootId);
       return matched && matched.label ? matched.label : state.currentRootId;
+    },
+    /** 侧栏标题：优先用后端下发的画像文案；还没有 payload 时用通用兜底（绝不显示 undefined/空白） */
+    sidebarTitle(state) {
+      return state.volumeLabel || '存储位置';
     },
     /** 当前目录的展示名：'/' 显示成「根目录」（与面包屑一致）；目录来自 fsPath，不是路由原文 */
     currentDirLabel(state) {
@@ -97,10 +103,11 @@ export const useUiStore = defineStore('ui', {
     /**
      * 写入"根已确定"的结论（侧栏探测完可读根后调用）。
      * 无论成功失败都要调用 —— 这是文件页首屏的放行信号。
-     * @param {{roots?: Array, mode?: string, rootId?: string, error?: string}} outcome
+     * @param {{roots?: Array, volumeLabel?: string, mode?: string, rootId?: string, error?: string}} outcome
      */
     setRootsResolved(outcome = {}) {
       if (Array.isArray(outcome.roots)) this.roots = outcome.roots;
+      if (typeof outcome.volumeLabel === 'string' && outcome.volumeLabel.length > 0) this.volumeLabel = outcome.volumeLabel;
       if (typeof outcome.rootId === 'string' && outcome.rootId.length > 0) this.currentRootId = outcome.rootId;
       this.rootsError = typeof outcome.error === 'string' ? outcome.error : '';
       this.rootsReady = true;

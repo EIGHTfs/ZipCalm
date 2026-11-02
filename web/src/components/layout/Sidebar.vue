@@ -35,11 +35,11 @@ const router = useRouter();
 
 // ===== 存储根（docs/16）：数据源由后端按平台决定（B 列卷 / C 列共享），前端只负责渲染 =====
 const roots = ref([]);
-const rootsMode = ref('');
 const rootsError = ref('');
 
-/** 标题随模式变：群晖是「位置」（用户心智是共享），其他是「存储卷」 */
-const rootsTitle = computed(() => (rootsMode.value === 'C' ? '位置' : '存储卷'));
+// 标题不再由前端判断平台：后端 /fs/volumes 下发 volumeLabel（平台画像的唯一出口），
+// 前端只渲染；拿不到时 store 的 sidebarTitle 给兜底文案。
+const rootsTitle = computed(() => ui.sidebarTitle);
 
 let rootsRetry = 0;
 
@@ -72,7 +72,6 @@ async function loadSidebarFormats() {
 function applyRootsPayload(payload) {
   rootsRetry = 0;
   roots.value = (payload && payload.roots) || [];
-  rootsMode.value = (payload && payload.mode) || '';
   // 存进 store：主区面包屑与压缩抽屉要显示"当前在哪个位置"，不能只靠侧栏自己知道
   ui.setRoots(roots.value);
   // 当前根不在列表里（如默认根在 C 模式下被隐藏）→ 落到第一个可用项，避免"切了根但列表全不亮"
@@ -100,10 +99,16 @@ function handleLoadFailure(error) {
 
 async function loadRoots() {
   try {
-    applyRootsPayload(await api.get('/fs/volumes'));
+    const payload = await api.get('/fs/volumes');
+    applyRootsPayload(payload);
     const readable = await ensureReadableRoot();
     // 放行文件页首屏：探测结果（含"全不可读"）必须写进 store，否则页面会一直等
-    ui.setRootsResolved({ roots: roots.value, mode: rootsMode.value, rootId: readable || ui.currentRootId, error: '' });
+    ui.setRootsResolved({
+      roots: roots.value,
+      volumeLabel: (payload && payload.volumeLabel) || '',
+      rootId: readable || ui.currentRootId,
+      error: '',
+    });
   } catch (error) {
     handleLoadFailure(error);
   }

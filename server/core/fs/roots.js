@@ -1,57 +1,39 @@
-// 存储根发现（docs/16）：平台探测 → 侧栏模式 → 卷/共享列表
+// 存储根发现（docs/16）：按平台画像决定根从哪来
 //
 // 心智模型（docs/16 §一）：本项目的「根」不是文件系统 `/`，而是**可配置的存储根**。
 // NAS 用户想的是"照片在哪个共享"，桌面用户想的是"先看卷"——所以两套数据源、同一个形状：
 //   B 模式（非群晖）：卷 / 挂载点（/volume1、/mnt/data）
 //   C 模式（群晖）：  /volumeN 下的共享文件夹（排除 @ / # 开头的系统目录）
 //
+// **平台判断不在本文件**：`PLATFORMS` / `SIDEBAR_MODES` / `detectPlatform` / `sidebarModeOf`
+// 全部由 `platformProfile.js` 提供（本文件只做 re-export 兼容既有调用方）。
+// 本文件只负责「拿到画像后怎么扫根」。
+//
 // 所有失败都降级：扫不到就空列表、statfs 失败就容量 null —— 列卷失败绝不能让文件页打不开。
 
-import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
 import { ERROR_CODES, apiError } from '../../lib/errors.js';
+import {
+  PLATFORMS,
+  SIDEBAR_MODES,
+  detectPlatform,
+  resolvePlatformProfile,
+  sidebarModeOf,
+} from './platformProfile.js';
 
-/** 平台常量（将来加厂商在这里加一个值即可） */
-export const PLATFORMS = Object.freeze({ SYNOLOGY: 'synology', WINDOWS: 'windows', POSIX: 'posix' });
-/** 侧栏模式：B = 列卷（默认）；C = 列共享文件夹（群晖） */
-export const SIDEBAR_MODES = Object.freeze({ VOLUMES: 'B', SHARES: 'C' });
+// 兼容导出：既有调用方/测试脚本仍从 roots.js 取这些名字，签名与语义保持不变
+export { PLATFORMS, SIDEBAR_MODES, detectPlatform, sidebarModeOf };
+
 /** 默认根在列表里的固定 id */
 export const DEFAULT_ROOT_ID = 'default';
 
-/** 群晖特征文件（docs/16 §2.1 实测依据） */
-const SYNOLOGY_MARKER = '/etc/synoinfo.conf';
-/** 群晖系统目录前缀：@appdata / @eaDir / #recycle 等不是共享 */
-const SYSTEM_DIR_PREFIX = /^[@#]/;
 /** B 模式的挂载点形态：/mnt/<name>、/media/<name>（只认一级，不认子目录） */
 const MOUNT_POINT_ONE_LEVEL = /^\/(mnt|media)\/[^/]+$/;
-/** 群晖卷名规则：/volume1 /volume2 ... */
-const SYNOLOGY_VOLUME = /^\/volume\d+$/;
 
 const statfsOf = (target) => fsp.statfs(target);
 const readdirOf = (target) => fsp.readdir(target, { withFileTypes: true });
-
-/**
- * 平台探测：环境变量覆盖优先（测试必需），其次群晖特征文件，最后按 Node platform 归类。
- * @param {{env?: object, existsSync?: (p: string) => boolean}} [options]
- */
-export function detectPlatform({ env = process.env, existsSync = fs.existsSync } = {}) {
-  const forced = env.ZIPCALM_FORCE_PLATFORM;
-  if (forced === PLATFORMS.SYNOLOGY || forced === PLATFORMS.POSIX || forced === PLATFORMS.WINDOWS) return forced;
-  try {
-    if (existsSync(SYNOLOGY_MARKER)) return PLATFORMS.SYNOLOGY;
-  } catch {
-    // 探测失败按"不是群晖"处理：回退 B 模式，不能因为探测异常让整个页面挂掉
-  }
-  if (process.platform === 'win32') return PLATFORMS.WINDOWS;
-  return PLATFORMS.POSIX;
-}
-
-/** 平台 → 侧栏模式（未知/将来厂商：默认 B，绝不白屏） */
-export function sidebarModeOf(platform) {
-  return platform === PLATFORMS.SYNOLOGY ? SIDEBAR_MODES.SHARES : SIDEBAR_MODES.VOLUMES;
-}
 
 /** 容量（statfs）；拿不到就两项都 null —— 契约要求降级不报错 */
 export async function rootStats(absPath) {
@@ -90,35 +72,38 @@ async function readMountPoints() {
   }
 }
 
+/** 顶层卷目录（/volumeN）—— 匹配规则由画像表提供，避免本文件另写一份 */
+async function listVolumeRoots(profile) {
+  const found = [];
+  for (const dirName of await listSubdirs('/')) {
+    const absPath = `/${dirName}`;
+    if (profile.volumePattern.test(absPath)) found.push(absPath);
+  }
+  return found.sort();
+}
+
 /**
  * B 模式：自动发现卷/挂载点。
- * 规则：/volumeN + /proc/mounts 里的 /mnt|/media 挂载点（去重，按路径排序）。
+ * 规则：画像表认可的 /volumeN + /proc/mounts 里的 /mnt|/media 挂载点（去重，按路径排序）。
  * 为什么不全用 /proc/mounts：容器里它会列出一堆伪文件系统（proc/sysfs/tmpfs），对用户无意义。
  */
-async function discoverVolumeDirs() {
-  const found = new Set();
-  for (const dirName of await listSubdirs('/')) {
-    if (/^volume\d+$/.test(dirName)) found.add(`/${dirName}`);
-  }
+async function discoverVolumeDirs(profile) {
+  const found = new Set(await listVolumeRoots(profile));
   // 只认"真正挂载了的"一级目录：/mnt/data、/media/usb 这种。
   // 不能拿 /mnt/* 的**子目录**当卷 —— 很多机器 /mnt 本身就是一个挂载点，里面全是普通目录（实测踩过）。
   for (const mountPoint of await readMountPoints()) {
     if (MOUNT_POINT_ONE_LEVEL.test(mountPoint)) found.add(mountPoint);
-    if (SYNOLOGY_VOLUME.test(mountPoint)) found.add(mountPoint);
+    if (profile.volumePattern.test(mountPoint)) found.add(mountPoint);
   }
   return [...found].sort();
 }
 
-/** C 模式：/volumeN 下的共享文件夹（排除 @ / # 系统目录） */
-async function discoverShares() {
-  const volumes = [];
-  for (const dirName of await listSubdirs('/')) {
-    if (/^volume\d+$/.test(dirName)) volumes.push(`/${dirName}`);
-  }
+/** C 模式：/volumeN 下的共享文件夹（排除画像表里的系统目录前缀，以及点开头的噪音目录） */
+async function discoverShares(profile) {
   const shares = [];
-  for (const volumeAbs of volumes.sort()) {
+  for (const volumeAbs of await listVolumeRoots(profile)) {
     for (const name of await listSubdirs(volumeAbs)) {
-      if (SYSTEM_DIR_PREFIX.test(name)) continue;
+      if (profile.systemDirPrefixes.some((prefix) => name.startsWith(prefix))) continue;
       // 点开头的目录（.pnpm-store / .git / .Trash …）对用户是噪音：
       // DSM 的共享文件夹本来就不会以点开头，列出来只会让列表变脏。
       if (name.startsWith('.')) continue;
@@ -131,14 +116,15 @@ async function discoverShares() {
 /**
  * 构造根列表。
  * - 配置了 storage.roots → 直接用（两种模式都用它；显式配置优先于自动发现）
- * - C 模式且没配置 → 扫共享；扫不到任何共享 → 回退列出默认根（避免侧栏空白）
- * - B 模式且没配置 → 扫卷；扫不到 → 只列默认根
+ * - rootsStrategy=shares 且没配置 → 扫共享；扫不到任何共享 → 回退列出默认根（避免侧栏空白）
+ * - rootsStrategy=volumes 且没配置 → 扫卷；扫不到 → 只列默认根
  * - ZIPCALM_SHOW_APP_ROOT=1 → 任何模式都额外列出默认根（标注「应用数据」）
+ *
+ * 返回体除根列表外还带 `volumeLabel`（侧栏标题由后端下发，前端不再自己判断平台）。
  * @param {{storage: object, env?: object}} options
  */
 export async function listRoots({ storage, env = process.env }) {
-  const platform = detectPlatform({ env });
-  const mode = sidebarModeOf(platform);
+  const profile = resolvePlatformProfile({ env });
   const configured = Array.isArray(storage.roots) && storage.roots.length > 0
     ? storage.roots.map((root) => ({ id: root.id, label: root.label || root.id, path: root.path }))
     : null;
@@ -147,11 +133,11 @@ export async function listRoots({ storage, env = process.env }) {
   let roots;
   if (configured) {
     roots = configured;
-  } else if (mode === SIDEBAR_MODES.SHARES) {
-    const shares = await discoverShares();
+  } else if (profile.rootsStrategy === 'shares') {
+    const shares = await discoverShares(profile);
     roots = shares.length > 0 ? shares : [defaultRoot];
   } else {
-    const volumes = await discoverVolumeDirs();
+    const volumes = await discoverVolumeDirs(profile);
     roots = volumes.length > 0
       ? volumes.map((volumePath) => ({ id: volumePath.replace(/^\/+/, ''), label: path.basename(volumePath), path: volumePath }))
       : [defaultRoot];
@@ -163,7 +149,14 @@ export async function listRoots({ storage, env = process.env }) {
   }
 
   const withStats = await Promise.all(roots.map(async (root) => ({ ...root, ...(await rootStats(root.path)) })));
-  return { platform, mode, roots: withStats, canSwitch: withStats.length > 1 };
+  return {
+    platform: profile.platform,
+    mode: profile.mode,
+    // 侧栏标题的唯一来源：平台画像 → 后端下发 → 前端只渲染
+    volumeLabel: profile.volumeLabel,
+    roots: withStats,
+    canSwitch: withStats.length > 1,
+  };
 }
 
 /**
