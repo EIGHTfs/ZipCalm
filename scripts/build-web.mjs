@@ -6,7 +6,7 @@
 //   1. 项目 `.npmrc` 设了 `bin-links=false`，安装后**没有** `node_modules/.bin/vite`，
 //      所以 `vite build` 这条命令根本不存在；
 //   2. 工作区是 CIFS（挂载带 noexec），即使显式 `node node_modules/vite/bin/vite.js`，
-//      vite/rollup 依赖的原生模块也无法被映射执行（ERR_DLOPEN_FAILED）。
+//      vite 依赖的原生模块（rollup/rolldown 的 .node）在 noexec 盘上无法被映射执行。
 // 因此在本地盘找一份可用的 node_modules，在那里执行构建，再把 dist 拷回来。
 //
 // 依赖落点优先级（都不写死绝对路径）：
@@ -19,6 +19,7 @@
 //   node scripts/build-web.mjs --skip-preflight
 //   ZIPCALM_WEB_DEPS=/path/to/node_modules node scripts/build-web.mjs
 
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -38,9 +39,26 @@ const DIST_OUT = path.join(WEB_DIR, 'dist');
 const BUILD_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** 关键包清单：任一缺失都说明这份 node_modules 不完整（复制中断/被裁剪） */
-const REQUIRED_PACKAGES = Object.freeze(['vite', 'esbuild', 'vue', '@vitejs/plugin-vue']);
+const REQUIRED_PACKAGES = Object.freeze(['vite', 'vue', '@vitejs/plugin-vue']);
 
-/** 判断某个 node_modules 是否可用（不是只看 vite 在不在——缺 esbuild 时构建照样起不来） */
+/**
+ * 打包器：vite 7 及更早用 esbuild，vite 8 起改用 rolldown。
+ * 两者**任一存在**即可 —— 写死某一个会让升级 vite 后的依赖校验误报"不完整"。
+ */
+const BUNDLER_PACKAGES = Object.freeze(['rolldown', 'esbuild']);
+
+
+/** package-lock.json 的短指纹（读不到就退回固定名，仍能工作） */
+async function lockFingerprint() {
+  try {
+    const lockText = await fsp.readFile(path.join(PROJECT_ROOT, 'package-lock.json'), 'utf8');
+    return createHash('sha256').update(lockText).digest('hex').slice(0, 12);
+  } catch {
+    return 'nolock';
+  }
+}
+
+/** 判断某个 node_modules 是否可用（关键包齐备 + 至少一个打包器） */
 async function hasDeps(depsDir) {
   for (const name of REQUIRED_PACKAGES) {
     try {
@@ -49,7 +67,15 @@ async function hasDeps(depsDir) {
       return false;
     }
   }
-  return true;
+  for (const name of BUNDLER_PACKAGES) {
+    try {
+      await fsp.access(path.join(depsDir, name, 'package.json'));
+      return true;
+    } catch {
+      // 换下一个打包器继续找
+    }
+  }
+  return false;
 }
 
 /** 递归复制（CIFS 上保留 mtime，不保留属主/权限——保留会 EPERM） */
@@ -160,7 +186,9 @@ async function main() {
   }
 
   const workDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'zipcalm-web-'));
-  const cacheRoot = path.join(os.tmpdir(), 'zipcalm-web-deps');
+  // 缓存按 lock 指纹分目录：依赖一升级（vite 换大版本等）就自动失效，
+  // 否则会静默沿用旧依赖构建，得到的产物与 package.json 不符（最容易骗过自己的坑）。
+  const cacheRoot = path.join(os.tmpdir(), `zipcalm-web-deps-${await lockFingerprint()}`);
   let cacheDeps = path.join(cacheRoot, 'node_modules');
   let ok = false;
 
@@ -179,13 +207,16 @@ async function main() {
     }
     process.stdout.write(`[build:web] 依赖目录 ${depsDir}\n`);
 
-    // 3. 先按原样构建；原生模块在 noexec 盘上会 ERR_DLOPEN_FAILED → 复制到本地缓存重试
+    // 3. 先按原样构建；原生模块在 noexec 盘上会加载失败 → 复制到本地缓存重试
     await linkDeps(workDir, depsDir);
     try {
       await runVite(workDir, depsDir);
     } catch (error) {
       const message = String((error && (error.stderr || error.message)) || '');
-      if (!message.includes('ERR_DLOPEN_FAILED')) throw error;
+      // 不同原生模块给出的文案不同（rollup: ERR_DLOPEN_FAILED；rolldown: failed to map segment /
+      // Cannot find native binding），统一按"原生模块加载失败"识别，才能覆盖 vite 5 与 vite 8
+      const nativeLoadFailed = /ERR_DLOPEN_FAILED|failed to map segment|Cannot find native binding/i.test(message);
+      if (!nativeLoadFailed) throw error;
       process.stdout.write('[build:web] 原生模块无法从当前依赖目录加载，复制到本地缓存后重试\n');
       cacheDeps = await seedDepsCache(cacheRoot);
       await linkDeps(workDir, cacheDeps);

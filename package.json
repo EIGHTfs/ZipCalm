@@ -48,8 +48,8 @@
     "vue-router": "4.6.4"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^5",
-    "vite": "^5"
+    "@vitejs/plugin-vue": "6.0.10",
+    "vite": "8.3.5"
   },
   "license": "MIT",
   "repository": {
@@ -65,5 +65,8 @@
     "synology",
     "self-hosted"
   ],
-  "author": "EIGHTfs"
+  "author": "EIGHTfs",
+  "overrides": {
+    "glob": "^14.0.3"
+  }
 }
