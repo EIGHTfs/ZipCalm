@@ -6,7 +6,7 @@
 //
 // 覆盖：
 //   - toSharePath 的边界（/volume10 两位数卷号、@appdata、#recycle、卷根、共享根、非 /volumeN）
-//   - detect() 本机可用性
+//   - detect() 在当前环境的可用性
 //   - unlinkFile 真删一个自建文件 → ok + 原位消失
 //   - unlinkFile 传 @appdata → not_in_share（**不执行**）
 //   - unlinkFile 传不存在文件 → not_found
@@ -23,7 +23,7 @@ import path from 'node:path';
 
 import { detect, rmdirDir, toSharePath, unlinkFile } from '../server/core/fs/systemTrash.js';
 
-/** 夹具放在一个真实共享里（/volume1/VirtualDSM 是本机确认可写的共享） */
+/** 夹具放在一个真实共享里（/volume1/VirtualDSM 是验证环境确认可写的共享） */
 const FIXTURE_ROOT = '/volume1/VirtualDSM';
 const FIXTURE_NAME = `zipcalm-systemtrash-test-${process.pid}-${Date.now()}`;
 const FIXTURE_DIR = path.join(FIXTURE_ROOT, FIXTURE_NAME);
@@ -98,7 +98,7 @@ async function main() {
   const detected = detect();
   check('detect() 返回结构完整', typeof detected.available === 'boolean' && 'binary' in detected, JSON.stringify(detected));
   if (!detected.available) {
-    console.log('SKIP | 本机没有 /usr/syno/bin/synorecycle，跳过真实删除相关用例（非群晖环境属预期）');
+    console.log('SKIP | 当前环境没有 /usr/syno/bin/synorecycle，跳过真实删除相关用例（非群晖环境属预期）');
     console.log(`\nPASS ${pass} / FAIL ${fail}`);
     return;
   }

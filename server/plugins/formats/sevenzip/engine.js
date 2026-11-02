@@ -1,6 +1,6 @@
 // 7z 外部引擎封装（三级回退：系统 7z/7za → WASM 引擎 → 不可用）
 //
-// 为什么先探测系统二进制：本机 `/bin/7z`（p7zip 16.02）零新增依赖、零加载开销，
+// 为什么先探测系统二进制：系统 `/bin/7z`（p7zip 16.02）零新增依赖、零加载开销，
 // 只有部署机上没有 7z 时才需要 WASM 兜底（WASM 引擎需额外依赖，见 docs/18 §附四）。
 //
 // 实测事实（p7zip 16.02，本项目验证环境）：
@@ -52,7 +52,7 @@ export async function makeLocalWorkDir(prefix) {
 /**
  * 把本地盘上的文件搬到目标路径（可能是 CIFS 网络盘）。
  *
- * **不能用 `fs.copyFile`**：本机 CIFS 挂载上它必报 `EPERM: operation not permitted, copyfile`
+ * **不能用 `fs.copyFile`**：CIFS 挂载上它必报 `EPERM: operation not permitted, copyfile`
  * （实测 copyFile / COPYFILE_EXCL 都失败，而 `readFile+writeFile` 与流式 pipeline 都成功）。
  * 这里用流式管道：内存占用与文件大小无关，适合大压缩包。
  */
@@ -61,7 +61,7 @@ export async function copyLocalToTarget(sourcePath, targetPath) {
 }
 
 // CPU 纪律（绑核「总核数 − 1」+ nice + 全局串行）统一由 `server/core/engineRunner.js` 提供，与 7z 共用同一把锁。
-// 这是部署环境约束（本机 3 核、跑满会触发宿主保护），不是 7z 私有实现，RAR 的 js 引擎同样要用。
+// 这是部署环境约束（CPU 核数少的机器上跑满可能影响系统响应），不是 7z 私有实现，RAR 的 js 引擎同样要用。
 
 /** 探测结果缓存（60s，与格式注册表的可用性缓存同频） */
 const PROBE_TTL_MS = 60 * 1000;

@@ -8,7 +8,7 @@
 // - 缺密码与错密码在 unrar 侧**同为 exit 11 + 同一句提示**，无法从输出区分 —— 只能由调用方
 //   根据"我们有没有传密码"来判定 MISSING_PASSWORD / BAD_PASSWORD（三态口径见 P4）
 // - 损坏包 exit 1（"Unexpected end of archive" / "Total errors: N"）
-// - p7zip 16.02 对 rar5 返回 exit 2（本机实测），所以 **unrar 是唯一可靠后端**，7z 仅作兜底
+// - p7zip 16.02 对 rar5 返回 exit 2（实测），所以 **unrar 是唯一可靠后端**，7z 仅作兜底
 
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';

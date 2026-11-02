@@ -104,7 +104,7 @@ export default {
     // 统一走 7z 试解：
     // unzipper 只有 ZipCrypto 的解密实现，AES-256 包（compressionMethod=99）会被它
     // 当成普通 inflate 解读 → 报「inflate 失败/坏数据」或 BAD_PASSWORD，属**假阴性**。
-    // 7-Zip 两种加密都能读，且本机与 NAS 上通常都有；探测不到时明确报错，不静默放行。
+    // 7-Zip 两种加密都能读，且本地环境与 NAS 上通常都有；探测不到时明确报错，不静默放行。
     return verifyWith7z(archivePath, params.password);
   },
 

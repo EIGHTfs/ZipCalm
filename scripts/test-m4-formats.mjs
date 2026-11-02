@@ -10,7 +10,7 @@
 // 验证要点（M4 验收标准要求的三条硬证据）：
 // - **假数据 + 每文件 hash 逐文件比对**：压缩前记录 sha256，解压后逐文件比对（正确性核心证据）；
 // - **外部工具交叉验证，不自证**：`7z t`（zip）/ `tar -tf`（tar）/ `tar -tzf`（tar.gz）；
-//   tar.zst 本机无 zstd 命令，故先用 Node 只做 zstd 解压、再用系统的 `tar -tf` 校验 tar 层；
+//   tar.zst 在部分环境无 zstd 命令，故先用 Node 只做 zstd 解压、再用系统的 `tar -tf` 校验 tar 层；
 // - zip-slip：zip 用手写 ZIP 记录、tar 系列用 node-tar 直接写 `../evil` 条目名。
 
 import fsp from 'node:fs/promises';
@@ -229,7 +229,7 @@ async function caseZstdFallbackChain() {
   // ② 禁用内置 + 指向垫片 → 走"系统命令"回退，且仍能往返
   // 垫片是"外部 zstd 命令"的替身，必须放在**可 chmod 且可执行**的目录：
   // 工作区是 CIFS（chmod 返回 EPERM、挂载 noexec），放那里回退链验证会变成假阴性。
-  // 落点默认 os.tmpdir()（本机为套件数据盘的 tmp，chmod 与执行都可用），
+  // 落点默认 os.tmpdir()（默认解析到可 chmod 且可执行的临时目录），
   // 可用 ZIPCALM_TEST_TMP 覆盖成任意满足条件的目录；不写死任何绝对路径。
   const shimRoot = process.env.ZIPCALM_TEST_TMP || os.tmpdir();
   const shimDir = path.join(shimRoot, `zipcalm-m4-${process.pid}`);

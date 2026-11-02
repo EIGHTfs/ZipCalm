@@ -432,15 +432,15 @@ async function makeFakeUnrar(version) {
 
 /**
  * 引擎回退链验收：
- *   ① 本机 unrar（5.70 < 7.0）→ 用原生但 filenameSafe=false
+ *   ① 当前环境 unrar（5.70 < 7.0）→ 用原生但 filenameSafe=false
  *   ② 假新版 unrar（7.23）→ filenameSafe=true
  *   ③ 强制 js → kind=js，且 rar4/rar5/多卷/加密三态 能力不退化
  *   ④ 两者都没有 → available=false + 原因可读
  */
 async function runEngineChainPhase() {
-  // ① 本机现状
+  // ① 当前环境
   const nativeProbe = rarPlugin.probe();
-  check('回退链①：本机走原生 unrar，且按版本判定文件名不可靠',
+  check('回退链①：当前环境走原生 unrar，且按版本判定文件名不可靠',
     nativeProbe.kind === 'unrar' && /^\d/.test(String(nativeProbe.version)) && nativeProbe.filenameSafe === false,
     JSON.stringify(nativeProbe));
 

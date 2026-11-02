@@ -2,7 +2,7 @@
 /*
  * zstd 命令垫片（**仅用于测试**：验证「Node 内置不可用时回退系统 zstd 命令」这条链路）
  *
- * 本机没有系统 zstd（docs/02 实测），所以回退链没法用真二进制验证。
+ * 部分环境没有系统 zstd（docs/02 实测），所以回退链没法用真二进制验证。
  * 这个垫片实现 zstd CLI 的最小可用表面（`-N` 级别 / `-d` 解压 / `-q` 安静 / `-c` 输出到 stdout），
  * 内部直接用 node:zlib 的 zstd 做同样的活 —— 于是"回退到外部命令"的代码路径可以被端到端验证：
  *   ZIPCALM_DISABLE_BUILTIN_ZSTD=1 ZC_ZSTD_BIN=<本垫片> → 服务仍应能跑 .tar.zst 往返。

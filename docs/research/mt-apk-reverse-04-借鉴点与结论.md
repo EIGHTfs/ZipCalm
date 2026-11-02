@@ -125,7 +125,7 @@ MT 的进度模型：`总进度`（整体）+ `正在写出文件 %d个文件`�
 4. `zstd-jni` 能否打进 MT 插件（dex 模式 + jniLibs 打包兼容性）
 5. 插件进程能否直连局域网 NAS（预期能，需确认）
 
-**本机缺工具导致未做**：
+**缺工具导致未做**：
 6. `libmt1/2/3.so` 的导出符号扫描（无 `nm`/`readelf`）——`[推断]` 与压缩无关，因压缩已确认走 Java 层
 7. jadx 全量反编译（宿主类名混淆，收益低；如需读 sevenzipjbinding / zstd-jni 库源码可单独跑，它们类名未混淆）
 8. `assets/0`~`assets/9`、`android_dex`、`compile_dex` 的内容（自定义资源包，未解出）

@@ -118,7 +118,7 @@ async function main() {
   const markerOnly = detectPlatform({ env: {}, existsSync: (target) => target === '/etc/synoinfo.conf' });
   check('只让群晖特征文件存在 → 判定为 synology', markerOnly === 'synology', `得到 ${markerOnly}`);
 
-  // ===== 两模式数据源（纯函数：用本机真实卷/共享）=====
+  // ===== 两模式数据源（纯函数：用真实卷/共享）=====
   const storageBase = { root: `${PROJECT_ROOT}/storage/fs-root`, roots: [] };
   const posixRoots = await listRoots({ storage: storageBase, env: { ZIPCALM_FORCE_PLATFORM: 'posix' } });
   check('posix 发现的是卷（/volumeN 或 /mnt|/media 一级挂载点）',

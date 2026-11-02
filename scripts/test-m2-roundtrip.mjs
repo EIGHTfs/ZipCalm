@@ -181,9 +181,9 @@ async function main() {
     await execFileAsync('unzip', ['-t', archiveAbsPath], { timeout: 30000 });
     check('unzip -t 外部校验通过', true);
   } catch (error) {
-    // 本机可能没装 unzip（实测 Synology 上只有 7z/zip）；缺工具时显式跳过而不是判失败
+    // 部分环境可能没装 unzip（实测 Synology 上只有 7z/zip）；缺工具时显式跳过而不是判失败
     const missing = error && (error.code === 'ENOENT' || /command not found/i.test(String(error.stderr || error.message)));
-    if (missing) skip('unzip -t 外部校验通过', '本机未安装 unzip（改用 7z t 交叉验证）');
+    if (missing) skip('unzip -t 外部校验通过', '当前环境未安装 unzip（改用 7z t 交叉验证）');
     else check('unzip -t 外部校验通过', false, (error.stderr || error.message || '').toString().slice(0, 120));
   }
 

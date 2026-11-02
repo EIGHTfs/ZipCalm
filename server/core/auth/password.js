@@ -1,7 +1,7 @@
 // 密码哈希（scrypt，Node 内置，零依赖）
 //
 // 为什么不用明文比较、也不引 bcrypt：NAS 上不想再引原生编译依赖（项目原则：优先成熟库，但
-// 这里的"成熟库"bcrypt/argon2 都要原生编译，在本机 noexec/NFS 环境下风险高）。
+// 这里的"成熟库"bcrypt/argon2 都要原生编译，在 noexec 挂载等受限环境下风险高）。
 // Node 内置 scrypt 属标准方案，格式自带参数，便于将来升级参数而不破坏老哈希。
 //
 // 存储格式：scrypt$N$r$p$<salt-base64>$<hash-base64>

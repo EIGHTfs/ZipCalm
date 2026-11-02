@@ -95,7 +95,7 @@ export function lanAddress() {
 /**
  * 首次运行引导：数据目录里没有 config.json 时，生成一份**带随机口令**的最小配置。
  *
- * 为什么必须做：仓库里那份 config.json 是 gitignore 的运行态文件（含本机口令），**不会进 npm 包**；
+ * 为什么必须做：仓库里那份 config.json 是 gitignore 的运行态文件（含运行机器的口令），**不会进 npm 包**；
  * 而配置校验要求 auth.password 或 auth.passwordHash 二选一，缺了就启动失败。
  * 这里给新用户生成随机口令并打印一次 —— 比内置默认口令安全（不会所有人都是 admin/zipcalm）。
  *

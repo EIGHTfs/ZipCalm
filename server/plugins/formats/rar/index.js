@@ -314,7 +314,7 @@ export default {
    *
    * 为什么必须由本插件提供、而不是让编排层统一用 7z：
    * p7zip 16.02 读不了加密 RAR5（实测报 `Can not open the file as archive`），
-   * 而本机 `unrar 5.70` 可以。工具能力按格式不同，这个知识属于插件自己。
+   * 而 `unrar 5.70` 可以（实测）。工具能力按格式不同，这个知识属于插件自己。
    *
    * @param {string} archivePath
    * @param {string} password

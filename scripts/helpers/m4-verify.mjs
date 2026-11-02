@@ -3,7 +3,7 @@
 // 为什么要外部工具：只靠本项目的 compress → extract 自证，等于"用同一套假设验证同一套假设"。
 // 这里用系统 `tar`/`7z` 独立读出内容清单，证明产物是**通用工具能认的**标准归档。
 //
-// tar.zst 的特殊处理：本机没有 `zstd` 命令（docs/02 已实测），所以只用 Node 解 zstd 那一层，
+// tar.zst 的特殊处理：部分环境没有 `zstd` 命令（docs/02 已实测），所以只用 Node 解 zstd 那一层，
 // 再把解出来的 tar 交给系统 `tar -tf` 校验 —— zstd 层用 Node、tar 层用外部工具，仍然不是自证（并在汇报里写明）。
 
 import { execFileAsync } from './script-env.mjs';
@@ -65,14 +65,14 @@ async function verifyZstdArchive({ archiveAbsPath, workDir, report }) {
     report.check(externalCheckName('tar -tf（tar.zst）'), false, String(error.message).slice(0, DETAIL_MAX_CHARS));
   }
 
-  // 7z 支持 zstd 的话再补一条；本机不支持则如实 SKIP（不假装通过）
+  // 7z 支持 zstd 的话再补一条；当前环境不支持则如实 SKIP（不假装通过）
   const sevenZipLabel = '7z l（tar.zst）';
   try {
     const { stdout } = await runTool('7z', ['l', archiveAbsPath]);
     const entries = listEntries(stdout).filter((line) => /\d{4}-\d{2}-\d{2}/.test(line)).length;
     report.check(externalCheckName(sevenZipLabel), entries >= MIN_EXPECTED_ENTRIES, `${entries} 个条目`);
   } catch (error) {
-    report.skip(externalCheckName(sevenZipLabel), `本机 7z 不支持 zstd：${String(error.stderr || error.message).slice(0, 60)}`);
+    report.skip(externalCheckName(sevenZipLabel), `当前环境 7z 不支持 zstd：${String(error.stderr || error.message).slice(0, 60)}`);
   }
 }
 

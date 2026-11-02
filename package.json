@@ -1,6 +1,7 @@
 {
   "name": "zipcalm",
-  "version": "1.0.1",
+  "version": "1.0.2",
+  "description": "跑在 NAS 上的网页版文件管理与压缩工具：浏览、压缩、解压、按内容去重，含任务队列与性能看板",
   "private": false,
   "type": "module",
   "engines": {
@@ -13,7 +14,7 @@
     "preview": "vite preview --config web/vite.config.js",
     "start": "node server/boot.js",
     "check:drift": "node scripts/check-drift.js",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build:web"
   },
   "bin": {
     "zipcalm": "bin/zipcalm.js"
@@ -50,12 +51,11 @@
     "@vitejs/plugin-vue": "^5",
     "vite": "^5"
   },
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/EIGHTfs/ZipCalm.git"
   },
-  "license": "MIT",
-  "author": "EIGHTfs",
   "keywords": [
     "nas",
     "compression",
@@ -64,5 +64,6 @@
     "zstd",
     "synology",
     "self-hosted"
-  ]
+  ],
+  "author": "EIGHTfs"
 }

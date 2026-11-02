@@ -1,7 +1,7 @@
 // 7z 格式包（**双向**：可压缩、可解压）
 //
 // 引擎：三级回退链（见 engine.js 与 docs/18 §附四）——
-//   ① 系统 7z / 7za（本机 p7zip 16.02）→ 默认走这条，零新增依赖
+//   ① 系统 7z / 7za（如 p7zip 16.02）→ 默认走这条，零新增依赖
 //   ② WASM 引擎（js7z-tools，MT）→ **尚未接入调用适配**（依赖需额外安装，见 docs/17 D-7）
 //   ③ 都没有 → available=false + unavailableReason 说明
 //
@@ -287,7 +287,7 @@ async function create(ctx) {
   const outputPath = localWorkDir ? path.join(localWorkDir, path.basename(ctx.tempPath)) : ctx.tempPath;
 
   // 逐个源、分批把条目名当**命令行参数**传给 7z（cwd = 源的父目录，条目名即"源名/子路径"）。
-  // 为什么不用 `-i@listfile`：本机 p7zip 16.02 是 `Utf16=off` 构建，读 UTF-8 listfile 里的中文名会报
+  // 为什么不用 `-i@listfile`：p7zip 16.02 是 `Utf16=off` 构建，读 UTF-8 listfile 里的中文名会报
   // `????: No more files`（实测），而中文名走 argv 是正常的。分批是为了避免参数过长撞 ARG_MAX。
   const MAX_ARGS_CHARS = 60000;
   for (const group of plan.perSource) {

@@ -116,7 +116,7 @@ async function ensureService() {
 async function main() {
   // ===== 一、引擎与可用性 =====
   const available = await sevenZip.available();
-  check('available() 为 true（本机有系统 7z）', available === true);
+  check('available() 为 true（当前环境有系统 7z）', available === true);
   if (!available) {
     reporter.skip('7z 全部用例', await sevenZip.unavailableReason());
     reporter.summary();

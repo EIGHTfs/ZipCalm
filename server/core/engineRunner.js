@@ -1,7 +1,7 @@
 // 外部引擎统一执行入口（**所有** 走外部程序/WASM 的格式插件都必须经这里）
 //
 // 为什么要有这一层（而不是各插件自己 spawn）：
-//   限核、超时硬杀、全局串行是**部署环境约束**（本机只有 3 核，跑满会触发宿主"系统 CPU 过载"保护，
+//   限核、超时硬杀、全局串行是**部署环境约束**（CPU 核数少的机器上跑满会触发宿主"系统 CPU 过载"保护，
 //   实测已造成过一次 503），不是某个格式的特性。散在各插件里 → 每加一个格式就漏一次；
 //   各插件各有一把串行锁时，7z 任务与 RAR 任务还能同时跑，一起把 CPU 打满。
 //
@@ -12,7 +12,7 @@
 //   ① 应用层线程数：7z 原生 `-mmt=N`（产物 md5 与线程数无关，实测一致）。
 //      但 **unrar 没有线程参数、7z WASM 库内固定 3 线程**，所以这一层不能兜底，只能锦上添花。
 //   ② OS 级绑核：Linux `taskset -c <list>`（实测可把 Cpus_allowed_list 收到指定核）；
-//      Windows 可用 PowerShell 启动后设 `ProcessorAffinity`（**本机无 Windows，未实测**）；
+//      Windows 可用 PowerShell 启动后设 `ProcessorAffinity`（**当前环境无 Windows，未实测**）；
 //      **macOS 没有可用绑核手段**（taskpolicy 只调 QoS、cpuset 是 FreeBSD 的）→ 如实跳过。
 //   ③ 优先级：Linux/macOS `nice -n 10`；Windows `PriorityClass = Idle`。
 //
@@ -174,7 +174,7 @@ export function detectStrategy(probe = {}) {
  *   - Linux 的 `taskset`/`nice` 是 exec 直通，退出码就是引擎的退出码 ✅
  *   - Windows 的 `cmd /c start /wait` **不保证透传子进程退出码**（start 返回的是自身结果），
  *     所以这里**不用 start**，改用 PowerShell：`Start-Process -Wait -PassThru` 后读 `ExitCode` 并 `exit`，
- *     这样拿到的才是引擎的退出码。⚠️ 该分支未在真机验证（本机只有 Linux），已在 docs/17 登记。
+ *     这样拿到的才是引擎的退出码。⚠️ 该分支未在真机验证（开发环境只有 Linux），已在 docs/17 登记。
  *
  * @param {{command: string, args: string[]}} spec
  * @param {{strategy?: object, cores?: number, cpuList?: string, mask?: string}} [context]

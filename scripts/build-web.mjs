@@ -2,7 +2,7 @@
 //
 // 前端构建（CIFS 兼容）：源码镜像到本地临时目录 → 用可用的 node_modules 跑 vite → 产物拷回 web/dist
 //
-// 为什么必须绕到本地盘（两条都是本机实测的硬限制，不是保守估计）：
+// 为什么必须绕到本地盘（两条都是实测的硬限制，不是保守估计）：
 //   1. 项目 `.npmrc` 设了 `bin-links=false`，安装后**没有** `node_modules/.bin/vite`，
 //      所以 `vite build` 这条命令根本不存在；
 //   2. 工作区是 CIFS（挂载带 noexec），即使显式 `node node_modules/vite/bin/vite.js`，

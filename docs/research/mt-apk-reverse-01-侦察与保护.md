@@ -107,7 +107,7 @@ usesCleartextTraffic="true"
 3. Python 正则扫 dex 可打印串：`re.findall(rb'[\x20-\x7e]{4,}', data)`
 4. `resources.arsc` 用 `data.decode('utf-8','ignore')` 后按关键词取上下文片段（UTF-16LE 无效，实测为 UTF-8）
 
-> ⚠️ **路径坑（本机实测）**：含中文的路径传给 `java -jar` 会失败（报 `?????` 路径错误）。**必须先把 jar/apk 复制到纯 ASCII 路径（如 `/tmp/mtdec/`）再执行**。这是本次唯一踩的坑。
+> ⚠️ **路径坑（实测）**：含中文的路径传给 `java -jar` 会失败（报 `?????` 路径错误）。**必须先把 jar/apk 复制到纯 ASCII 路径（如 `/tmp/mtdec/`）再执行**。这是本次唯一踩的坑。
 
 ## 四、未验证项
 
