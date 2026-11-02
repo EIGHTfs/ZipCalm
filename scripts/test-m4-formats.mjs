@@ -49,6 +49,8 @@ const FORMATS = [
 ];
 
 let TOKEN = null;
+/** zstd 垫片目录（用例里创建、清理阶段删除；模块级持有以避免作用域问题） */
+let SHIM_DIR = '';
 // 断言/跳过/汇总统一走共用报告器（输出格式与既有套件逐字一致，test-all.sh 靠它提取总结行）
 /** HTTP 调用超时（毫秒）：服务僵死/半开连接时脚本不能永久挂住 */
 const HTTP_TIMEOUT_MS = 15000;
@@ -225,19 +227,22 @@ async function caseZstdFallbackChain() {
   check('zstd 首选：Node 内置可用时 tarzst available=true', Boolean(builtin && builtin.available === true), `available=${builtin && builtin.available}`);
 
   // ② 禁用内置 + 指向垫片 → 走"系统命令"回退，且仍能往返
-  // 垫片必须放在**可执行挂载**上：工作区是 noexec（依赖装在 zipcalm-build 就是这个原因），
-  // 放 storage/ 下即使有 +x 也会被 EACCES 拒绝，回退链验证会变成假阴性。
-  // 从「已解析的运行时依赖」反推 node_modules 真实位置，取其父目录作为可执行落点。
-  // 不假设 node_modules 落在项目根 —— 依赖可能装在别的可执行卷、经父级目录解析到。
-  const _nmMarker = `${path.sep}node_modules${path.sep}`;
-  const _resolvedDep = (await import('node:module')).createRequire(import.meta.url).resolve('fastify');
-  const _nmIdx = _resolvedDep.lastIndexOf(_nmMarker);
-  if (_nmIdx === -1) throw new Error(`无法从 ${_resolvedDep} 反推 node_modules 位置`);
-  const buildDir = _resolvedDep.slice(0, _nmIdx);
-  const shimPath = path.join(buildDir, 'm4-tmp', 'zstd-shim');
-  await fsp.mkdir(path.dirname(shimPath), { recursive: true });
+  // 垫片是"外部 zstd 命令"的替身，必须放在**可 chmod 且可执行**的目录：
+  // 工作区是 CIFS（chmod 返回 EPERM、挂载 noexec），放那里回退链验证会变成假阴性。
+  // 落点默认 os.tmpdir()（本机为套件数据盘的 tmp，chmod 与执行都可用），
+  // 可用 ZIPCALM_TEST_TMP 覆盖成任意满足条件的目录；不写死任何绝对路径。
+  const shimRoot = process.env.ZIPCALM_TEST_TMP || os.tmpdir();
+  const shimDir = path.join(shimRoot, `zipcalm-m4-${process.pid}`);
+  SHIM_DIR = shimDir;
+  const shimPath = path.join(shimDir, 'zstd-shim');
+  await fsp.mkdir(shimDir, { recursive: true });
   await fsp.writeFile(shimPath, `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(path.join(PROJECT_ROOT, 'scripts/helpers/zstd-shim.mjs'))} "$@"\n`, 'utf8');
-  await fsp.chmod(shimPath, 0o755);
+  try {
+    await fsp.chmod(shimPath, 0o755);
+  } catch (error) {
+    // 不静默跳过：这条断言本来就验证"外部命令可用"，没执行位就等于没测到
+    throw new Error(`无法给 zstd 垫片加执行位（${error.code || error.message}）：${shimPath}。请用 ZIPCALM_TEST_TMP 指向可 chmod 且可执行的目录（当前为 ${shimRoot}）`);
+  }
 
   await restartService({ ZIPCALM_DISABLE_BUILTIN_ZSTD: '1', ZC_ZSTD_BIN: shimPath });
   await api('POST', '/auth/login', LOGIN).then((r) => { TOKEN = r.json.data.token; });
@@ -370,14 +375,8 @@ async function cleanupArtefacts() {
     return;
   }
   await fsp.rm(WORK, { recursive: true, force: true }).catch(() => {});
-  // 从「已解析的运行时依赖」反推 node_modules 真实位置，取其父目录作为可执行落点。
-  // 不假设 node_modules 落在项目根 —— 依赖可能装在别的可执行卷、经父级目录解析到。
-  const _nmMarker = `${path.sep}node_modules${path.sep}`;
-  const _resolvedDep = (await import('node:module')).createRequire(import.meta.url).resolve('fastify');
-  const _nmIdx = _resolvedDep.lastIndexOf(_nmMarker);
-  if (_nmIdx === -1) throw new Error(`无法从 ${_resolvedDep} 反推 node_modules 位置`);
-  const buildDir = _resolvedDep.slice(0, _nmIdx);
-  await fsp.rm(path.join(buildDir, 'm4-tmp'), { recursive: true, force: true }).catch(() => {});
+  // 垫片目录（在可 chmod 可执行的临时目录里）用完即删
+  if (SHIM_DIR) await fsp.rm(SHIM_DIR, { recursive: true, force: true }).catch(() => {});
 }
 
 main().catch(async (error) => {

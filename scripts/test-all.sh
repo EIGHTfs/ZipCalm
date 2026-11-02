@@ -59,11 +59,19 @@ echo
 CPU_TOTAL=$(node -e "process.stdout.write(String(require('node:os').availableParallelism()))" 2>/dev/null || echo 2)
 CPU_LIMIT=$(( CPU_TOTAL > 1 ? CPU_TOTAL - 1 : 1 ))
 CPU_LIST=$(node -e "process.stdout.write(Array.from({length:Number(process.argv[1])},(_,i)=>i).join(','))" "$CPU_LIMIT" 2>/dev/null || echo 0)
+# build 套件选哪条命令：
+# - 常规环境有 node_modules/.bin/vite → 直接用 `npm run build`（vite 走本地可执行 shim）
+# - CIFS 工作区（.npmrc bin-links=false 不生成 .bin；原生模块也无法 dlopen）
+#   → 用 `npm run build:web`（镜像到本地盘构建后把 dist 拷回），两条都含 check-drift 前置校验
+BUILD_TARGET="npm run build"
+if [ ! -x "${PROJECT_ROOT}/node_modules/.bin/vite" ] && node -e "process.exit(require('node:fs').existsSync('scripts/build-web.mjs')?0:1)"; then
+  BUILD_TARGET="npm run build:web"
+fi
 if has build; then
   if command -v taskset >/dev/null 2>&1; then
-    run_one build taskset -c "$CPU_LIST" nice -n 10 npm run build
+    run_one build taskset -c "$CPU_LIST" nice -n 10 ${BUILD_TARGET}
   else
-    run_one build nice -n 10 npm run build
+    run_one build nice -n 10 ${BUILD_TARGET}
   fi
 fi
 

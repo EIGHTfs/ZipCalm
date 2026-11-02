@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "vite --config web/vite.config.js",
     "build": "node scripts/check-drift.js && vite build --config web/vite.config.js",
+    "build:web": "node scripts/build-web.mjs",
     "preview": "vite preview --config web/vite.config.js",
     "start": "node server/boot.js",
     "check:drift": "node scripts/check-drift.js",
